@@ -1,0 +1,8 @@
+{
+  "name": "voice-command",
+  "version": "1.0.0",
+  "description": "Control an active Claude Code session from a phone via ElevenLabs voice.",
+  "author": {
+    "name": "cc-voice-control"
+  }
+}
