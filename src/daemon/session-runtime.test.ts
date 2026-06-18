@@ -38,7 +38,7 @@ describe("DaemonSessionRuntime", () => {
     });
     expect(runtime.drainOutboundEvents()).toEqual([
       expect.objectContaining({ type: "session_status" }),
-      { type: "ack", requestId: "request-1", message: "Sent to Claude Code." }
+      { type: "ack", requestId: "request-1", message: "Delivered to Claude Code." }
     ]);
 
     await expect(runtime.nextMessage(0)).resolves.toMatchObject({
@@ -200,9 +200,9 @@ describe("DaemonSessionRuntime", () => {
       expect.objectContaining({ id: "request-2", status: "pending" })
     ]);
     expect(runtime.drainOutboundEvents()).toContainEqual({
-      type: "claude_reply",
+      type: "ack",
       requestId: "request-2",
-      text: "Queued after the current task."
+      message: "Delivered to Claude Code."
     });
 
     expect(runtime.checkControlMessage(false)).toMatchObject({

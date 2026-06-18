@@ -1,417 +1,512 @@
-import type { BrowserToDaemonEvent, DaemonToBrowserEvent } from "../../src/shared/protocol";
-
 export type BrowserClientScriptInput = {
   sessionId: string;
   token: string;
 };
 
-type ToolDaemonEventType = Extract<
-  BrowserToDaemonEvent["type"],
-  "voice_instruction" | "status_request" | "summary_request" | "steering_note" | "interrupt"
->;
-type BrowserWaitEventType = Extract<DaemonToBrowserEvent["type"], "voice_signed_url" | "claude_reply" | "ack">;
-type ClientToolWaitFor = Extract<BrowserWaitEventType, "claude_reply" | "ack">;
-
-export type ElevenLabsClientToolMapping = {
-  toolName: string;
-  eventType: ToolDaemonEventType;
-  waitFor: ClientToolWaitFor;
-  textParameter?: string;
-  defaultText?: string;
-};
-
-export const ELEVENLABS_CLIENT_TOOL_MAPPINGS = [
-  {
-    toolName: "forward_to_claude",
-    eventType: "voice_instruction",
-    waitFor: "claude_reply",
-    textParameter: "instruction",
-    defaultText: ""
-  },
-  {
-    toolName: "request_status",
-    eventType: "status_request",
-    waitFor: "claude_reply"
-  },
-  {
-    toolName: "repeat_summary",
-    eventType: "summary_request",
-    waitFor: "claude_reply"
-  },
-  {
-    toolName: "add_steering_note",
-    eventType: "steering_note",
-    waitFor: "ack",
-    textParameter: "note",
-    defaultText: ""
-  },
-  {
-    toolName: "interrupt_claude",
-    eventType: "interrupt",
-    waitFor: "claude_reply",
-    textParameter: "instruction",
-    defaultText: "Stop."
-  }
-] as const satisfies readonly ElevenLabsClientToolMapping[];
-
-export const BROWSER_CLIENT_WAIT_CONTRACT = {
-  signedUrl: {
-    requestType: "request_voice_signed_url",
-    responseType: "voice_signed_url",
-    timeoutMs: 15000
-  },
-  reply: {
-    responseType: "claude_reply",
-    timeoutMs: 300000
-  },
-  ack: {
-    responseType: "ack",
-    timeoutMs: 15000
-  }
-} as const satisfies {
-  signedUrl: {
-    requestType: Extract<BrowserToDaemonEvent["type"], "request_voice_signed_url">;
-    responseType: Extract<BrowserWaitEventType, "voice_signed_url">;
-    timeoutMs: number;
-  };
-  reply: {
-    responseType: Extract<BrowserWaitEventType, "claude_reply">;
-    timeoutMs: number;
-  };
-  ack: {
-    responseType: Extract<BrowserWaitEventType, "ack">;
-    timeoutMs: number;
-  };
-};
-
+/**
+ * Push-to-talk browser client.
+ *
+ * - Tap to record (audio-reactive visualizer), tap to send → daemon transcribes
+ *   (ElevenLabs STT) and the transcript appears as "You: …".
+ * - The daemon never fabricates replies; only Claude's reply is shown and spoken.
+ * - Replies auto-play; every reply has play/pause (tap it) and a replay button, and
+ *   a header pill controls (and remembers) playback speed.
+ * - The status panel is the primary feedback surface (color-filled per state, with a
+ *   subtle sweep while Claude is working). No third-party SDK runs in the browser.
+ */
 export function renderBrowserClientModuleScript({ sessionId, token }: BrowserClientScriptInput): string {
   return String.raw`
-    const { Conversation } = window.ElevenLabsClient;
-
     const sessionId = ${toInlineJson(sessionId)};
     const token = ${toInlineJson(token)};
     const expiresAt = new URL(location.href).searchParams.get("expiresAt") || "";
-    const clientToolMappings = ${toInlineJson(ELEVENLABS_CLIENT_TOOL_MAPPINGS)};
-    const waitContract = ${toInlineJson(BROWSER_CLIENT_WAIT_CONTRACT)};
     const wsUrl = new URL("/ws/" + encodeURIComponent(sessionId), location.href);
     wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     wsUrl.searchParams.set("token", token);
     wsUrl.searchParams.set("role", "browser");
     if (expiresAt) wsUrl.searchParams.set("expiresAt", expiresAt);
 
+    const SPEEDS = [1, 1.25, 1.5, 1.75, 2];
+    const RATE_KEY = "voiceRemote.playbackRate";
+    const MAX_LOG = 60;
+    const PLAY_SVG = '<svg class="ic-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10-6.5z"/></svg><svg class="ic-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 5h3v14h-3zM13.5 5h3v14h-3z"/></svg>';
+    const REPLAY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11a9 9 0 1 1 2.6 6.4"/><path d="M3 5v6h6"/></svg>';
+
     let socket;
-    let conversation;
-    let currentState;
-    let startedAt = Date.now();
-    let voiceStarting = false;
-    const pending = new Map();
+    let mediaRecorder;
+    let mediaStream;
+    let chunks = [];
+    let recording = false;
+    let transcribing = false;
+    let transientUntil = 0;
+    let transientText = "";
+    let transientTimer = 0;
+
+    let audioCtx;
+    let analyser;
+    let freqData;
+    let rafId = 0;
+
+    let playbackRate = clampRate(parseFloat(localStorage.getItem(RATE_KEY)));
+    let currentPlayingId = null;
+    let currentUrl = null;
+    const audioByRequest = new Map();
+    const entryByRequest = new Map();
+
+    const bridge = { daemonConnected: false, browserConnected: false };
+    const runtime = { state: "idle", currentTask: undefined, listening: true };
+    const player = new Audio();
 
     const el = {
+      statusPanel: document.getElementById("statusPanel"),
       lamp: document.getElementById("lamp"),
       state: document.getElementById("stateLabel"),
       detail: document.getElementById("detailLabel"),
-      elapsed: document.getElementById("elapsed"),
       log: document.getElementById("log"),
       voiceButton: document.getElementById("voiceButton"),
+      voiceLabel: document.getElementById("voiceLabel"),
       summaryButton: document.getElementById("summaryButton"),
       statusButton: document.getElementById("statusButton"),
-      stopButton: document.getElementById("stopButton")
+      stopButton: document.getElementById("stopButton"),
+      speedButton: document.getElementById("speedButton"),
+      visualizer: document.getElementById("visualizer"),
+      canvas: document.getElementById("waveform")
     };
+    const waveCtx = el.canvas.getContext("2d");
 
-    updateControls();
+    player.playbackRate = playbackRate;
+    player.addEventListener("play", () => setPlayingClass(currentPlayingId, true));
+    player.addEventListener("pause", () => setPlayingClass(currentPlayingId, false));
+    player.addEventListener("ended", () => { setPlayingClass(currentPlayingId, false); currentPlayingId = null; });
+    player.addEventListener("error", () => { setPlayingClass(currentPlayingId, false); currentPlayingId = null; });
+    window.addEventListener("pagehide", teardown);
+
+    el.speedButton.textContent = formatRate(playbackRate);
+    render();
     connectBridge();
-    setInterval(updateElapsed, 1000);
 
-    el.voiceButton.addEventListener("click", reconnectVoice);
-    el.summaryButton.addEventListener("click", () => sendDaemonSafely({ type: "summary_request" }));
-    el.statusButton.addEventListener("click", () => sendDaemonSafely({ type: "status_request" }));
-    el.stopButton.addEventListener("click", () => sendDaemonSafely({ type: "stop_task" }));
+    el.voiceButton.addEventListener("click", toggleRecording);
+    el.summaryButton.addEventListener("click", () => sendControl({ type: "summary_request" }));
+    el.statusButton.addEventListener("click", () => sendControl({ type: "status_request" }));
+    el.stopButton.addEventListener("click", () => sendControl({ type: "stop_task" }));
+    el.speedButton.addEventListener("click", cycleSpeed);
+    el.log.addEventListener("click", (event) => {
+      const entry = event.target.closest(".entry.playable");
+      if (!entry || !entry.dataset.requestId) return;
+      if (event.target.closest(".replay-btn")) replayEntry(entry.dataset.requestId);
+      else playEntry(entry.dataset.requestId);
+    });
 
     function connectBridge() {
-      currentState = undefined;
-      updateControls();
       socket = new WebSocket(wsUrl);
-      socket.addEventListener("open", () => {
-        setVisualState("voice_suspended", "Bridge connected", "Checking daemon");
-        updateControls();
-        addLog("Bridge", "Connected to Claude Code bridge.");
-      });
       socket.addEventListener("message", (event) => {
-        const envelope = JSON.parse(event.data);
-        if (envelope.channel !== "browser") return;
+        let envelope;
+        try { envelope = JSON.parse(event.data); } catch { return; }
+        if (!envelope || envelope.channel !== "browser") return;
         handleBrowserEvent(envelope.event);
       });
+      socket.addEventListener("open", render);
       socket.addEventListener("close", () => {
-        setVisualState("voice_suspended", "Bridge disconnected", "Reconnecting");
-        rejectPending(new Error("Bridge disconnected"));
-        updateControls();
+        bridge.daemonConnected = false;
+        bridge.browserConnected = false;
+        render();
         setTimeout(connectBridge, 1500);
       });
-      socket.addEventListener("error", () => {
-        setVisualState("voice_suspended", "Bridge unavailable", "Reconnecting");
-        updateControls();
-      });
+      socket.addEventListener("error", render);
     }
 
-    async function reconnectVoice() {
-      voiceStarting = true;
-      updateControls();
+    // ---- recording ------------------------------------------------------------
+
+    function toggleRecording() {
+      if (transcribing) return;
+      if (recording) { stopRecording(); return; }
+      startRecording();
+    }
+
+    async function startRecording() {
+      if (!bridgeReady()) { flash("Not connected to Claude Code yet"); return; }
+      if (!navigator.mediaDevices || !window.MediaRecorder) { flash("This browser cannot record audio"); return; }
       try {
-        await conversation?.endSession?.();
-      } catch {}
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        flash("Microphone blocked — allow it and try again");
+        return;
+      }
+      stopPlayback();
+      chunks = [];
+      const mime = pickMimeType();
+      mediaRecorder = mime ? new MediaRecorder(mediaStream, { mimeType: mime }) : new MediaRecorder(mediaStream);
+      mediaRecorder.addEventListener("dataavailable", (event) => { if (event.data && event.data.size > 0) chunks.push(event.data); });
+      mediaRecorder.addEventListener("stop", submitRecording);
+      mediaRecorder.start();
+      recording = true;
+      startVisualizer();
+      render();
+    }
+
+    function stopRecording() {
+      recording = false;
+      stopVisualizer();
+      try { if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop(); } catch {}
+      render();
+    }
+
+    async function submitRecording() {
+      const mimeType = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      chunks = [];
+      stopStream();
+      if (!blob.size) { flash("Didn't catch that — tap to retry"); render(); return; }
+      let audioBase64;
+      try { audioBase64 = await blobToBase64(blob); } catch { flash("Could not read the recording"); render(); return; }
+      if (!sendDaemon({ type: "submit_audio", audioBase64, mimeType })) { flash("Lost the connection before sending"); render(); return; }
+      transcribing = true;
+      render();
+    }
+
+    function stopStream() {
+      if (mediaStream) { mediaStream.getTracks().forEach((t) => t.stop()); mediaStream = undefined; }
+    }
+
+    // ---- visualizer (mic-reactive bars) ---------------------------------------
+
+    function startVisualizer() {
+      el.visualizer.classList.add("active");
       try {
-        const signedUrl = await requestSignedUrl();
-        conversation = await Conversation.startSession({
-          signedUrl,
-          connectionType: "websocket",
-          clientTools: buildClientTools(),
-          onConnect: () => {
-            setVisualState("voice_connected", "Voice connected", "Listening");
-            addLog("Voice", "Conversation connected.");
-          },
-          onDisconnect: () => {
-            setVisualState("voice_suspended", "Voice suspended", "Session still active");
-            addLog("Voice", "Conversation ended.");
-          },
-          onMessage: (message) => {
-            if (message?.source === "user" && message.message) {
-              addLog("You", message.message);
-            }
-          },
-          onError: (error) => addLog("Voice error", String(error))
-        });
-      } catch (error) {
-        setVisualState("voice_suspended", "Voice unavailable", "Tap reconnect to retry");
-        addLog("Voice error", error instanceof Error ? error.message : String(error));
-      } finally {
-        voiceStarting = false;
-        updateControls();
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(mediaStream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.82;
+        source.connect(analyser);
+        freqData = new Uint8Array(analyser.frequencyBinCount);
+        sizeCanvas();
+        drawWave();
+      } catch {
+        // visualizer is decorative; recording still works without it
       }
     }
 
-    function buildClientTools() {
-      return Object.fromEntries(clientToolMappings.map((mapping) => [
-        mapping.toolName,
-        async (parameters = {}) => {
-          const event = { type: mapping.eventType };
-          if (mapping.textParameter) {
-            event.text = String(parameters?.[mapping.textParameter] || mapping.defaultText || "");
-          }
-          if (mapping.waitFor === waitContract.ack.responseType) {
-            return sendDaemonAndWaitForAck(event);
-          }
-          return sendDaemonAndWaitForReply(event);
+    function stopVisualizer() {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = undefined; }
+      analyser = undefined;
+      freqData = undefined;
+      el.visualizer.classList.remove("active");
+      if (waveCtx) waveCtx.clearRect(0, 0, el.canvas.width, el.canvas.height);
+    }
+
+    function sizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      el.canvas.width = Math.max(1, Math.floor(el.canvas.clientWidth * dpr));
+      el.canvas.height = Math.max(1, Math.floor(el.canvas.clientHeight * dpr));
+    }
+
+    function drawWave() {
+      if (!recording || !analyser) return;
+      rafId = requestAnimationFrame(drawWave);
+      const w = el.canvas.width;
+      const h = el.canvas.height;
+      waveCtx.clearRect(0, 0, w, h);
+      analyser.getByteFrequencyData(freqData);
+      const bars = 40;
+      const gap = Math.max(2, w / bars / 3);
+      const barW = (w - gap * (bars - 1)) / bars;
+      const mid = h / 2;
+      const grad = waveCtx.createLinearGradient(0, 0, w, 0);
+      grad.addColorStop(0, "#4493f8");
+      grad.addColorStop(1, "#a371f7");
+      waveCtx.fillStyle = grad;
+      const step = Math.max(1, Math.floor(freqData.length / bars));
+      for (let i = 0; i < bars; i++) {
+        let sum = 0;
+        for (let j = 0; j < step; j++) sum += freqData[i * step + j] || 0;
+        const level = sum / step / 255;
+        const barH = Math.max(barW, level * h * 0.92);
+        const x = i * (barW + gap);
+        waveCtx.beginPath();
+        waveCtx.roundRect(x, mid - barH / 2, barW, barH, barW / 2);
+        waveCtx.fill();
+      }
+    }
+
+    // ---- bridge events --------------------------------------------------------
+
+    function sendControl(event) {
+      if (!sendDaemon(event)) flash(bridgeReady() ? "Couldn't reach Claude Code" : "Not connected yet");
+    }
+
+    function handleBrowserEvent(event) {
+      if (!event) return;
+      switch (event.type) {
+        case "bridge_presence":
+          bridge.daemonConnected = event.daemonConnected === true;
+          bridge.browserConnected = event.browserConnected === true;
+          render();
+          return;
+        case "session_status":
+          bridge.daemonConnected = event.state.daemonConnected === true;
+          bridge.browserConnected = event.state.browserConnected === true;
+          runtime.listening = event.state.listening === true;
+          runtime.state = event.state.state;
+          runtime.currentTask = event.memory && event.memory.currentTask;
+          render();
+          return;
+        case "transcript":
+          transcribing = false;
+          addLog("You", event.text);
+          flash("Sent to Claude Code ✓");
+          render();
+          return;
+        case "ack":
+          return; // delivery receipt only — the ✓ on your message is the confirmation
+        case "claude_reply":
+          addLog("Claude Code", event.text, event.requestId);
+          render();
+          return;
+        case "tts_audio":
+          attachAudio(event.requestId, event.audioBase64, event.mimeType);
+          return;
+        case "error":
+          transcribing = false;
+          flash(event.message);
+          render();
+          return;
+      }
+    }
+
+    // ---- playback (per message) -----------------------------------------------
+
+    function attachAudio(requestId, audioBase64, mimeType) {
+      if (!requestId || !audioBase64) return;
+      audioByRequest.set(requestId, { audioBase64, mimeType });
+      const entry = entryByRequest.get(requestId);
+      if (entry && !entry.classList.contains("playable")) {
+        entry.classList.add("playable");
+        const controls = document.createElement("span");
+        controls.className = "entry-controls";
+        const replay = document.createElement("button");
+        replay.type = "button";
+        replay.className = "ec-btn replay-btn";
+        replay.setAttribute("aria-label", "Replay this message");
+        replay.innerHTML = REPLAY_SVG;
+        const icon = document.createElement("span");
+        icon.className = "entry-icon";
+        icon.innerHTML = PLAY_SVG;
+        controls.append(replay, icon);
+        entry.insertBefore(controls, entry.firstChild);
+      }
+      if (!recording) playEntry(requestId); // auto-play the reply
+    }
+
+    function loadEntry(requestId) {
+      const audio = audioByRequest.get(requestId);
+      if (!audio) return false;
+      if (currentPlayingId !== requestId) {
+        player.pause();
+        currentPlayingId = requestId;
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = URL.createObjectURL(blobFromBase64(audio.audioBase64, audio.mimeType));
+        player.src = currentUrl;
+        player.playbackRate = playbackRate;
+      }
+      return true;
+    }
+
+    function playEntry(requestId) {
+      if (currentPlayingId === requestId) {
+        if (player.paused) {
+          if (player.ended) player.currentTime = 0;
+          player.play().catch(() => {});
+        } else {
+          player.pause();
         }
-      ]));
+        return;
+      }
+      if (loadEntry(requestId)) player.play().catch(() => {});
     }
 
-    function requestSignedUrl() {
-      return new Promise((resolve, reject) => {
-        const requestId = sendDaemon({ type: waitContract.signedUrl.requestType });
-        pending.set(
-          requestId,
-          withTimeout(requestId, waitContract.signedUrl.responseType, resolve, reject, waitContract.signedUrl.timeoutMs)
-        );
-      });
+    function replayEntry(requestId) {
+      if (!loadEntry(requestId)) return;
+      player.currentTime = 0;
+      player.playbackRate = playbackRate;
+      player.play().catch(() => {});
     }
 
-    function sendDaemonAndWaitForReply(event) {
-      return new Promise((resolve, reject) => {
-        const requestId = sendDaemon(event);
-        pending.set(
-          requestId,
-          withTimeout(requestId, waitContract.reply.responseType, resolve, reject, waitContract.reply.timeoutMs)
-        );
-      });
+    function stopPlayback() {
+      try { player.pause(); } catch {}
     }
 
-    function sendDaemonAndWaitForAck(event) {
-      return new Promise((resolve, reject) => {
-        const requestId = sendDaemon(event);
-        pending.set(
-          requestId,
-          withTimeout(requestId, waitContract.ack.responseType, resolve, reject, waitContract.ack.timeoutMs)
-        );
-      });
+    function setPlayingClass(requestId, on) {
+      for (const [id, entry] of entryByRequest) entry.classList.toggle("playing", on && id === requestId);
+      render();
     }
 
-    function withTimeout(requestId, type, resolve, reject, timeoutMs) {
-      return {
-        type,
-        resolve,
-        reject,
-        timeout: setTimeout(() => {
-          if (pending.has(requestId)) {
-            pending.delete(requestId);
-            reject(new Error("Timed out waiting for " + type));
-          }
-        }, timeoutMs)
-      };
+    function cycleSpeed() {
+      playbackRate = SPEEDS[(SPEEDS.indexOf(playbackRate) + 1) % SPEEDS.length];
+      player.playbackRate = playbackRate;
+      try { localStorage.setItem(RATE_KEY, String(playbackRate)); } catch {}
+      el.speedButton.textContent = formatRate(playbackRate);
     }
+
+    function clampRate(rate) { return SPEEDS.indexOf(rate) >= 0 ? rate : 1; }
+    function formatRate(rate) { return rate + "×"; }
+
+    // ---- bridge i/o -----------------------------------------------------------
 
     function sendDaemon(event) {
-      if (!isBridgeOpen()) {
-        throw new Error("Bridge is not connected.");
-      }
-      if (currentState?.daemonConnected !== true) {
-        throw new Error("Claude Code daemon is not connected.");
-      }
+      if (!bridgeReady()) return false;
       const requestId = crypto.randomUUID();
-      socket.send(JSON.stringify({
-        channel: "daemon",
-        event: { requestId, ...event }
-      }));
-      return requestId;
-    }
-
-    function sendDaemonSafely(event) {
       try {
-        sendDaemon(event);
-      } catch (error) {
-        const daemonMissing = isBridgeOpen() && currentState?.daemonConnected !== true;
-        setVisualState(
-          "voice_suspended",
-          daemonMissing ? "Daemon disconnected" : "Bridge reconnecting",
-          daemonMissing ? "Waiting for Claude Code" : "Try again shortly"
-        );
-        addLog("Bridge", error instanceof Error ? error.message : String(error));
-        updateControls();
+        socket.send(JSON.stringify({ channel: "daemon", event: { requestId, ...event } }));
+        return true;
+      } catch {
+        return false;
       }
     }
 
-    function isBridgeOpen() {
-      return socket?.readyState === WebSocket.OPEN;
+    function bridgeReady() {
+      return socket && socket.readyState === WebSocket.OPEN && bridge.daemonConnected === true;
     }
 
-    function updateControls() {
-      const ready = isBridgeOpen() && currentState?.daemonConnected === true;
-      el.voiceButton.disabled = !ready || voiceStarting;
+    // ---- ui -------------------------------------------------------------------
+
+    function flash(text) {
+      transientText = text;
+      transientUntil = Date.now() + 2600;
+      if (transientTimer) clearTimeout(transientTimer);
+      transientTimer = setTimeout(render, 2700);
+      render();
+    }
+
+    function speaking() { return currentPlayingId !== null && !player.paused; }
+
+    function render() {
+      const connected = socket && socket.readyState === WebSocket.OPEN;
+      const ready = connected && bridge.daemonConnected === true;
+      let stateKey = "offline";
+      let title;
+      let detail;
+
+      if (!connected) {
+        title = "Connecting…";
+        detail = "Reaching the bridge";
+      } else if (!ready) {
+        title = "Waiting for Claude Code";
+        detail = "The daemon is offline";
+      } else if (recording) {
+        stateKey = "recording";
+        title = "Listening…";
+        detail = "Tap again to send";
+      } else if (transcribing) {
+        stateKey = "sending";
+        title = "Sending…";
+        detail = "Transcribing your voice";
+      } else if (speaking()) {
+        stateKey = "speaking";
+        title = "Speaking";
+        detail = "Tap a message to pause or replay";
+      } else if (runtime.state === "working") {
+        stateKey = "working";
+        title = "Claude is working";
+        detail = runtime.currentTask || "Working on your request…";
+      } else if (runtime.state === "paused_for_user") {
+        stateKey = "working";
+        title = "Paused for you";
+        detail = runtime.currentTask || "Awaiting your input";
+      } else if (!runtime.listening) {
+        stateKey = "offline";
+        title = "Claude isn't listening";
+        detail = "Restart with /voice-command:start in the terminal";
+      } else {
+        stateKey = "ready";
+        title = "Ready";
+        detail = "Tap the mic and speak";
+      }
+
+      if (Date.now() < transientUntil && transientText) detail = transientText;
+
+      el.statusPanel.dataset.state = stateKey;
+      el.lamp.className = "lamp" + (stateKey === "ready" ? " connected" : stateKey === "recording" ? " recording" : stateKey === "speaking" ? " speaking" : stateKey === "working" || stateKey === "sending" ? " working" : "");
+      el.state.textContent = title;
+      el.detail.textContent = detail;
+
+      el.voiceLabel.textContent = recording ? "Tap to Send" : transcribing ? "Sending…" : "Tap to Speak";
+      el.voiceButton.classList.toggle("recording", recording);
+      el.voiceButton.disabled = !ready || transcribing;
       el.summaryButton.disabled = !ready;
       el.statusButton.disabled = !ready;
       el.stopButton.disabled = !ready;
     }
 
-    function rejectPending(error) {
-      for (const [requestId, waiting] of pending) {
-        clearTimeout(waiting.timeout);
-        waiting.reject(error);
-        pending.delete(requestId);
-      }
-    }
-
-    function handleBrowserEvent(event) {
-      if (event.type === waitContract.signedUrl.responseType) {
-        const waiting = pending.get(event.requestId);
-        if (waiting?.type === waitContract.signedUrl.responseType) {
-          clearTimeout(waiting.timeout);
-          pending.delete(event.requestId);
-          waiting.resolve(event.signedUrl);
-        }
-        return;
-      }
-
-      if (event.type === "session_status") {
-        const daemonWasConnected = currentState?.daemonConnected === true;
-        currentState = event.state;
-        startedAt = event.state.createdAt || startedAt;
-        setVisualState(event.state.state, labelFor(event.state.state), statusDetail(event));
-        if (daemonWasConnected && !event.state.daemonConnected) {
-          rejectPending(new Error("Claude Code daemon disconnected"));
-        }
-        updateControls();
-        return;
-      }
-
-      if (event.type === waitContract.reply.responseType) {
-        addLog("Claude Code", event.text);
-        const waiting = pending.get(event.requestId);
-        if (waiting?.type === waitContract.reply.responseType) {
-          clearTimeout(waiting.timeout);
-          pending.delete(event.requestId);
-          waiting.resolve(event.text);
-        }
-        if (event.backgroundMode) {
-          try { conversation?.endSession?.(); } catch {}
-        }
-        return;
-      }
-
-      if (event.type === waitContract.ack.responseType) {
-        addLog("Bridge", event.message);
-        const waiting = pending.get(event.requestId);
-        if (waiting?.type === waitContract.ack.responseType) {
-          clearTimeout(waiting.timeout);
-          pending.delete(event.requestId);
-          waiting.resolve(event.message);
-        }
-        return;
-      }
-
-      if (event.type === "error") {
-        addLog("Error", event.message);
-        const waiting = pending.get(event.requestId);
-        if (waiting) {
-          clearTimeout(waiting.timeout);
-          pending.delete(event.requestId);
-          waiting.reject(new Error(event.message));
-        }
-      }
-    }
-
-    function setVisualState(state, title, detail) {
-      el.state.textContent = title;
-      el.detail.textContent = detail;
-      el.lamp.className = "lamp" + (state === "voice_connected" ? " connected" : state === "working" ? " working" : "");
-    }
-
-    function labelFor(state) {
-      return ({
-        idle: "Ready",
-        working: "Claude is working",
-        voice_connected: "Voice connected",
-        voice_suspended: "Voice suspended",
-        paused_for_user: "Paused for user",
-        stopping: "Stopping"
-      })[state] || state;
-    }
-
-    function statusDetail(event) {
-      if (event.memory?.currentTask) return event.memory.currentTask;
-      return event.state.daemonConnected ? "Daemon connected" : "Waiting for daemon";
-    }
-
-    function updateElapsed() {
-      const ms = Date.now() - (currentState?.createdAt || startedAt);
-      const total = Math.max(0, Math.floor(ms / 1000));
-      const minutes = Math.floor(total / 60);
-      const seconds = String(total % 60).padStart(2, "0");
-      el.elapsed.textContent = minutes + "m " + seconds + "s";
-    }
-
-    function addLog(title, body) {
+    function addLog(title, body, requestId) {
+      const kinds = { "You": "you", "Claude Code": "claude" };
       const row = document.createElement("article");
       row.className = "entry";
-      row.innerHTML = "<time>" + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " &middot; " + escapeHtml(title) + "</time><p>" + escapeHtml(body) + "</p>";
+      row.dataset.kind = kinds[title] || "system";
+      if (requestId) row.dataset.requestId = requestId;
+      const time = document.createElement("time");
+      time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " · " + title;
+      const p = document.createElement("p");
+      p.textContent = body;
+      row.append(time, p);
       el.log.prepend(row);
+      if (title === "Claude Code" && requestId) entryByRequest.set(requestId, row);
+      pruneLog();
     }
 
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#039;"
-      })[char]);
+    // Bound memory: drop the oldest entries and their cached audio.
+    function pruneLog() {
+      while (el.log.children.length > MAX_LOG) {
+        const old = el.log.lastElementChild;
+        if (!old) break;
+        const id = old.dataset.requestId;
+        if (id) {
+          if (id === currentPlayingId) { stopPlayback(); currentPlayingId = null; }
+          audioByRequest.delete(id);
+          entryByRequest.delete(id);
+        }
+        old.remove();
+      }
+    }
+
+    function teardown() {
+      try { stopVisualizer(); } catch {}
+      try { stopStream(); } catch {}
+      try { player.pause(); } catch {}
+      if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+      if (transientTimer) clearTimeout(transientTimer);
+    }
+
+    function pickMimeType() {
+      const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
+      for (const candidate of candidates) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(candidate)) return candidate;
+      }
+      return "";
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = String(reader.result || "");
+          const comma = result.indexOf(",");
+          resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error("read failed"));
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function blobFromBase64(base64, mimeType) {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new Blob([bytes], { type: mimeType || "audio/mpeg" });
     }
   `.trim();
 }
 
 function toInlineJson(value: unknown): string {
-  return JSON.stringify(value)
-    .replace(/</g, "\\u003c")
-    .replace(/>/g, "\\u003e")
-    .replace(/&/g, "\\u0026")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
+  return JSON.stringify(value).replace(/[<>&]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
 }

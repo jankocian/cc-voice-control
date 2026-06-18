@@ -2,10 +2,6 @@ name = "voice-remote-bridge"
 main = "src/index.ts"
 compatibility_date = "2026-06-01"
 
-[assets]
-directory = "./public"
-binding = "ASSETS"
-
 [[durable_objects.bindings]]
 name = "VOICE_SESSIONS"
 class_name = "VoiceSessionDurableObject"

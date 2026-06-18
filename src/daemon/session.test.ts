@@ -150,6 +150,9 @@ describe("VoiceRemoteSession", () => {
     expect(ws.closeCalls).toEqual([[1000, "socket error"]]);
     expect(ws.listenerCount("error")).toBe(0);
     expect(session.isConnected()).toBe(false);
+
+    // halt the auto-reconnect backoff timer scheduled by the socket error
+    session.stop();
   });
 });
 

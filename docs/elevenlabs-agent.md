@@ -1,51 +1,25 @@
-# ElevenLabs Agent Configuration
+# ElevenLabs Setup (Speech-to-Text + Text-to-Speech)
 
-Create an ElevenLabs Agent owned by the user account whose API key is stored locally.
+The voice remote uses **push-to-talk**, not a Conversational AI agent. You tap to
+record, tap again to send; the local daemon converts your speech to text, forwards
+it to Claude Code, and reads Claude's reply back to you. No agent, client tools, or
+signed URLs are required, and the ElevenLabs API key never leaves your machine.
 
-## Prompt
+## What you need
 
-You are the voice interface for Claude Code.
+- An ElevenLabs API key (the daemon calls ElevenLabs server-side from your computer).
+- A `voiceId` for the voice that reads replies aloud. Pick any voice from
+  `GET https://api.elevenlabs.io/v1/voices`, or use a default shared voice such as
+  `21m00Tcm4TlvDq8ikWAM` (Rachel).
 
-Never solve coding tasks.
-Never answer programming questions.
-Never generate code.
-Forward user instructions to Claude Code.
-Speak Claude Code responses naturally.
+Both go in the config file — see `docs/configuration.md`.
 
-## Client Tools
+## APIs used by the daemon
 
-Configure these client tools in the ElevenLabs agent. Tool names are case-sensitive.
+- **Speech-to-text:** `POST /v1/speech-to-text` with the recorded clip and
+  `model_id` (default `scribe_v1`).
+- **Text-to-speech:** `POST /v1/text-to-speech/{voiceId}` with the reply text and
+  `model_id` (default `eleven_turbo_v2_5`, tuned for low latency).
 
-`forward_to_claude`
-
-- Description: Forward the user's instruction to Claude Code.
-- Parameter: `instruction`, string, required.
-- Wait for response: enabled.
-
-`request_status`
-
-- Description: Ask Claude Code for a status update.
-- Wait for response: enabled.
-
-`repeat_summary`
-
-- Description: Ask Claude Code to repeat the latest summary.
-- Wait for response: enabled.
-
-`add_steering_note`
-
-- Description: Add guidance for the current Claude Code task without starting a new task.
-- Parameter: `note`, string, required.
-- Wait for response: enabled.
-
-`interrupt_claude`
-
-- Description: Immediately interrupt, stop, cancel, pause, or redirect Claude Code.
-- Parameter: `instruction`, string, required.
-- Wait for response: enabled.
-
-## Agent Authentication
-
-Enable signed URLs for the agent. Do not configure browser allowlists on the same agent.
-
-The local daemon calls ElevenLabs with the user's API key and forwards only the short-lived signed URL to the phone browser.
+The phone browser only records audio (`MediaRecorder`) and plays the returned MP3.
+It loads no third-party SDK, so the page's Content-Security-Policy is `'self'`-only.

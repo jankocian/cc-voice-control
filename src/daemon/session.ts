@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import WebSocket from "ws";
-import { getElevenLabsSignedUrl } from "./elevenlabs.js";
+import { getElevenLabsSignedUrl, synthesizeSpeech, transcribeAudio } from "./elevenlabs.js";
 import { toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
 import {
   DaemonSessionRuntime,
@@ -24,6 +24,10 @@ export class VoiceRemoteSession {
   private readonly config: VoiceRemoteConfig;
   private readonly runtime: DaemonSessionRuntime;
   private ws?: WebSocket;
+  private stopped = false;
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private reconnectAttempts = 0;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
 
   constructor(config: VoiceRemoteConfig) {
     this.config = config;
@@ -44,6 +48,9 @@ export class VoiceRemoteSession {
   async connect(): Promise<void> {
     if (this.isConnected()) return;
 
+    this.stopped = false;
+    this.clearReconnectTimer();
+
     const wsUrl = toWebSocketUrl(this.config.bridgeUrl, this.sessionId, this.token, "daemon", this.expiresAt);
     this.closeBridgeSocket("reconnecting");
     this.runtime.setConnectionStatus({ daemonConnected: false });
@@ -57,6 +64,7 @@ export class VoiceRemoteSession {
       this.runtime.setConnectionStatus({ daemonConnected: false });
       this.flushRuntimeEvents();
       this.closeBridgeSocket("socket error");
+      this.scheduleReconnect();
     };
 
     await new Promise<void>((resolve, reject) => {
@@ -75,8 +83,10 @@ export class VoiceRemoteSession {
         clearTimeout(timer);
         ws.off("error", onError);
         ws.on("error", onEstablishedError);
+        this.reconnectAttempts = 0;
         this.runtime.setConnectionStatus({ daemonConnected: true });
         this.flushRuntimeEvents();
+        this.startHeartbeat();
         resolve();
       };
       const onError = (error: Error) => onFailure(error);
@@ -92,10 +102,52 @@ export class VoiceRemoteSession {
       });
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code: number) => {
+      if (this.ws !== ws) return;
+      this.ws = undefined;
       this.runtime.setConnectionStatus({ daemonConnected: false });
       this.flushRuntimeEvents();
+      if (code === 1008) return; // bridge rejected/expired the session; do not retry
+      this.scheduleReconnect();
     });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer) return;
+    if (Date.now() >= this.expiresAt) return;
+
+    const delay = Math.min(15_000, 1000 * 2 ** this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.stopped || this.isConnected()) return;
+      this.connect().catch(() => this.scheduleReconnect());
+    }, delay);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
+  // Re-broadcasts status every few seconds and detects a dead voice loop (Claude
+  // stopped polling), so the phone stops showing "Ready" when nobody is listening.
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => {
+      this.runtime.heartbeat();
+      this.flushRuntimeEvents();
+    }, 8_000);
+    this.heartbeatTimer.unref?.();
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
   }
 
   isConnected(): boolean {
@@ -103,6 +155,9 @@ export class VoiceRemoteSession {
   }
 
   stop(): void {
+    this.stopped = true;
+    this.clearReconnectTimer();
+    this.clearHeartbeat();
     this.runtime.stop();
     this.runtime.setConnectionStatus({ daemonConnected: false });
     this.flushRuntimeEvents();
@@ -116,8 +171,10 @@ export class VoiceRemoteSession {
     };
   }
 
-  async nextMessage(timeoutMs: number): Promise<VoiceMessage | undefined> {
-    const message = await this.runtime.nextMessage(timeoutMs);
+  async nextMessage(timeoutMs: number, signal?: AbortSignal): Promise<VoiceMessage | undefined> {
+    this.runtime.notePoll();
+    this.flushRuntimeEvents();
+    const message = await this.runtime.nextMessage(timeoutMs, signal);
     this.flushRuntimeEvents();
     return message;
   }
@@ -150,8 +207,36 @@ export class VoiceRemoteSession {
   private async handleBridgeMessage(raw: string): Promise<void> {
     const envelope = JSON.parse(raw) as { channel?: string; event?: BrowserToDaemonEvent };
     if (envelope.channel !== "daemon" || !envelope.event) return;
+
+    if (envelope.event.type === "submit_audio") {
+      await this.handleAudio(envelope.event);
+      return;
+    }
+
     await this.runtime.handleBrowserEvent(envelope.event);
     this.flushRuntimeEvents();
+  }
+
+  // Push-to-talk: transcribe the recorded clip, echo the transcript to the phone,
+  // then feed it into the runtime as a normal instruction for Claude Code.
+  private async handleAudio(event: Extract<BrowserToDaemonEvent, { type: "submit_audio" }>): Promise<void> {
+    try {
+      const audio = Buffer.from(event.audioBase64, "base64");
+      const text = await transcribeAudio(this.config, audio, event.mimeType);
+      if (!text) {
+        this.sendToBrowser({ type: "error", requestId: event.requestId, message: "No speech detected — try again." });
+        return;
+      }
+      this.sendToBrowser({ type: "transcript", requestId: event.requestId, text });
+      await this.runtime.handleBrowserEvent({ type: "voice_instruction", requestId: event.requestId, text });
+      this.flushRuntimeEvents();
+    } catch (error) {
+      this.sendToBrowser({
+        type: "error",
+        requestId: event.requestId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   private flushRuntimeEvents(match?: (event: DaemonToBrowserEvent) => boolean): boolean {
@@ -160,6 +245,9 @@ export class VoiceRemoteSession {
 
     for (const event of this.runtime.drainOutboundEvents()) {
       const delivered = this.sendToBrowser(event);
+      if (event.type === "claude_reply" && event.text) {
+        void this.speak(event.requestId, event.text);
+      }
       if (!match || match(event)) {
         sawMatchedEvent = true;
         matchedEventDelivered ||= delivered;
@@ -167,6 +255,18 @@ export class VoiceRemoteSession {
     }
 
     return sawMatchedEvent ? matchedEventDelivered : false;
+  }
+
+  // Best-effort: read Claude Code's reply aloud. Text is already delivered; if TTS
+  // fails or no voice is configured, the phone still shows the written reply.
+  private async speak(requestId: string, text: string): Promise<void> {
+    if (!this.config.voiceId || !this.isConnected()) return;
+    try {
+      const { audioBase64, mimeType } = await synthesizeSpeech(this.config, capForSpeech(text));
+      this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
+    } catch {
+      // speech is best-effort
+    }
   }
 
   private sendToBrowser(event: DaemonToBrowserEvent): boolean {
@@ -227,6 +327,11 @@ export class VoiceRemoteManager {
     this.session = undefined;
     return true;
   }
+}
+
+function capForSpeech(text: string): string {
+  const MAX = 2500;
+  return text.length > MAX ? `${text.slice(0, MAX)}…` : text;
 }
 
 function closeWebSocket(ws: WebSocket, reason: string): void {

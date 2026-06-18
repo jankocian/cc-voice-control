@@ -4,11 +4,10 @@ import {
   parseBridgeWebSocketPath,
   readBridgeAuthQuery
 } from "../../src/shared/bridge-contract";
-import type { BridgeClientRole, BridgeEnvelope, SessionState } from "../../src/shared/protocol";
+import type { BridgeClientRole, BridgeEnvelope } from "../../src/shared/protocol";
 import { renderBrowserClientModuleScript } from "./browser-client";
 
 export interface Env {
-  ASSETS: Fetcher;
   VOICE_SESSIONS: DurableObjectNamespace<VoiceSessionDurableObject>;
 }
 
@@ -35,10 +34,6 @@ export default {
 
     if (url.pathname === "/favicon.ico") {
       return new Response(null, { status: 204 });
-    }
-
-    if (url.pathname.startsWith("/assets/")) {
-      return env.ASSETS.fetch(request);
     }
 
     const browserSessionId = parseBridgeBrowserSessionPath(url.pathname);
@@ -89,8 +84,7 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     server.serializeAttachment({ role } satisfies SocketAttachment);
     this.ctx.acceptWebSocket(server);
 
-    await this.updatePresence();
-    this.broadcastStatus();
+    this.broadcastPresence();
 
     return new Response(null, {
       status: 101,
@@ -114,24 +108,20 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
     if (attachment.role === "daemon" && envelope.channel === "browser") {
       this.broadcastTo("browser", envelope);
-      await this.updatePresence();
       return;
     }
 
     if (attachment.role === "browser" && envelope.channel === "daemon") {
       this.broadcastTo("daemon", envelope);
-      await this.updatePresence();
     }
   }
 
-  async webSocketClose(): Promise<void> {
-    await this.updatePresence();
-    this.broadcastStatus();
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    this.broadcastPresence(ws);
   }
 
-  async webSocketError(): Promise<void> {
-    await this.updatePresence();
-    this.broadcastStatus();
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.broadcastPresence(ws);
   }
 
   private async authorize(sessionId: string, token: string, requestedExpiresAt?: number): Promise<boolean> {
@@ -172,59 +162,50 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     await this.ctx.storage.deleteAll();
   }
 
-  private async updatePresence(): Promise<void> {
-    const stored = await this.ctx.storage.get<StoredAuth>("auth");
-    if (!stored) return;
-
-    const daemonConnected = this.hasRole("daemon");
-    const browserConnected = this.hasRole("browser");
-    const state: SessionState = {
-      sessionId: stored.sessionId,
-      daemonConnected,
-      browserConnected,
-      state: daemonConnected && browserConnected ? "voice_connected" : "voice_suspended",
-      createdAt: stored.createdAt,
-      expiresAt: stored.expiresAt
-    };
-    await this.ctx.storage.put("state", state);
-  }
-
-  private async getState(): Promise<SessionState | undefined> {
-    return this.ctx.storage.get<SessionState>("state");
-  }
-
-  private hasRole(role: BridgeClientRole): boolean {
-    return this.ctx.getWebSockets().some((socket) => {
+  private liveRoles(exclude?: WebSocket): { daemon: boolean; browser: boolean } {
+    let daemon = false;
+    let browser = false;
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === exclude) continue;
       const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
-      return attachment?.role === role;
-    });
+      if (attachment?.role === "daemon") daemon = true;
+      else if (attachment?.role === "browser") browser = true;
+    }
+    return { daemon, browser };
   }
 
   private broadcastTo(role: BridgeClientRole, envelope: BridgeEnvelope): void {
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
       if (attachment?.role === role) {
-        socket.send(JSON.stringify(envelope));
+        try {
+          socket.send(JSON.stringify(envelope));
+        } catch {
+          // socket is closing; ignore
+        }
       }
     }
   }
 
-  private broadcastStatus(): void {
-    this.getState()
-      .then((state) => {
-        if (!state) return;
-        this.broadcastTo("browser", {
-          channel: "browser",
-          event: {
-            type: "session_status",
-            state,
-            memory: {
-              steeringNotes: []
-            }
-          }
-        });
-      })
-      .catch(() => undefined);
+  // Presence is a separate signal from the daemon's rich session_status so it
+  // never overwrites the daemon's runtime state or memory in the browser.
+  private broadcastPresence(exclude?: WebSocket): void {
+    const { daemon, browser } = this.liveRoles(exclude);
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === exclude) continue;
+      const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
+      if (attachment?.role !== "browser") continue;
+      try {
+        socket.send(
+          JSON.stringify({
+            channel: "browser",
+            event: { type: "bridge_presence", daemonConnected: daemon, browserConnected: browser }
+          } satisfies BridgeEnvelope)
+        );
+      } catch {
+        // socket is closing; ignore
+      }
+    }
   }
 }
 
@@ -254,198 +235,325 @@ function renderSessionPage(sessionId: string, token: string): Response {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
+  <meta name="theme-color" content="#0a0a0b" />
   <title>voice-command</title>
   <style nonce="${nonce}">
+    /*
+     * Clean, minimal, monochrome. One hairline border token (--border) is used
+     * for every surface, divider and control so the whole UI shares the same edge.
+     */
     :root {
-      color-scheme: light;
-      --ink: #181611;
-      --muted: #6b6254;
-      --paper: #f4f0e8;
-      --panel: #fffaf0;
-      --line: #d9cfbd;
-      --accent: #0f766e;
-      --accent-ink: #ecfffb;
-      --warn: #b42318;
-      --blue: #1d4ed8;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color-scheme: dark;
+      --bg: #0a0a0b;
+      --panel: #141416;
+      --panel-2: #1c1c1f;
+      --border: #26262a;
+      --text: #ededed;
+      --text-2: #9a9aa2;
+      --text-3: #66666e;
+      --green: #3fb950;
+      --blue: #4493f8;
+      --violet: #a371f7;
+      --red: #e5484d;
+      --radius: 10px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, sans-serif;
     }
 
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
 
     body {
       margin: 0;
       min-height: 100dvh;
-      background:
-        linear-gradient(90deg, rgba(24, 22, 17, 0.04) 1px, transparent 1px) 0 0 / 22px 22px,
-        var(--paper);
-      color: var(--ink);
+      color: var(--text);
+      background: var(--bg);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
     }
+
+    ::selection { background: rgba(255, 255, 255, .16); }
 
     main {
-      width: min(100%, 760px);
+      width: min(100%, 440px);
       min-height: 100dvh;
       margin: 0 auto;
-      padding: max(18px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
-      display: grid;
-      grid-template-rows: auto auto auto minmax(180px, 1fr);
-      gap: 16px;
-    }
-
-    header {
+      padding:
+        max(22px, env(safe-area-inset-top))
+        max(18px, env(safe-area-inset-right))
+        max(22px, env(safe-area-inset-bottom))
+        max(18px, env(safe-area-inset-left));
       display: flex;
-      align-items: end;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* Header */
+    .app-header {
+      display: flex;
+      align-items: baseline;
       justify-content: space-between;
-      gap: 14px;
-      padding-bottom: 12px;
-      border-bottom: 2px solid var(--ink);
+      gap: 12px;
+      padding: 2px 2px 6px;
     }
 
-    h1 {
-      margin: 0;
-      font-size: 28px;
-      line-height: 1;
-      letter-spacing: 0;
-    }
+    .app-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
 
-    .session {
-      color: var(--muted);
+    .session-id {
       font-size: 12px;
-      word-break: break-all;
+      color: var(--text-3);
+      font-variant-numeric: tabular-nums;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 55%;
       text-align: right;
     }
 
-    .status-strip {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      gap: 12px;
-      border: 1px solid var(--line);
+    /* Shared surface — every panel uses the same hairline border */
+    .panel {
       background: var(--panel);
-      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
     }
 
-    .state {
+    /* Status — the primary feedback surface: a solid color fill per state */
+    .status {
       display: flex;
       align-items: center;
-      gap: 10px;
-      min-width: 0;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 16px;
+      position: relative;
+      overflow: hidden;
+      transition: background .35s ease, border-color .35s ease;
     }
+
+    .status[data-state="ready"] { background: color-mix(in srgb, var(--green) 14%, var(--panel)); border-color: color-mix(in srgb, var(--green) 42%, var(--border)); }
+    .status[data-state="recording"] { background: color-mix(in srgb, var(--red) 17%, var(--panel)); border-color: color-mix(in srgb, var(--red) 48%, var(--border)); }
+    .status[data-state="sending"] { background: color-mix(in srgb, var(--blue) 15%, var(--panel)); border-color: color-mix(in srgb, var(--blue) 42%, var(--border)); }
+    .status[data-state="working"] { background: color-mix(in srgb, var(--blue) 17%, var(--panel)); border-color: color-mix(in srgb, var(--blue) 48%, var(--border)); }
+    .status[data-state="speaking"] { background: color-mix(in srgb, var(--violet) 17%, var(--panel)); border-color: color-mix(in srgb, var(--violet) 48%, var(--border)); }
+
+    /* Subtle sweep while Claude is working */
+    .status[data-state="working"]::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background: linear-gradient(100deg, transparent 28%, color-mix(in srgb, var(--blue) 26%, transparent) 50%, transparent 72%);
+      transform: translateX(-100%);
+      animation: status-sweep 1.8s ease-in-out infinite;
+    }
+
+    @keyframes status-sweep { 0% { transform: translateX(-100%); } 65%, 100% { transform: translateX(100%); } }
+
+    .status-main { display: flex; align-items: center; gap: 11px; min-width: 0; position: relative; z-index: 1; }
 
     .lamp {
-      width: 12px;
-      height: 12px;
-      border-radius: 999px;
-      background: var(--warn);
+      --c: var(--text-3);
+      width: 8px; height: 8px;
+      border-radius: 50%;
       flex: 0 0 auto;
-      box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 16%, transparent);
+      background: var(--c);
     }
 
-    .lamp.connected { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); }
-    .lamp.working { background: var(--blue); box-shadow: 0 0 0 4px color-mix(in srgb, var(--blue) 16%, transparent); }
+    .lamp.connected { --c: var(--green); }
+    .lamp.working { --c: var(--blue); }
+    .lamp.speaking { --c: var(--violet); }
+    .lamp.recording { --c: var(--red); animation: dot-pulse 1.3s ease-in-out infinite; }
 
-    .state strong {
+    @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+    .status-text { min-width: 0; }
+    .status-text strong { display: block; font-size: 14px; font-weight: 560; letter-spacing: -.005em; line-height: 1.3; }
+    .status-text span {
       display: block;
-      font-size: 16px;
-      line-height: 1.2;
+      margin-top: 1px;
+      font-size: 12.5px;
+      color: var(--text-3);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .state span, .elapsed {
-      color: var(--muted);
-      font-size: 13px;
-    }
+    .status-meta { display: flex; flex-direction: column; align-items: flex-end; flex: 0 0 auto; }
+    .meta-label { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+    .elapsed { font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--text-2); margin-top: 2px; }
 
-    .controls {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
+    /* Controls */
+    .controls { display: flex; flex-direction: column; gap: 10px; }
+    .controls-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 
-    button {
+    .btn {
+      -webkit-appearance: none;
+      appearance: none;
+      cursor: pointer;
       font: inherit;
-      border-radius: 0;
-    }
-
-    button {
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
       min-height: 52px;
-      border: 1px solid var(--ink);
+      padding: 0 16px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
       background: var(--panel);
-      color: var(--ink);
-      font-weight: 720;
-      padding: 12px 10px;
+      font-size: 14px;
+      font-weight: 540;
+      letter-spacing: -.005em;
+      -webkit-tap-highlight-color: transparent;
       touch-action: manipulation;
+      transition: background .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease, transform .1s ease;
     }
 
-    button.primary {
-      background: var(--accent);
-      color: var(--accent-ink);
-      border-color: var(--accent);
+    .btn svg { width: 18px; height: 18px; flex: 0 0 auto; }
+    .btn:active { transform: scale(.99); }
+    .btn:disabled { opacity: .4; pointer-events: none; }
+    .btn:focus-visible { outline: 2px solid var(--text-2); outline-offset: 2px; }
+
+    @media (hover: hover) {
+      .btn:hover { background: var(--panel-2); border-color: #34343a; }
     }
 
-    button.danger {
-      color: var(--warn);
-      border-color: var(--warn);
+    /* Primary — the one deliberate emphasis: a solid, inverted fill */
+    .btn.primary {
+      min-height: 56px;
+      background: var(--text);
+      border-color: var(--text);
+      color: #0a0a0b;
+      font-weight: 580;
     }
 
-    button:disabled {
-      opacity: .55;
+    .btn.primary.recording { background: var(--red); border-color: var(--red); color: #fff; }
+
+    @media (hover: hover) {
+      .btn.primary:hover { background: #fff; border-color: #fff; }
+      .btn.primary.recording:hover { background: #ef5e62; border-color: #ef5e62; }
     }
 
-    .log {
-      min-height: 180px;
-      overflow: auto;
-      border: 1px solid var(--line);
-      background: rgba(255, 250, 240, .72);
-      padding: 4px 0;
+    /* Secondary — quiet ghost buttons, same hairline border */
+    .btn.ghost { background: transparent; color: var(--text-2); font-size: 13px; min-height: 46px; }
+    .btn.ghost.danger { color: var(--red); }
+
+    @media (hover: hover) {
+      .btn.ghost:hover { background: var(--panel); color: var(--text); border-color: #34343a; }
+      .btn.ghost.danger:hover { color: #ef5e62; }
     }
 
-    .entry {
-      display: grid;
-      gap: 3px;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
+    /* Activity */
+    .log-panel { flex: 1; min-height: 180px; display: flex; flex-direction: column; overflow: hidden; }
+
+    .panel-head {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      border-bottom: 1px solid var(--border);
     }
 
-    .entry:last-child { border-bottom: 0; }
-    .entry time { color: var(--muted); font-size: 12px; }
-    .entry p { margin: 0; line-height: 1.35; }
+    .log { flex: 1; min-height: 120px; overflow-y: auto; }
+    .log:empty::after { content: "No activity yet"; display: block; padding: 18px 16px; color: var(--text-3); font-size: 13px; }
+    .log::-webkit-scrollbar { width: 8px; }
+    .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
-    @media (max-width: 430px) {
-      main { padding-inline: 12px; }
-      .controls { grid-template-columns: 1fr; }
-      header { align-items: start; flex-direction: column; }
-      .session { text-align: left; }
+    .entry { padding: 11px 16px; border-top: 1px solid var(--border); }
+    .entry:first-child { border-top: 0; }
+    .entry time { display: block; font-size: 11px; color: var(--text-3); letter-spacing: .01em; font-variant-numeric: tabular-nums; margin-bottom: 3px; }
+    .entry p { margin: 0; font-size: 13.5px; line-height: 1.45; color: var(--text-2); overflow-wrap: anywhere; }
+    .entry[data-kind="you"] p { color: var(--text); }
+    .entry[data-kind="claude"] p { color: var(--text); }
+    .entry[data-kind="error"] p { color: var(--red); }
+    .entry[data-kind="error"] time { color: var(--red); opacity: .75; }
+    .entry[data-kind="you"] time::after { content: " · ✓ sent"; color: var(--green); font-weight: 600; }
+
+    /* Listening visualizer — audio-reactive bars driven by the mic AnalyserNode */
+    .visualizer { display: none; align-items: center; justify-content: center; height: 78px; padding: 8px 16px; }
+    .visualizer.active { display: flex; }
+    #waveform { width: 100%; height: 100%; display: block; }
+
+    /* Header playback-speed pill (top-right) */
+    .speed-pill {
+      -webkit-appearance: none; appearance: none; cursor: pointer; flex: 0 0 auto;
+      height: 30px; padding: 0 12px; border-radius: 99px;
+      border: 1px solid var(--border); background: var(--panel); color: var(--text-2);
+      font: inherit; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+      -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+      transition: color .15s ease, border-color .15s ease, background .15s ease;
+    }
+    @media (hover: hover) { .speed-pill:hover { color: var(--text); border-color: #34343a; } }
+
+    /* Tappable message playback — tap a reply to play/pause, or use the replay button */
+    .entry.playable { cursor: pointer; transition: background .15s ease; }
+    @media (hover: hover) { .entry.playable:hover { background: var(--panel-2); } }
+    .entry .entry-controls { float: right; display: inline-flex; align-items: center; gap: 4px; margin: -1px 0 6px 12px; }
+    .entry .ec-btn {
+      -webkit-appearance: none; appearance: none; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; border-radius: 50%; border: 0; background: transparent;
+      color: var(--text-3); -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+      transition: color .15s ease, background .15s ease;
+    }
+    .entry .ec-btn svg { width: 15px; height: 15px; display: block; }
+    @media (hover: hover) { .entry .ec-btn:hover { color: var(--text); background: var(--panel); } }
+    .entry .entry-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; color: var(--text-3); }
+    .entry .entry-icon svg { width: 16px; height: 16px; display: block; }
+    .entry .entry-icon .ic-pause { display: none; }
+    .entry.playing { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--violet); }
+    .entry.playing p { color: var(--text); }
+    .entry.playing .entry-icon { color: var(--violet); }
+    .entry.playing .ec-btn { color: var(--text-2); }
+    .entry.playing .entry-icon .ic-play { display: none; }
+    .entry.playing .entry-icon .ic-pause { display: block; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
     }
   </style>
 </head>
 <body>
   <main>
-    <header>
-      <h1>voice-command</h1>
-      <div class="session">session ${escapeHtml(sessionId)}</div>
+    <header class="app-header">
+      <h1 class="app-title">voice command</h1>
+      <button id="speedButton" class="speed-pill" type="button" aria-label="Playback speed">1×</button>
     </header>
 
-    <section class="status-strip" aria-live="polite">
-      <div class="state">
-        <span id="lamp" class="lamp"></span>
-        <div>
+    <section id="statusPanel" class="panel status" data-state="offline" aria-live="polite">
+      <div class="status-main">
+        <span id="lamp" class="lamp" aria-hidden="true"></span>
+        <div class="status-text">
           <strong id="stateLabel">Connecting</strong>
-          <span id="detailLabel">Waiting for Claude Code</span>
+          <span id="detailLabel">Reaching the bridge</span>
         </div>
       </div>
-      <div id="elapsed" class="elapsed">0m 00s</div>
     </section>
 
     <section class="controls">
-      <button id="voiceButton" class="primary">Reconnect Voice</button>
-      <button id="summaryButton">Repeat Last Summary</button>
-      <button id="statusButton">Request Status</button>
-      <button id="stopButton" class="danger">Stop Task</button>
+      <button id="voiceButton" class="btn primary" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2.5" width="6" height="11.5" rx="3" />
+          <path d="M5 11a7 7 0 0 0 14 0" />
+          <line x1="12" y1="18" x2="12" y2="21.5" />
+        </svg>
+        <span id="voiceLabel">Tap to Speak</span>
+      </button>
+      <div id="visualizer" class="visualizer panel" aria-hidden="true"><canvas id="waveform"></canvas></div>
+      <div class="controls-row">
+        <button id="summaryButton" class="btn ghost" type="button">Get summary</button>
+        <button id="statusButton" class="btn ghost" type="button">Get status</button>
+        <button id="stopButton" class="btn ghost danger" type="button">Stop Claude</button>
+      </div>
     </section>
 
-    <section id="log" class="log" aria-label="Session events"></section>
+    <section class="panel log-panel">
+      <div class="panel-head">Activity</div>
+      <div id="log" class="log" aria-label="Session events"></div>
+    </section>
   </main>
 
-  <script src="/assets/elevenlabs-client.iife.js"></script>
   <script type="module" nonce="${nonce}">
 ${renderBrowserClientModuleScript({ sessionId, token })}
   </script>
@@ -458,11 +566,13 @@ ${renderBrowserClientModuleScript({ sessionId, token })}
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
       "content-security-policy": [
+        // Push-to-talk runs no third-party SDK in the browser: mic capture is
+        // MediaRecorder, the only network target is the same-origin bridge socket,
+        // and TTS replies are played from in-memory blob: URLs.
         "default-src 'self'",
-        `script-src 'self' 'nonce-${nonce}' blob:`,
+        `script-src 'self' 'nonce-${nonce}'`,
         `style-src 'nonce-${nonce}'`,
-        "connect-src 'self' https://api.elevenlabs.io wss://api.elevenlabs.io https://*.elevenlabs.io wss://*.elevenlabs.io https://*.livekit.cloud wss://*.livekit.cloud",
-        "worker-src 'self' blob:",
+        "connect-src 'self'",
         "media-src 'self' blob:",
         "base-uri 'none'",
         "frame-ancestors 'none'"

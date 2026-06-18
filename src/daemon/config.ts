@@ -10,7 +10,13 @@ import {
 
 const ConfigSchema = z.object({
   elevenlabsApiKey: z.string().min(1),
-  agentId: z.string().min(1),
+  // Voice used to read Claude Code's replies aloud (ElevenLabs voice_id).
+  voiceId: z.string().min(1).optional(),
+  // ElevenLabs model ids; sensible defaults applied at call sites when omitted.
+  ttsModelId: z.string().min(1).optional(),
+  sttModelId: z.string().min(1).optional(),
+  // Legacy: the conversational-agent id. No longer used by the push-to-talk flow.
+  agentId: z.string().min(1).optional(),
   bridgeUrl: z.string().url(),
   sessionTimeoutMinutes: z.number().int().positive().default(120)
 });

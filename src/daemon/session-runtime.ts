@@ -15,8 +15,6 @@ type QueueWaiter = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
-const QUEUED_INSTRUCTION_REPLY = "Queued after the current task.";
-
 export type InterruptRecord = {
   requestId: string;
   text: string;
@@ -55,6 +53,8 @@ export class DaemonSessionRuntime {
   private outbound: DaemonToBrowserEvent[] = [];
   private interrupt?: InterruptRecord;
   private memory: SessionMemory;
+  private listening = false;
+  private lastPollAt = 0;
 
   constructor(options: DaemonSessionRuntimeOptions) {
     this.sessionId = options.sessionId;
@@ -94,13 +94,10 @@ export class DaemonSessionRuntime {
         if (isInterrupt) {
           this.recordInterrupt(message);
         }
-        const queueBehindActiveTask = !isInterrupt && Boolean(this.memory.currentTask);
+        // Every utterance is delivered to Claude and answered only by Claude — the
+        // daemon never fabricates a reply. The ack is a delivery receipt, nothing more.
         this.enqueue(message);
-        if (queueBehindActiveTask) {
-          this.push({ type: "claude_reply", requestId: event.requestId, text: QUEUED_INSTRUCTION_REPLY });
-        } else {
-          this.push({ type: "ack", requestId: event.requestId, message: "Sent to Claude Code." });
-        }
+        this.push({ type: "ack", requestId: event.requestId, message: "Delivered to Claude Code." });
         return;
       }
 
@@ -164,18 +161,19 @@ export class DaemonSessionRuntime {
 
   stop(): void {
     this.state = "stopping";
+    this.listening = false;
     this.resolveAllWaiters(undefined);
     this.emitStatus();
   }
 
-  async nextMessage(timeoutMs: number): Promise<VoiceMessage | undefined> {
+  async nextMessage(timeoutMs: number, signal?: AbortSignal): Promise<VoiceMessage | undefined> {
     const immediate = this.dequeueNextMessage();
     if (immediate) {
       this.emitStatus();
       return immediate;
     }
 
-    if (this.state === "stopping") {
+    if (this.state === "stopping" || signal?.aborted) {
       return undefined;
     }
 
@@ -183,12 +181,48 @@ export class DaemonSessionRuntime {
       const waiter: QueueWaiter = {
         resolve,
         timeout: setTimeout(() => {
+          cleanup();
           this.waiters = this.waiters.filter((item) => item !== waiter);
           resolve(undefined);
         }, Math.max(0, timeoutMs))
       };
+      const onAbort = () => {
+        clearTimeout(waiter.timeout);
+        this.waiters = this.waiters.filter((item) => item !== waiter);
+        // The poll was cancelled (e.g. the user pressed Esc): the loop has stopped.
+        if (this.listening) {
+          this.listening = false;
+          this.emitStatus();
+        }
+        resolve(undefined);
+      };
+      const cleanup = () => signal?.removeEventListener("abort", onAbort);
+      const originalResolve = waiter.resolve;
+      waiter.resolve = (message) => {
+        cleanup();
+        originalResolve(message);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.waiters.push(waiter);
     });
+  }
+
+  // Called when Claude polls for the next message — the voice loop is alive.
+  notePoll(): void {
+    this.lastPollAt = this.now();
+    if (!this.listening) {
+      this.listening = true;
+      this.emitStatus();
+    }
+  }
+
+  // Periodic tick: if Claude hasn't polled in a while, the loop has stopped.
+  // Always re-emits status so freshly connected phones get the current state.
+  heartbeat(): void {
+    if (this.listening && this.now() - this.lastPollAt > 60_000) {
+      this.listening = false;
+    }
+    this.emitStatus();
   }
 
   reply(
@@ -323,10 +357,19 @@ export class DaemonSessionRuntime {
       startedAt: message.createdAt,
       status: isActive ? "active" : "pending"
     });
+    this.capHistory();
 
     if (isActive) {
       this.memory.currentTask = message.text;
       this.state = "working";
+    }
+  }
+
+  // Bound memory for long-lived sessions: keep only the most recent task records.
+  private capHistory(): void {
+    const MAX = 50;
+    if (this.memory.taskHistory.length > MAX) {
+      this.memory.taskHistory = this.memory.taskHistory.slice(-MAX);
     }
   }
 
@@ -344,6 +387,7 @@ export class DaemonSessionRuntime {
         startedAt: this.now(),
         status: "active"
       });
+      this.capHistory();
     }
 
     this.memory.currentTask = message.text;
@@ -384,6 +428,7 @@ export class DaemonSessionRuntime {
       sessionId: this.sessionId,
       daemonConnected: this.daemonConnected,
       browserConnected: this.browserConnected,
+      listening: this.listening,
       state: this.state,
       createdAt: this.createdAt,
       expiresAt: this.expiresAt

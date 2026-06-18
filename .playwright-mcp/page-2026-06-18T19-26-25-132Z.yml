@@ -1,0 +1,24 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - heading "voice-command" [level=1] [ref=e4]
+    - generic [ref=e5]: session 3d4e84a5-3a2a-4262-9733-5ad9eeb5df9e
+  - generic [ref=e6]:
+    - generic [ref=e9]:
+      - strong [ref=e10]: Voice connected
+      - text: Listening
+    - generic [ref=e11]: 13m 07s
+  - generic [ref=e12]:
+    - button "Restart Voice" [ref=e18]
+    - button "Repeat Last Summary" [ref=e14]
+    - button "Request Status" [ref=e15]
+    - button "Stop Task" [ref=e16]
+  - region "Session events" [ref=e17]:
+    - article [ref=e19]:
+      - time [ref=e20]: 09:26 PM · Agent
+      - paragraph [ref=e21]: Voice remote connected. What should Claude Code work on?
+    - article [ref=e22]:
+      - time [ref=e23]: 09:26 PM · Voice
+      - paragraph [ref=e24]: Conversation connected.
+    - article [ref=e25]:
+      - time [ref=e26]: 09:26 PM · Bridge
+      - paragraph [ref=e27]: Connected to Claude Code bridge.

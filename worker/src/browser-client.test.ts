@@ -1,115 +1,76 @@
 import { describe, expect, it } from "vitest";
-import {
-  BROWSER_CLIENT_WAIT_CONTRACT,
-  ELEVENLABS_CLIENT_TOOL_MAPPINGS,
-  renderBrowserClientModuleScript
-} from "./browser-client.js";
+import { renderBrowserClientModuleScript } from "./browser-client.js";
 
-describe("browser voice client contract", () => {
-  it("maps every configured ElevenLabs client tool to its daemon event type", () => {
-    expect(Object.fromEntries(ELEVENLABS_CLIENT_TOOL_MAPPINGS.map((mapping) => [mapping.toolName, mapping]))).toEqual({
-      forward_to_claude: {
-        toolName: "forward_to_claude",
-        eventType: "voice_instruction",
-        waitFor: "claude_reply",
-        textParameter: "instruction",
-        defaultText: ""
-      },
-      request_status: {
-        toolName: "request_status",
-        eventType: "status_request",
-        waitFor: "claude_reply"
-      },
-      repeat_summary: {
-        toolName: "repeat_summary",
-        eventType: "summary_request",
-        waitFor: "claude_reply"
-      },
-      add_steering_note: {
-        toolName: "add_steering_note",
-        eventType: "steering_note",
-        waitFor: "ack",
-        textParameter: "note",
-        defaultText: ""
-      },
-      interrupt_claude: {
-        toolName: "interrupt_claude",
-        eventType: "interrupt",
-        waitFor: "claude_reply",
-        textParameter: "instruction",
-        defaultText: "Stop."
-      }
-    });
+describe("push-to-talk browser client", () => {
+  const script = renderBrowserClientModuleScript({ sessionId: "session-1", token: "token-1" });
+
+  it("records audio and sends it to the daemon for transcription", () => {
+    expect(script).toContain("navigator.mediaDevices.getUserMedia({ audio: true })");
+    expect(script).toContain("new MediaRecorder(");
+    expect(script).toContain('sendDaemon({ type: "submit_audio", audioBase64, mimeType })');
+    expect(script).toContain('case "transcript":');
+    expect(script).toContain('addLog("You", event.text)');
   });
 
-  it("renders the wait-for signed-url, reply, and ack paths", () => {
-    const script = renderBrowserClientModuleScript({ sessionId: "session-1", token: "token-1" });
-
-    expect(BROWSER_CLIENT_WAIT_CONTRACT).toEqual({
-      signedUrl: {
-        requestType: "request_voice_signed_url",
-        responseType: "voice_signed_url",
-        timeoutMs: 15000
-      },
-      reply: {
-        responseType: "claude_reply",
-        timeoutMs: 300000
-      },
-      ack: {
-        responseType: "ack",
-        timeoutMs: 15000
-      }
-    });
-    expect(script).toContain('sendDaemon({ type: waitContract.signedUrl.requestType })');
-    expect(script).toContain("withTimeout(requestId, waitContract.signedUrl.responseType");
-    expect(script).toContain("withTimeout(requestId, waitContract.reply.responseType");
-    expect(script).toContain("withTimeout(requestId, waitContract.ack.responseType");
-    expect(script).toContain("waiting.resolve(event.signedUrl)");
-    expect(script).toContain("waiting.resolve(event.text)");
-    expect(script).toContain("waiting.resolve(event.message)");
-    expect(script).toContain('if (event.type === "error")');
-    expect(script).toContain("waiting.reject(new Error(event.message))");
+  it("shows a live audio-reactive visualizer while recording", () => {
+    expect(script).toContain("createAnalyser()");
+    expect(script).toContain("getByteFrequencyData(freqData)");
+    expect(script).toContain("requestAnimationFrame(drawWave)");
+    expect(script).toContain("roundRect(");
   });
 
-  it("keeps background-mode Claude replies as voice session termination", () => {
-    const script = renderBrowserClientModuleScript({ sessionId: "session-1", token: "token-1" });
-
-    expect(script).toMatch(/if \(event\.backgroundMode\) \{\s+try \{ conversation\?\.endSession\?\.\(\); \} catch \{\}/);
+  it("auto-plays replies and lets any message be replayed by tapping it", () => {
+    expect(script).toContain('case "claude_reply":');
+    expect(script).toContain('case "tts_audio":');
+    expect(script).toContain("function attachAudio(requestId, audioBase64, mimeType)");
+    expect(script).toContain("if (!recording) playEntry(requestId)");
+    expect(script).toContain('entry.classList.add("playable")');
+    expect(script).toContain("setPlayingClass(currentPlayingId");
+    expect(script).toContain("function blobFromBase64(base64, mimeType)");
   });
 
-  it("delegates microphone capture to the ElevenLabs session", () => {
-    const script = renderBrowserClientModuleScript({ sessionId: "session-1", token: "token-1" });
-
-    expect(script).not.toContain("navigator.mediaDevices.getUserMedia");
-    expect(script).toContain("conversation = await Conversation.startSession({");
+  it("controls playback speed and persists it", () => {
+    expect(script).toContain("function cycleSpeed()");
+    expect(script).toContain("player.playbackRate = playbackRate");
+    expect(script).toContain("localStorage.setItem(RATE_KEY, String(playbackRate))");
   });
 
-  it("renders JSON-safe session credentials and preserves expiresAt forwarding", () => {
-    const sessionId = 'a</script>&"\u2028';
-    const token = "tok</script><img src=x>&\u2029";
-    const script = renderBrowserClientModuleScript({ sessionId, token });
-
-    expect(readConst(script, "sessionId")).toBe(sessionId);
-    expect(readConst(script, "token")).toBe(token);
-    expect(script).not.toContain(sessionId);
-    expect(script).not.toContain(token);
-    expect(script).not.toContain("</script>");
-    expect(script).toContain('const expiresAt = new URL(location.href).searchParams.get("expiresAt") || "";');
-    expect(script).toContain('if (expiresAt) wsUrl.searchParams.set("expiresAt", expiresAt);');
-    expect(script).toContain('wsUrl.searchParams.set("token", token);');
-    expect(script).toContain('wsUrl.searchParams.set("role", "browser");');
+  it("keeps the activity log clean — no fabricated or system chatter", () => {
+    expect(script).toContain('case "ack":'); // ack returns without logging
+    expect(script).not.toContain("Queued after the current task");
+    expect(script).not.toContain("Connected to Claude Code bridge");
   });
 
-  it("renders clientTools from the exported mapping list", () => {
-    const script = renderBrowserClientModuleScript({ sessionId: "session-1", token: "token-1" });
+  it("reacts to bridge presence and rich daemon status", () => {
+    expect(script).toContain('case "bridge_presence":');
+    expect(script).toContain('case "session_status":');
+    expect(script).toContain("runtime.currentTask = event.memory && event.memory.currentTask");
+  });
 
-    for (const mapping of ELEVENLABS_CLIENT_TOOL_MAPPINGS) {
-      expect(script).toContain(`"toolName":"${mapping.toolName}"`);
-      expect(script).toContain(`"eventType":"${mapping.eventType}"`);
-      expect(script).toContain(`"waitFor":"${mapping.waitFor}"`);
-    }
-    expect(script).toContain("clientTools: buildClientTools()");
-    expect(script).toContain("mapping.waitFor === waitContract.ack.responseType");
+  it("wires the control buttons to daemon control events", () => {
+    expect(script).toContain('sendControl({ type: "summary_request" })');
+    expect(script).toContain('sendControl({ type: "status_request" })');
+    expect(script).toContain('sendControl({ type: "stop_task" })');
+  });
+
+  it("runs no third-party voice SDK in the browser", () => {
+    expect(script).not.toContain("ElevenLabsClient");
+    expect(script).not.toContain("Conversation.startSession");
+    expect(script).not.toContain("clientTools");
+  });
+
+  it("renders JSON-safe session credentials and forwards expiresAt", () => {
+    const sessionId = 'a</script>&"x';
+    const token = "tok</script><img src=x>&y";
+    const tainted = renderBrowserClientModuleScript({ sessionId, token });
+
+    expect(readConst(tainted, "sessionId")).toBe(sessionId);
+    expect(readConst(tainted, "token")).toBe(token);
+    expect(tainted).not.toContain("</script>");
+    expect(tainted).toContain('const expiresAt = new URL(location.href).searchParams.get("expiresAt") || "";');
+    expect(tainted).toContain('if (expiresAt) wsUrl.searchParams.set("expiresAt", expiresAt);');
+    expect(tainted).toContain('wsUrl.searchParams.set("token", token);');
+    expect(tainted).toContain('wsUrl.searchParams.set("role", "browser");');
   });
 });
 

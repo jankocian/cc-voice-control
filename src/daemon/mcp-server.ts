@@ -85,15 +85,20 @@ server.registerTool(
     title: "Wait for next voice message",
     description: "Blocking queue retrieval for the next instruction or control message from the phone.",
     inputSchema: {
-      timeoutMs: z.number().int().min(1000).max(300000).default(300000)
+      // Kept under the typical 60s MCP client request timeout so the long-poll
+      // returns (empty) and the skill loops, instead of the client erroring out.
+      timeoutMs: z.number().int().min(1000).max(55000).default(45000)
     },
     outputSchema: {
       message: z.unknown().optional()
     }
   },
-  async ({ timeoutMs }) => {
+  async ({ timeoutMs }, extra) => {
     const session = manager.current();
-    const message = await session?.nextMessage(timeoutMs);
+    // No active session means the remote was stopped — tell the skill to exit its loop.
+    const message = session
+      ? await session.nextMessage(timeoutMs, extra?.signal)
+      : { kind: "session_ended", text: "Voice session ended." };
     const structuredContent = { message };
     return {
       content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],

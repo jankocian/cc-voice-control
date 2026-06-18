@@ -10,6 +10,10 @@ export type SessionState = {
   sessionId: string;
   daemonConnected: boolean;
   browserConnected: boolean;
+  // True while Claude Code is actively polling for messages (the voice loop is live).
+  // Goes false if the loop stops (e.g. the user cancels Claude) even though the
+  // daemon process — and thus the bridge connection — is still up.
+  listening: boolean;
   state: SessionRuntimeState;
   createdAt: number;
   expiresAt: number;
@@ -53,6 +57,12 @@ export type BrowserToDaemonEvent =
       requestId: string;
     }
   | {
+      type: "submit_audio";
+      requestId: string;
+      audioBase64: string;
+      mimeType: string;
+    }
+  | {
       type: "voice_instruction";
       requestId: string;
       text: string;
@@ -92,15 +102,31 @@ export type DaemonToBrowserEvent =
       signedUrl: string;
     }
   | {
+      type: "transcript";
+      requestId: string;
+      text: string;
+    }
+  | {
       type: "claude_reply";
       requestId: string;
       text: string;
       backgroundMode?: boolean;
     }
   | {
+      type: "tts_audio";
+      requestId: string;
+      audioBase64: string;
+      mimeType: string;
+    }
+  | {
       type: "ack";
       requestId: string;
       message: string;
+    }
+  | {
+      type: "bridge_presence";
+      daemonConnected: boolean;
+      browserConnected: boolean;
     }
   | {
       type: "error";
