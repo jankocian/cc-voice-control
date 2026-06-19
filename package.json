@@ -19,7 +19,7 @@
     "elevenlabs",
     "cloudflare"
   ],
-  "author": "Jan Kocian <mail@jankocian.com>",
+  "author": "Jan Kocián <mail@jankocian.com>",
   "license": "MIT",
   "dependencies": {
     "qrcode-generator": "^1.5.2",

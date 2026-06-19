@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Phone voice remote for your interactive Claude Code session — types your speech into the cmux pane and speaks replies back.",
   "author": {
-    "name": "Jan Kocian",
+    "name": "Jan Kocián",
     "email": "mail@jankocian.com"
   },
   "homepage": "https://github.com/jankocian/cc-voice-control",

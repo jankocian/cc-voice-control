@@ -56,6 +56,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     const bridge = { daemonConnected: false, browserConnected: false };
     const runtime = { state: "idle", currentTask: undefined, listening: true };
     const player = new Audio();
+    let wakeLock = null; // Screen Wake Lock sentinel — keeps the phone awake during a session
 
     const el = {
       statusPanel: document.getElementById("statusPanel"),
@@ -83,10 +84,15 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     player.addEventListener("ended", () => { setPlayingClass(currentPlayingId, false); currentPlayingId = null; });
     player.addEventListener("error", () => { setPlayingClass(currentPlayingId, false); currentPlayingId = null; });
     window.addEventListener("pagehide", teardown);
+    // The wake lock is auto-released when the tab is hidden — re-acquire on return.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") requestWakeLock();
+    });
 
     el.speedButton.textContent = formatRate(playbackRate);
     render();
     connectBridge();
+    requestWakeLock();
 
     el.voiceButton.addEventListener("click", toggleRecording);
     el.summaryButton.addEventListener("click", () => sendControl({ type: "summary_request" }));
@@ -501,8 +507,28 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       try { stopVisualizer(); } catch {}
       try { stopStream(); } catch {}
       try { player.pause(); } catch {}
+      releaseWakeLock();
       if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
       if (transientTimer) clearTimeout(transientTimer);
+    }
+
+    // ---- screen wake lock -----------------------------------------------------
+    // Keep the phone screen on for the whole session (the main use case is a phone
+    // left open on the page). Degrades gracefully where the API is unsupported.
+
+    async function requestWakeLock() {
+      if (wakeLock || !("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+        wakeLock.addEventListener("release", () => { wakeLock = null; });
+      } catch {
+        wakeLock = null; // denied/unsupported — page still works, screen may sleep
+      }
+    }
+
+    function releaseWakeLock() {
+      try { if (wakeLock) wakeLock.release(); } catch {}
+      wakeLock = null;
     }
 
     function pickMimeType() {

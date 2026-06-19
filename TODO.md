@@ -6,6 +6,18 @@ config; the plugin must work unmodified.
 
 ---
 
+## Quick wins — do now on v1.0.0 (current vanilla build)
+
+Flagged by effort against the current committed code:
+
+- ✅ **#4 Wake Lock** — **done.** Screen Wake Lock in `browser-client.ts`; re-acquires on `visibilitychange`, releases on teardown, graceful fallback when unsupported.
+- ✅ **#9 Rename → voice-control** — **done** (already complete in source — no `voice-command` left; `.mcp.json` folded into `plugin.json`). Name `Jan Kocián` now consistent across `package.json` / `plugin.json` / `marketplace.json` / `LICENSE`.
+- ✅ **#2 QR code** — **done** (merged from the `qr` worktree): the daemon pre-renders a Unicode QR to `$CLAUDE_PLUGIN_DATA/qr.txt`; the start/status skills print it with the URL as a fallback.
+
+**Defer (bigger or blocked):** #1 OpenAI (medium; its *voice research* sub-task is quick), #3 UI overhaul (do after #8 or it's throwaway vanilla work), #5 `/btw` (open question), #6 visible bg process (research), #7 multi-session (deep research), #8 stack migration (foundational, medium–large).
+
+---
+
 ## 1. Switch TTS + STT to OpenAI
 
 Replace ElevenLabs with OpenAI for both directions — it's significantly cheaper.
@@ -88,14 +100,14 @@ and use the UI/UX skills.
 
 ---
 
-## 4. Keep the screen awake
+## 4. Keep the screen awake ✅
 
-Main use case is a phone left open during a session.
+Main use case is a phone left open during a session. **Done** in `browser-client.ts`.
 
-- [ ] Acquire a **Screen Wake Lock** (`navigator.wakeLock.request("screen")`) while a session is active.
-- [ ] Re-acquire on `visibilitychange` (the lock drops when the tab is backgrounded).
-- [ ] Release it cleanly when the session ends / page unloads.
-- [ ] Graceful fallback when the API is unavailable (older browsers / unsupported).
+- [x] Acquire a **Screen Wake Lock** (`navigator.wakeLock.request("screen")`) while a session is active.
+- [x] Re-acquire on `visibilitychange` (the lock drops when the tab is backgrounded).
+- [x] Release it cleanly when the session ends / page unloads.
+- [x] Graceful fallback when the API is unavailable (older browsers / unsupported).
 
 ---
 
@@ -193,24 +205,23 @@ sane state and beautiful prebuilt **chat/conversation components**.
 
 ---
 
-## 9. Rename plugin "voice-command" → "voice-control" (repo stays cc-voice-control)
+## 9. Rename plugin "voice-command" → "voice-control" (repo stays cc-voice-control) ✅
 
-The plugin drifted to **"voice-command"** — that name was never wanted. Canonical names:
+The plugin had drifted to **"voice-command"** — never wanted. Canonical names:
 **plugin = `voice-control`**, **repo = `cc-voice-control`** (`CC` = Claude Code prefix).
-Rename every `voice-command` / `voice_command` occurrence to `voice-control`.
+**Done** — no `voice-command` left anywhere in source.
 
-Scope (grounded — files that currently contain `voice-command`):
-- [ ] `.claude-plugin/plugin.json` — plugin name (this drives the skill namespace → `/voice-control:*`).
-- [ ] `skills/*` — invocation becomes `/voice-control:start|stop|status`; fix in-text references.
-- [ ] `src/daemon/mcp-server.ts` — MCP `serverInfo.name` `"voice-command"` → `"voice-control"`.
-- [ ] `worker/src/index.ts` — `<title>` + any UI copy.
-- [ ] `worker/src/browser-client.ts`, `.mcp.json`, `.claude/settings.local.json`, `README.md`, `docs/configuration.md`.
-- [ ] Repo dir is already `cc-voice-control` — keep it.
+Scope (all `voice-command` → `voice-control`, completed):
+- [x] `.claude-plugin/plugin.json` — plugin name (drives the skill namespace → `/voice-control:*`).
+- [x] `skills/*` — invocation is `/voice-control:start|stop|status`.
+- [x] `src/daemon/mcp-server.ts` — MCP `serverInfo.name` → `"voice-control"`.
+- [x] `worker/src/index.ts` — `<title>` + UI copy.
+- [x] `worker/src/browser-client.ts`, `README.md`, `docs/configuration.md` (`.mcp.json` was folded into `plugin.json`).
+- [x] Repo dir is `cc-voice-control`.
 
-**Separate decision — `voice-remote` (a different term):** used for the config dir
-`~/.config/voice-remote/config.json`, `VOICE_REMOTE_CONFIG`, the `voice-remote-bridge`
-worker, and runtime paths. Not part of "voice-command" — handle deliberately:
-- [ ] Decide whether `voice-remote` also renames. If yes, **keep back-compat** — still read the legacy `~/.config/voice-remote/config.json` (config.ts already has a legacy fallback) so existing setups don't break, and **never edit the user's system config**.
-- [ ] Renaming the Cloudflare worker (`voice-remote-bridge`) / `bridgeUrl` changes the deployed URL — that's a deliberate infra change, not a blind find-replace.
+**Decision on `voice-remote` (a different term) — left as-is for now:** the config dir
+`~/.config/voice-remote/config.json`, `VOICE_REMOTE_CONFIG`, and the `voice-remote-bridge`
+worker keep their names to avoid breaking existing setups / the deployed URL. Revisit only
+as a deliberate infra change.
 
-**Acceptance:** `grep -ri "voice-command"` returns nothing in source; skills invoke as `/voice-control:*`; existing configs still load.
+**Acceptance (met):** `grep -ri "voice-command"` returns nothing in source; skills invoke as `/voice-control:*`.
