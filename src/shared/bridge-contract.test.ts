@@ -13,46 +13,46 @@ import {
 } from "./bridge-contract.js";
 
 describe("bridge URL contract", () => {
-  it("builds browser session URLs and parses the worker route/query shape", () => {
-    const url = toBridgeBrowserSessionUrl("https://voice.example.com/base", "abc", "secret");
+  it("builds browser session URLs from the single secret and parses the worker route shape", () => {
+    const url = toBridgeBrowserSessionUrl("https://voice.example.com/base", "secret");
 
-    expect(url).toBe("https://voice.example.com/s/abc?token=secret");
-    expect(parseBridgeBrowserSessionUrl(url)).toEqual({ sessionId: "abc", token: "secret" });
+    expect(url).toBe("https://voice.example.com/s/secret");
+    expect(parseBridgeBrowserSessionUrl(url)).toEqual({ secret: "secret" });
   });
 
   it("maps https bridge URLs to daemon websocket URLs", () => {
-    const url = toBridgeWebSocketUrl("https://voice.example.com", "abc", "secret", "daemon");
+    const url = toBridgeWebSocketUrl("https://voice.example.com", "secret", "daemon");
 
-    expect(url).toBe("wss://voice.example.com/ws/abc?token=secret&role=daemon");
-    expect(parseBridgeWebSocketUrl(url)).toEqual({ sessionId: "abc", token: "secret", role: "daemon" });
+    expect(url).toBe("wss://voice.example.com/ws/secret?role=daemon");
+    expect(parseBridgeWebSocketUrl(url)).toEqual({ secret: "secret", role: "daemon" });
   });
 
   it("maps http bridge URLs to browser websocket URLs", () => {
-    const url = toBridgeWebSocketUrl("http://localhost:8787", "abc", "secret", "browser");
+    const url = toBridgeWebSocketUrl("http://localhost:8787", "secret", "browser");
 
-    expect(url).toBe("ws://localhost:8787/ws/abc?token=secret&role=browser");
-    expect(parseBridgeWebSocketUrl(url)).toEqual({ sessionId: "abc", token: "secret", role: "browser" });
+    expect(url).toBe("ws://localhost:8787/ws/secret?role=browser");
+    expect(parseBridgeWebSocketUrl(url)).toEqual({ secret: "secret", role: "browser" });
   });
 
   it("keeps path construction and parsing symmetric", () => {
-    expect(toBridgeBrowserSessionPath("session/with/slash")).toBe("/s/session%2Fwith%2Fslash");
-    expect(parseBridgeBrowserSessionPath("/s/session%2Fwith%2Fslash")).toBe("session/with/slash");
+    expect(toBridgeBrowserSessionPath("secret/with/slash")).toBe("/s/secret%2Fwith%2Fslash");
+    expect(parseBridgeBrowserSessionPath("/s/secret%2Fwith%2Fslash")).toBe("secret/with/slash");
 
-    expect(toBridgeWebSocketPath("session/with/slash")).toBe("/ws/session%2Fwith%2Fslash");
-    expect(parseBridgeWebSocketPath("/ws/session%2Fwith%2Fslash")).toBe("session/with/slash");
+    expect(toBridgeWebSocketPath("secret/with/slash")).toBe("/ws/secret%2Fwith%2Fslash");
+    expect(parseBridgeWebSocketPath("/ws/secret%2Fwith%2Fslash")).toBe("secret/with/slash");
   });
 
-  it("reads token and role from websocket query params", () => {
-    const url = new URL("wss://voice.example.com/ws/abc?token=secret&role=daemon");
+  it("reads the role from websocket query params", () => {
+    const url = new URL("wss://voice.example.com/ws/secret?role=daemon");
 
-    expect(readBridgeAuthQuery(url.searchParams)).toEqual({ token: "secret", role: "daemon" });
+    expect(readBridgeAuthQuery(url.searchParams)).toEqual({ role: "daemon" });
   });
 
   it("rejects invalid or missing roles for websocket URLs", () => {
     expect(parseBridgeClientRole("daemon")).toBe("daemon");
     expect(parseBridgeClientRole("browser")).toBe("browser");
     expect(parseBridgeClientRole("operator")).toBeUndefined();
-    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/abc?token=secret&role=operator")).toBeUndefined();
-    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/abc?token=secret")).toBeUndefined();
+    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/secret?role=operator")).toBeUndefined();
+    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/secret")).toBeUndefined();
   });
 });

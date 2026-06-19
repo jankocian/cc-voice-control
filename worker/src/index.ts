@@ -15,11 +15,6 @@ type SocketAttachment = {
   role: BridgeClientRole;
 };
 
-type StoredAuth = {
-  tokenHash: string;
-  sessionId: string;
-};
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -32,14 +27,18 @@ export default {
       return new Response(null, { status: 204 });
     }
 
-    const browserSessionId = parseBridgeBrowserSessionPath(url.pathname);
-    if (request.method === "GET" && browserSessionId) {
-      return renderSessionPage(browserSessionId, readBridgeAuthQuery(url.searchParams).token);
+    const browserSecret = parseBridgeBrowserSessionPath(url.pathname);
+    if (request.method === "GET" && browserSecret) {
+      return renderSessionPage(browserSecret);
     }
 
-    const webSocketSessionId = parseBridgeWebSocketPath(url.pathname);
-    if (request.method === "GET" && webSocketSessionId) {
-      const id = env.VOICE_SESSIONS.idFromName(webSocketSessionId);
+    const webSocketSecret = parseBridgeWebSocketPath(url.pathname);
+    if (request.method === "GET" && webSocketSecret) {
+      // Route by the secret's hash, never the raw secret: the Durable Object name is a
+      // non-secret, one-way derivative, so reaching a session's DO already proves knowledge
+      // of its secret (sha256 is preimage-resistant). That routing IS the capability gate —
+      // a guessed path lands on a different, empty DO, never the victim's session.
+      const id = env.VOICE_SESSIONS.idFromName(await sha256(webSocketSecret));
       return env.VOICE_SESSIONS.get(id).fetch(request);
     }
 
@@ -50,8 +49,7 @@ export default {
 export class VoiceSessionDurableObject extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const sessionId = parseBridgeWebSocketPath(url.pathname) ?? "";
-    const { token, role } = readBridgeAuthQuery(url.searchParams);
+    const { role } = readBridgeAuthQuery(url.searchParams);
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
@@ -69,10 +67,10 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       return new Response("Invalid role", { status: 400 });
     }
 
-    if (!token || !(await this.authorize(sessionId, token))) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
+    // No token/credential check here: this DO is only reachable via /ws/<secret> routed
+    // through idFromName(sha256(secret)), so arriving at this object already proves the
+    // caller knows the session secret. The secret is the whole capability; the session
+    // lives until the daemon terminates it (no wall-clock expiry).
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.serializeAttachment({ role } satisfies SocketAttachment);
@@ -118,26 +116,6 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
   async webSocketError(ws: WebSocket): Promise<void> {
     this.broadcastPresence(ws);
-  }
-
-  // Trust-on-first-use: the first connection for a session binds its token; later
-  // connections must match it and the session id. `blockConcurrencyWhile` makes the
-  // read-decide-write atomic — without it the non-storage `await sha256` opens the DO
-  // input gate, letting two simultaneous first-connects both observe no auth and both
-  // write (last writer wins). The session lives until the daemon terminates it; there
-  // is no wall-clock expiry — capability is bounded by the daemon's (session's) lifetime.
-  private authorize(sessionId: string, token: string): Promise<boolean> {
-    return this.ctx.blockConcurrencyWhile(async () => {
-      const tokenHash = await sha256(token);
-      const stored = await this.ctx.storage.get<StoredAuth>("auth");
-
-      if (!stored) {
-        await this.ctx.storage.put("auth", { tokenHash, sessionId } satisfies StoredAuth);
-        return true;
-      }
-
-      return stored.sessionId === sessionId && stored.tokenHash === tokenHash;
-    });
   }
 
   private async expireSession(): Promise<void> {
@@ -207,11 +185,7 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function renderSessionPage(sessionId: string, token: string): Response {
-  if (!token) {
-    return new Response("Missing session token", { status: 401 });
-  }
-
+function renderSessionPage(secret: string): Response {
   const nonce = crypto.randomUUID();
 
   const html = `<!doctype html>
@@ -546,7 +520,7 @@ function renderSessionPage(sessionId: string, token: string): Response {
   </main>
 
   <script type="module" nonce="${nonce}">
-${renderBrowserClientModuleScript({ sessionId, token })}
+${renderBrowserClientModuleScript({ secret })}
   </script>
 </body>
 </html>`;

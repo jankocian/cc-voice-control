@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderBrowserClientModuleScript } from "./browser-client.js";
 
 describe("push-to-talk browser client", () => {
-  const script = renderBrowserClientModuleScript({ sessionId: "session-1", token: "token-1" });
+  const script = renderBrowserClientModuleScript({ secret: "secret-1" });
 
   it("records audio and sends it to the daemon for transcription", () => {
     expect(script).toContain("navigator.mediaDevices.getUserMedia({ audio: true })");
@@ -80,15 +80,13 @@ describe("push-to-talk browser client", () => {
     expect(script).not.toContain("clientTools");
   });
 
-  it("renders JSON-safe session credentials", () => {
-    const sessionId = 'a</script>&"x';
-    const token = "tok</script><img src=x>&y";
-    const tainted = renderBrowserClientModuleScript({ sessionId, token });
+  it("renders a JSON-safe session secret and never adds a token query param", () => {
+    const secret = "sek</script><img src=x>&y";
+    const tainted = renderBrowserClientModuleScript({ secret });
 
-    expect(readConst(tainted, "sessionId")).toBe(sessionId);
-    expect(readConst(tainted, "token")).toBe(token);
+    expect(readConst(tainted, "secret")).toBe(secret);
     expect(tainted).not.toContain("</script>");
-    expect(tainted).toContain('wsUrl.searchParams.set("token", token);');
+    expect(tainted).not.toContain('searchParams.set("token"');
     expect(tainted).toContain('wsUrl.searchParams.set("role", "browser");');
   });
 });

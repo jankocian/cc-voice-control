@@ -1,6 +1,5 @@
 export type BrowserClientScriptInput = {
-  sessionId: string;
-  token: string;
+  secret: string;
 };
 
 /**
@@ -15,13 +14,11 @@ export type BrowserClientScriptInput = {
  * - The status panel is the primary feedback surface (color-filled per state, with a
  *   subtle sweep while Claude is working). No third-party SDK runs in the browser.
  */
-export function renderBrowserClientModuleScript({ sessionId, token }: BrowserClientScriptInput): string {
+export function renderBrowserClientModuleScript({ secret }: BrowserClientScriptInput): string {
   return `
-    const sessionId = ${toInlineJson(sessionId)};
-    const token = ${toInlineJson(token)};
-    const wsUrl = new URL("/ws/" + encodeURIComponent(sessionId), location.href);
+    const secret = ${toInlineJson(secret)};
+    const wsUrl = new URL("/ws/" + encodeURIComponent(secret), location.href);
     wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    wsUrl.searchParams.set("token", token);
     wsUrl.searchParams.set("role", "browser");
 
     const SPEEDS = [1, 1.25, 1.5, 1.75, 2];
