@@ -25,7 +25,10 @@ export type Recorder = {
   visualizerActive: boolean;
   // Begin capture. Returns false synchronously if prerequisites are missing.
   start: () => Promise<void>;
+  // Stop capture and emit the recorded clip (onClip).
   stop: () => void;
+  // Stop capture and DISCARD the clip — the user cancelled (no onClip, no error).
+  cancel: () => void;
   // Hard teardown (pagehide): stops stream + visualizer without emitting a clip.
   teardown: () => void;
 };
@@ -38,6 +41,8 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const recordingRef = useRef(false);
+  // Set by cancel(): the next `stop` event drops its clip instead of submitting.
+  const canceledRef = useRef(false);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -157,11 +162,15 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   // ---- capture --------------------------------------------------------------
 
   const submitRecording = useCallback(async (): Promise<void> => {
+    const canceled = canceledRef.current;
+    canceledRef.current = false;
     const recorder = mediaRecorderRef.current;
     const mimeType = recorder?.mimeType || "audio/webm";
     const blob = new Blob(chunksRef.current, { type: mimeType });
     chunksRef.current = [];
     stopStream();
+    // Cancelled by the user — drop the clip silently (no clip, no error flash).
+    if (canceled) return;
     if (!blob.size) {
       onErrorRef.current("empty");
       return;
@@ -177,6 +186,22 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   }, [stopStream]);
 
   const stop = useCallback((): void => {
+    recordingRef.current = false;
+    setRecording(false);
+    stopVisualizer();
+    const recorder = mediaRecorderRef.current;
+    try {
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+    } catch {
+      /* ignore */
+    }
+  }, [stopVisualizer]);
+
+  // Abort the current recording without emitting a clip. The `stop` event still
+  // fires (and runs submitRecording), but canceledRef makes it discard the audio.
+  const cancel = useCallback((): void => {
+    if (!recordingRef.current) return;
+    canceledRef.current = true;
     recordingRef.current = false;
     setRecording(false);
     stopVisualizer();
@@ -224,5 +249,5 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   // Clean up on unmount.
   useEffect(() => teardown, [teardown]);
 
-  return { recording, visualizerActive, start, stop, teardown };
+  return { recording, visualizerActive, start, stop, cancel, teardown };
 }

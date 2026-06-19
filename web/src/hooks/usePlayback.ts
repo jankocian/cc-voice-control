@@ -8,6 +8,11 @@ function clampRate(rate: number): number {
   return SPEEDS.indexOf(rate) >= 0 ? rate : 1;
 }
 
+// A zero-length silent WAV. Played once inside a user gesture, it "unlocks" the
+// shared <audio> element so subsequent programmatic autoplay (TTS replies) is
+// allowed by the browser's autoplay policy (esp. iOS Safari).
+const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
+
 export function formatRate(rate: number): string {
   return `${rate}x`;
 }
@@ -39,6 +44,9 @@ export type Playback = {
   cycleSpeed: () => void;
   // Drop cached audio for a pruned message; stops playback if it was playing.
   dropAudio: (requestId: string) => void;
+  // Bless the shared <audio> element within a user gesture (call from a tap) so
+  // later programmatic autoplay of replies isn't blocked by the browser policy.
+  unlock: () => void;
 };
 
 export type UsePlaybackOptions = {
@@ -220,6 +228,34 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
     });
   }, [player]);
 
+  const unlockedRef = useRef(false);
+  const unlock = useCallback((): void => {
+    if (unlockedRef.current) return;
+    unlockedRef.current = true;
+    // Only unlock when idle (don't stomp an actively-loaded clip).
+    if (currentPlayingIdRef.current) return;
+    try {
+      player.muted = true;
+      player.src = SILENT_WAV;
+      const result = player.play();
+      const settle = () => {
+        player.pause();
+        player.currentTime = 0;
+        player.muted = false;
+        if (!currentPlayingIdRef.current) player.removeAttribute("src");
+      };
+      if (result && typeof result.then === "function") {
+        result.then(settle).catch(() => {
+          player.muted = false;
+        });
+      } else {
+        settle();
+      }
+    } catch {
+      player.muted = false;
+    }
+  }, [player]);
+
   const hasAudio = useCallback((requestId: string): boolean => audioByRequest.current.has(requestId), []);
 
   const dropAudio = useCallback(
@@ -263,6 +299,7 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
     seekEntry,
     stopPlayback,
     cycleSpeed,
-    dropAudio
+    dropAudio,
+    unlock
   };
 }

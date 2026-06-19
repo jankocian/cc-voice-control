@@ -1,30 +1,12 @@
 import type { RefObject } from "react";
-import { Orb, type OrbState } from "@/components/Orb";
+import { Controls } from "@/components/Controls";
 import { StatusIndicator } from "@/components/StatusIndicator";
-import { VoiceCluster } from "@/components/VoiceCluster";
-import { WorkingControls } from "@/components/WorkingControls";
+import { StatusVisual } from "@/components/StatusVisual";
 import type { StatusView } from "@/lib/status";
 
-// Maps the status machine's dataState/key to the orb's visual state.
-function orbStateFor(status: StatusView): OrbState {
-  switch (status.dataState) {
-    case "recording":
-      return "listening";
-    case "working":
-    case "sending":
-      return "working";
-    case "speaking":
-      return "speaking";
-    case "ready":
-      return "idle";
-    default:
-      return status.key === "connecting" || status.key === "waiting" ? "connecting" : "idle";
-  }
-}
-
-// The hero: a soft gradient card holding the morphing orb, the status block, and
-// the control cluster (mic cluster when idle/listening; Interrupt·Steer·Stop when
-// the agent is working).
+// The hero: a soft gradient card holding the state visual (waveform / equalizer /
+// dots), the status block, and the one control cluster (mic when idle/working,
+// stop-square while recording — see <Controls>).
 export function Hero({
   status,
   elapsed,
@@ -32,11 +14,13 @@ export function Hero({
   visualizerActive,
   canvasRef,
   speedLabel,
-  onToggleRecord,
   onCycleSpeed,
-  onInterrupt,
+  onMic,
   onSteer,
-  onStop
+  onInterrupt,
+  onStopRecording,
+  onCancel,
+  onStopTask
 }: {
   status: StatusView;
   elapsed: number;
@@ -44,43 +28,37 @@ export function Hero({
   visualizerActive: boolean;
   canvasRef: RefObject<HTMLCanvasElement | null>;
   speedLabel: string;
-  onToggleRecord: () => void;
   onCycleSpeed: () => void;
-  onInterrupt: () => void;
+  onMic: () => void;
   onSteer: () => void;
-  onStop: () => void;
+  onInterrupt: () => void;
+  onStopRecording: () => void;
+  onCancel: () => void;
+  onStopTask: () => void;
 }) {
+  // `working` is the non-recording working state; while recording, the status
+  // machine reports "recording" (priority), so the cluster shows the record UI.
   const working = status.dataState === "working";
 
   return (
-    <section className="relative flex shrink-0 flex-col items-center gap-6 rounded-b-card bg-gradient-to-b from-canvas-deep/70 to-canvas px-5 pb-7 pt-2">
-      <Orb state={orbStateFor(status)} className="size-44" />
+    <section className="relative flex shrink-0 flex-col items-center gap-6 rounded-b-card bg-gradient-to-b from-canvas-deep/70 to-canvas px-5 pb-7 pt-3">
+      <StatusVisual status={status} recording={recording} visualizerActive={visualizerActive} canvasRef={canvasRef} />
 
       <StatusIndicator status={status} elapsed={elapsed} />
 
       <div className="w-full max-w-sm pt-1">
-        {working ? (
-          <WorkingControls
-            speedLabel={speedLabel}
-            onInterrupt={onInterrupt}
-            onSteer={onSteer}
-            onStop={onStop}
-            onCycleSpeed={onCycleSpeed}
-          />
-        ) : (
-          <VoiceCluster
-            recording={recording}
-            // Always tappable so a tap gives feedback even before a daemon attaches
-            // (App.toggleRecording flashes "Not connected…"); matches the reference's
-            // always-vibrant mic.
-            disabled={false}
-            visualizerActive={visualizerActive}
-            canvasRef={canvasRef}
-            speedLabel={speedLabel}
-            onToggleRecord={onToggleRecord}
-            onCycleSpeed={onCycleSpeed}
-          />
-        )}
+        <Controls
+          working={working}
+          recording={recording}
+          speedLabel={speedLabel}
+          onCycleSpeed={onCycleSpeed}
+          onMic={onMic}
+          onSteer={onSteer}
+          onInterrupt={onInterrupt}
+          onStopRecording={onStopRecording}
+          onCancel={onCancel}
+          onStopTask={onStopTask}
+        />
       </div>
     </section>
   );

@@ -24,9 +24,7 @@ export function MessageBubble({
       <div
         className={cn(
           "max-w-[82%] rounded-bubble px-4 py-3 text-[15px] leading-relaxed shadow-soft",
-          isUser
-            ? "rounded-br-md bg-coral-soft text-ink"
-            : "rounded-bl-md bg-violet-soft text-ink"
+          isUser ? "rounded-br-md bg-coral-soft text-ink" : "rounded-bl-md bg-violet-soft text-ink"
         )}
       >
         {children && <div className="mb-2">{children}</div>}
@@ -34,10 +32,7 @@ export function MessageBubble({
       </div>
 
       <div
-        className={cn(
-          "mt-1 flex items-center gap-1 px-1 text-[11px] text-ink-faint",
-          isUser ? "flex-row" : "flex-row"
-        )}
+        className={cn("mt-1 flex items-center gap-1 px-1 text-[11px] text-ink-faint", isUser ? "flex-row" : "flex-row")}
       >
         <span className="tabular-nums">{time}</span>
         {isUser && delivered && <Check className="size-3.5 text-coral" />}

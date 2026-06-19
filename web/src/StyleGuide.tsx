@@ -1,13 +1,12 @@
 import { useRef, useState } from "react";
 import { BottomTabBar } from "@/components/BottomTabBar";
+import { Controls } from "@/components/Controls";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
-import { Orb, type OrbState } from "@/components/Orb";
 import { SpeedPill } from "@/components/SpeedPill";
 import { StatusIndicator } from "@/components/StatusIndicator";
+import { StatusVisual } from "@/components/StatusVisual";
 import { TopBar } from "@/components/TopBar";
-import { VoiceCluster } from "@/components/VoiceCluster";
-import { WorkingControls } from "@/components/WorkingControls";
 import { Button } from "@/components/ui/button";
 import { deriveStatus, type StatusInputs } from "@/lib/status";
 
@@ -41,11 +40,8 @@ const SHADOWS = [
   { name: "shadow-soft", cls: "shadow-soft" },
   { name: "shadow-card", cls: "shadow-card" },
   { name: "shadow-lift", cls: "shadow-lift" },
-  { name: "shadow-mic", cls: "shadow-mic" },
-  { name: "shadow-orb", cls: "shadow-orb" }
+  { name: "shadow-mic", cls: "shadow-mic" }
 ];
-
-const ORB_STATES: OrbState[] = ["connecting", "idle", "listening", "working", "speaking"];
 
 function makeStatus(over: Partial<StatusInputs>) {
   return deriveStatus({
@@ -74,6 +70,13 @@ const STATUS_CASES = [
     elapsed: 158
   },
   { label: "speaking", status: makeStatus({ speaking: true }), elapsed: 0 }
+];
+
+const VISUAL_CASES = [
+  { label: "connecting", status: makeStatus({ connected: false }) },
+  { label: "ready (idle)", status: makeStatus({}) },
+  { label: "working", status: makeStatus({ runtimeState: "working" }) },
+  { label: "speaking", status: makeStatus({ speaking: true }) }
 ];
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -166,21 +169,27 @@ export function StyleGuide() {
           </div>
         </Section>
 
-        <Section title="Orb — states">
-          <div className="grid grid-cols-3 gap-3">
-            {ORB_STATES.map((s) => (
-              <div key={s} className="flex flex-col items-center gap-2 rounded-card bg-canvas-deep/50 p-3">
-                <Orb state={s} className="size-24" />
-                <span className="text-[11px] font-medium text-ink-soft">{s}</span>
+        <Section title="Status visual — states">
+          <div className="grid grid-cols-2 gap-3">
+            {VISUAL_CASES.map((c) => (
+              <div key={c.label} className="flex flex-col items-center gap-2 rounded-card bg-canvas-deep/50 p-3">
+                <StatusVisual status={c.status} recording={false} visualizerActive={false} canvasRef={canvasRef} />
+                <span className="text-[11px] font-medium text-ink-soft">{c.label}</span>
               </div>
             ))}
+            <p className="col-span-2 text-center text-[11px] text-ink-faint">
+              recording shows the live mic waveform (needs a mic)
+            </p>
           </div>
         </Section>
 
         <Section title="Status indicator — states">
           <div className="flex flex-col gap-5 rounded-card bg-surface p-5 shadow-soft">
             {STATUS_CASES.map((c) => (
-              <div key={c.label} className="flex flex-col items-center gap-1 border-b border-hairline pb-4 last:border-0 last:pb-0">
+              <div
+                key={c.label}
+                className="flex flex-col items-center gap-1 border-b border-hairline pb-4 last:border-0 last:pb-0"
+              >
                 <span className="text-[10px] uppercase tracking-widest text-ink-faint">{c.label}</span>
                 <StatusIndicator status={c.status} elapsed={c.elapsed} />
               </div>
@@ -188,29 +197,31 @@ export function StyleGuide() {
           </div>
         </Section>
 
-        <Section title="Voice cluster">
-          <div className="rounded-card bg-surface p-5 shadow-soft">
-            <VoiceCluster
-              recording={false}
-              disabled={false}
-              visualizerActive={false}
-              canvasRef={canvasRef}
-              speedLabel="1.25x"
-              onToggleRecord={noop}
-              onCycleSpeed={noop}
-            />
-          </div>
-        </Section>
-
-        <Section title="Working controls">
-          <div className="rounded-card bg-surface p-5 shadow-soft">
-            <WorkingControls
-              speedLabel="1.25x"
-              onInterrupt={noop}
-              onSteer={noop}
-              onStop={noop}
-              onCycleSpeed={noop}
-            />
+        <Section title="Controls — idle · working · recording">
+          <div className="flex flex-col gap-4">
+            {(
+              [
+                { label: "idle", working: false, recording: false },
+                { label: "working", working: true, recording: false },
+                { label: "recording", working: false, recording: true }
+              ] as const
+            ).map((c) => (
+              <div key={c.label} className="flex flex-col gap-2 rounded-card bg-surface p-5 shadow-soft">
+                <span className="text-[10px] uppercase tracking-widest text-ink-faint">{c.label}</span>
+                <Controls
+                  working={c.working}
+                  recording={c.recording}
+                  speedLabel="1.25x"
+                  onCycleSpeed={noop}
+                  onMic={noop}
+                  onSteer={noop}
+                  onInterrupt={noop}
+                  onStopRecording={noop}
+                  onCancel={noop}
+                  onStopTask={noop}
+                />
+              </div>
+            ))}
           </div>
         </Section>
 
@@ -230,8 +241,17 @@ export function StyleGuide() {
 
         <Section title="Message bubbles">
           <div className="flex flex-col gap-4">
-            <MessageBubble side="user" body="Please add a retry mechanism for failed webhook deliveries." time="12:32 AM" delivered />
-            <MessageBubble side="agent" body="I'll implement an exponential backoff retry for failed webhook deliveries with proper logging." time="12:33 AM">
+            <MessageBubble
+              side="user"
+              body="Please add a retry mechanism for failed webhook deliveries."
+              time="12:32 AM"
+              delivered
+            />
+            <MessageBubble
+              side="agent"
+              body="I'll implement an exponential backoff retry for failed webhook deliveries with proper logging."
+              time="12:33 AM"
+            >
               <InlineAudioPlayer
                 playing={false}
                 loaded={false}

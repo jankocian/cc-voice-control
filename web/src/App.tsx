@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BottomTabBar } from "./components/BottomTabBar";
 import { Hero } from "./components/Hero";
 import { MessageThread } from "./components/MessageThread";
+import { MiniControls } from "./components/MiniControls";
 import { TopBar } from "./components/TopBar";
 import { type BridgeContentEvent, useBridge } from "./hooks/useBridge";
 import { useElapsed } from "./hooks/useElapsed";
@@ -37,6 +38,13 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const lastReplyIdRef = useRef<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Scroll container + a sentinel at the end of the hero: once the hero scrolls out
+  // of view we reveal a condensed, sticky control bar (<MiniControls>) so the mic /
+  // stop stay reachable while reading the message history.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const heroSentinelRef = useRef<HTMLDivElement>(null);
+  const [condensed, setCondensed] = useState(false);
 
   useWakeLock();
 
@@ -135,15 +143,14 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [transcribing, bridgeReady, recorder, showFlash]
   );
 
-  // Push-to-talk: tap to start (queue mode), tap to stop+send.
-  const toggleRecording = useCallback(() => {
-    if (transcribing) return;
-    if (recorder.recording) {
-      recorder.stop();
-      return;
-    }
-    startRecording("queue");
-  }, [transcribing, recorder, startRecording]);
+  // Idle mic: start a normal push-to-talk turn (queue mode).
+  const onMic = useCallback(() => startRecording("queue"), [startRecording]);
+
+  // While recording, the center FAB is a red stop-square: stop capture and send.
+  const onStopRecording = useCallback(() => recorder.stop(), [recorder]);
+
+  // Cancel (✕) while recording: abort capture without sending anything.
+  const onCancel = useCallback(() => recorder.cancel(), [recorder]);
 
   // ---- working-state controls ------------------------------------------------
   const sendControl = useCallback(
@@ -154,32 +161,17 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   );
 
   // Interrupt: record a message that interrupts the running turn (Esc + run now).
-  // Tap again while recording to send it.
-  const onInterrupt = useCallback(() => {
-    if (recorder.recording) {
-      recorder.stop();
-      return;
-    }
-    startRecording("interrupt");
-  }, [recorder, startRecording]);
+  const onInterrupt = useCallback(() => startRecording("interrupt"), [startRecording]);
 
-  // Steer: record a guiding message queued behind the running turn.
+  // Steer (the working-state center mic): record a guiding message queued behind
+  // the running turn.
   // TODO: there is no dedicated "steer" event in the bridge protocol
   // (src/shared/protocol.ts). Queue-mode submit is the closest existing behaviour;
   // wire a real steering event here if/when the daemon gains one.
-  const onSteer = useCallback(() => {
-    if (recorder.recording) {
-      recorder.stop();
-      return;
-    }
-    startRecording("queue");
-  }, [recorder, startRecording]);
+  const onSteer = useCallback(() => startRecording("queue"), [startRecording]);
 
-  // Stop: the existing stop_task event.
-  const onStop = useCallback(() => {
-    if (recorder.recording) recorder.stop();
-    sendControl({ type: "stop_task" });
-  }, [recorder, sendControl]);
+  // Stop the running task (the working, non-recording UI has no clip in flight).
+  const onStopTask = useCallback(() => sendControl({ type: "stop_task" }), [sendControl]);
 
   // ---- teardown (pagehide) ---------------------------------------------------
   useEffect(() => {
@@ -187,6 +179,25 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
   }, [recorder]);
+
+  // Bless the audio element on the first user gesture so replies autoplay reliably
+  // (browser autoplay policy / iOS Safari block programmatic play() otherwise).
+  const { unlock } = playback;
+  useEffect(() => {
+    const onFirstTap = () => unlock();
+    window.addEventListener("pointerdown", onFirstTap, { once: true });
+    return () => window.removeEventListener("pointerdown", onFirstTap);
+  }, [unlock]);
+
+  // Reveal the condensed controls when the hero (its sentinel) leaves the viewport.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const target = heroSentinelRef.current;
+    if (!root || !target) return;
+    const obs = new IntersectionObserver(([entry]) => setCondensed(!entry.isIntersecting), { root, threshold: 0 });
+    obs.observe(target);
+    return () => obs.disconnect();
+  }, []);
 
   // ---- derive view -----------------------------------------------------------
   const status = deriveStatus({
@@ -203,39 +214,63 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
 
   const elapsed = useElapsed(status.dataState === "working");
 
+  const working = status.dataState === "working";
+
   return (
-    <div className="flex h-full flex-col bg-canvas">
+    <div className="flex h-full flex-col bg-canvas px-safe">
       <TopBar online={status.dataState !== "offline"} />
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-        <Hero
+      <div className="relative min-h-0 flex-1">
+        <main ref={scrollRef} className="flex h-full flex-col overflow-y-auto pb-safe">
+          <Hero
+            status={status}
+            elapsed={elapsed}
+            recording={recorder.recording}
+            visualizerActive={recorder.visualizerActive}
+            canvasRef={canvasRef}
+            speedLabel={playback.formattedRate}
+            onCycleSpeed={playback.cycleSpeed}
+            onMic={onMic}
+            onSteer={onSteer}
+            onInterrupt={onInterrupt}
+            onStopRecording={onStopRecording}
+            onCancel={onCancel}
+            onStopTask={onStopTask}
+          />
+
+          {/* Sentinel: when this leaves the top, the condensed bar appears. */}
+          <div ref={heroSentinelRef} aria-hidden="true" className="h-px w-full shrink-0" />
+
+          <MessageThread
+            messages={messages}
+            playback={{
+              playingId: playback.playingId,
+              loadedId: playback.loadedId,
+              position: playback.position,
+              duration: playback.duration,
+              playableIds: playback.playableIds,
+              onPlay: playEntry,
+              onReplay: replayEntry,
+              onSeek: seekEntry
+            }}
+          />
+        </main>
+
+        {/* Condensed, sticky controls — slides in once the hero scrolls away. */}
+        <MiniControls
           status={status}
           elapsed={elapsed}
+          working={working}
           recording={recorder.recording}
-          visualizerActive={recorder.visualizerActive}
-          canvasRef={canvasRef}
-          speedLabel={playback.formattedRate}
-          onToggleRecord={toggleRecording}
-          onCycleSpeed={playback.cycleSpeed}
-          onInterrupt={onInterrupt}
+          shown={condensed}
+          onMic={onMic}
           onSteer={onSteer}
-          onStop={onStop}
+          onInterrupt={onInterrupt}
+          onStopRecording={onStopRecording}
+          onCancel={onCancel}
+          onStopTask={onStopTask}
         />
-
-        <MessageThread
-          messages={messages}
-          playback={{
-            playingId: playback.playingId,
-            loadedId: playback.loadedId,
-            position: playback.position,
-            duration: playback.duration,
-            playableIds: playback.playableIds,
-            onPlay: playEntry,
-            onReplay: replayEntry,
-            onSeek: seekEntry
-          }}
-        />
-      </main>
+      </div>
 
       {FEATURES.threadNav && <BottomTabBar />}
     </div>
