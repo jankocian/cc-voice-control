@@ -101,6 +101,11 @@ function Scene({
   const perlinNoiseTexture = useTexture(
     "/perlin-noise.png"
   )
+  // The shader samples this as tiling raw noise — it must repeat and stay linear
+  // (gamma-decoding it gives hard sectored "petals" instead of a smooth blob).
+  perlinNoiseTexture.wrapS = THREE.RepeatWrapping
+  perlinNoiseTexture.wrapT = THREE.RepeatWrapping
+  perlinNoiseTexture.colorSpace = THREE.NoColorSpace
 
   const agentRef = useRef<AgentState>(agentState)
   const modeRef = useRef<"auto" | "manual">(volumeMode)
@@ -484,7 +489,7 @@ void main() {
     vec3 color1 = vec3(0.0, 0.0, 0.0); // Black
     vec3 color2 = uColor1; // Darker Color
     vec3 color3 = uColor2; // Lighter Color
-    vec3 color4 = vec3(1.0, 1.0, 1.0); // White
+    vec3 color4 = vec3(0.96, 0.93, 0.89); // page cream background
 
     // Convert grayscale color to the color ramp
     float luminance = mix(color.r, 1.0 - color.r, uInverted);

@@ -52,8 +52,8 @@ export function Orb({ state = "idle", className }: { state?: OrbState; className
             colors={colors}
             agentState={AGENT_STATE[state]}
             volumeMode="manual"
-            manualInput={0}
-            manualOutput={0}
+            manualInput={0.8}
+            manualOutput={0.8}
             className="absolute inset-0 size-full"
           />
         </Suspense>

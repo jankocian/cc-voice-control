@@ -37,9 +37,9 @@
   --color-warning: #f5a623;
 
   /* ---- Orb gradient stops ------------------------------------------------ */
-  --color-orb-warm: #ff9e6b; /* warm pole (orange) */
+  --color-orb-warm: #ff7a2f; /* warm pole (orange) */
   --color-orb-mid: #ffb38a; /* mid wash */
-  --color-orb-cool: #8e7df0; /* cool pole (violet) */
+  --color-orb-cool: #9a78ec; /* cool pole (violet) */
   --color-orb-glow: #ffd9c2; /* outer aura */
 
   /* ---- Radii ------------------------------------------------------------- */
