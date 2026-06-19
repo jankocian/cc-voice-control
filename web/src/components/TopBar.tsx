@@ -18,7 +18,7 @@ export function TopBar({
   onSettings?: () => void;
 }) {
   return (
-    <header className="flex h-16 shrink-0 items-center justify-between gap-2 px-4">
+    <header className="flex min-h-16 shrink-0 items-center justify-between gap-2 px-4 pt-safe">
       {FEATURES.threadMenu ? (
         <Button variant="surface" size="icon" aria-label="Threads menu" onClick={onMenu}>
           <Menu />

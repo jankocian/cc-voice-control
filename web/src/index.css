@@ -36,12 +36,6 @@
   --color-danger: #ff4438;
   --color-warning: #f5a623;
 
-  /* ---- Orb gradient stops ------------------------------------------------ */
-  --color-orb-warm: #ff7a2f; /* warm pole (orange) */
-  --color-orb-mid: #ffb38a; /* mid wash */
-  --color-orb-cool: #9a78ec; /* cool pole (violet) */
-  --color-orb-glow: #ffd9c2; /* outer aura */
-
   /* ---- Radii ------------------------------------------------------------- */
   --radius-control: 16px; /* mic / pill controls (square-ish) */
   --radius-bubble: 20px; /* chat bubbles */
@@ -52,48 +46,21 @@
   --shadow-card: 0 12px 32px -16px rgba(45, 33, 22, 0.18);
   --shadow-soft: 0 2px 12px -6px rgba(45, 33, 22, 0.1);
   --shadow-lift: 0 18px 44px -20px rgba(45, 33, 22, 0.26);
-  --shadow-orb: 0 24px 60px -18px rgba(255, 138, 84, 0.45);
   --shadow-mic: 0 14px 30px -12px rgba(251, 122, 69, 0.5);
 
   /* ---- Typography -------------------------------------------------------- */
-  --font-sans:
-    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 
   /* ---- Motion ------------------------------------------------------------ */
   --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
 
-  /* ---- Keyframes (orb + visualizer + status) ----------------------------- */
-  --animate-orb-morph: orb-morph 9s ease-in-out infinite;
-  --animate-orb-drift: orb-drift 14s ease-in-out infinite;
-  --animate-orb-pulse: orb-pulse 2.6s ease-in-out infinite;
-  --animate-ring-spin: ring-spin 6s linear infinite;
+  /* ---- Keyframes (visualizer + status) ----------------------------------- */
+  --animate-pulse-ring: pulse-ring 2.6s ease-in-out infinite;
   --animate-dot-bounce: dot-bounce 1.2s ease-in-out infinite;
-  --animate-float-slow: float-slow 7s ease-in-out infinite;
   --animate-bar: bar-pulse 1s ease-in-out infinite;
   --animate-rise: rise 0.32s var(--ease-soft) both;
 
-  @keyframes orb-morph {
-    0%,
-    100% {
-      border-radius: 58% 42% 47% 53% / 54% 49% 51% 46%;
-    }
-    33% {
-      border-radius: 46% 54% 62% 38% / 43% 60% 40% 57%;
-    }
-    66% {
-      border-radius: 53% 47% 38% 62% / 59% 41% 59% 41%;
-    }
-  }
-  @keyframes orb-drift {
-    0%,
-    100% {
-      transform: translate3d(0, 0, 0) rotate(0deg);
-    }
-    50% {
-      transform: translate3d(0, -2%, 0) rotate(8deg);
-    }
-  }
-  @keyframes orb-pulse {
+  @keyframes pulse-ring {
     0%,
     100% {
       transform: scale(1);
@@ -102,11 +69,6 @@
     50% {
       transform: scale(1.06);
       opacity: 1;
-    }
-  }
-  @keyframes ring-spin {
-    to {
-      transform: rotate(360deg);
     }
   }
   @keyframes dot-bounce {
@@ -119,15 +81,6 @@
     40% {
       transform: translateY(-30%);
       opacity: 1;
-    }
-  }
-  @keyframes float-slow {
-    0%,
-    100% {
-      transform: translate3d(0, 0, 0);
-    }
-    50% {
-      transform: translate3d(0, -22%, 0);
     }
   }
   @keyframes bar-pulse {
@@ -223,22 +176,30 @@
     border-color: var(--color-hairline);
   }
 
-  html,
-  body,
-  #app {
+  html {
     height: 100%;
   }
 
   body {
     margin: 0;
+    /* Truly full-height on iOS: dvh tracks Safari's dynamic toolbar / address bar so
+       the frame fills the *visible* viewport, instead of a static 100vh that gets
+       clipped under the chrome (messages cut off at the bottom). 100vh is the
+       fallback for engines without dvh. The app frame owns scrolling (overflow
+       hidden here) — its inner <main> scrolls — so there's no page-level rubber band. */
+    height: 100vh;
+    /* biome-ignore lint/suspicious/noDuplicateProperties: intentional 100vh → 100dvh progressive-enhancement fallback */
+    height: 100dvh;
+    overflow: hidden;
     background: var(--color-canvas);
     color: var(--color-ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* iOS safe areas via env(); only place env() is allowed (a token can't hold it). */
-    padding: env(safe-area-inset-top) env(safe-area-inset-right)
-      env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  #app {
+    height: 100%;
   }
 
   button {
@@ -246,7 +207,7 @@
     -webkit-tap-highlight-color: transparent;
   }
 
-  /* Honour reduced-motion: kill the decorative orb/visualizer animations. */
+  /* Honour reduced-motion: kill the decorative visualizer animations. */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -256,4 +217,19 @@
       transition-duration: 0.001ms !important;
     }
   }
+}
+
+/* ============================================================================
+   Safe-area utilities (iOS notch / home indicator). env() can't live in a design
+   token, so these classes are its single home; components reference the utility.
+   ========================================================================= */
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@utility px-safe {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }

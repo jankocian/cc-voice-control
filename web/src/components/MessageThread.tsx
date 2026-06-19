@@ -13,8 +13,8 @@ export type ThreadPlayback = {
   onSeek: (requestId: string, seconds: number) => void;
 };
 
-// The chat thread. `messages` are newest-first; render chronologically (oldest at
-// top) so the newest sits at the bottom against the hero. Agent rows with attached
+// The chat thread. `messages` are newest-first and render in that order, so the
+// latest turn sits at the top, directly under the hero. Agent rows with attached
 // audio embed the inline player inside the lavender bubble.
 export function MessageThread({ messages, playback }: { messages: Message[]; playback: ThreadPlayback }) {
   if (messages.length === 0) {
@@ -26,15 +26,11 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
     );
   }
 
-  const ordered = [...messages].reverse();
-
   return (
     <div className="flex flex-col gap-4 px-4 pb-6">
-      {ordered.map((message) => {
+      {messages.map((message) => {
         if (message.kind === "you") {
-          return (
-            <MessageBubble key={message.id} side="user" body={message.body} time={message.time} delivered />
-          );
+          return <MessageBubble key={message.id} side="user" body={message.body} time={message.time} delivered />;
         }
 
         const playable = message.requestId ? playback.playableIds.has(message.requestId) : false;

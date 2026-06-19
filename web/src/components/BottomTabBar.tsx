@@ -3,13 +3,7 @@ import { cn } from "@/lib/utils";
 
 // Bottom tab bar: Threads (layers) · center waveform (active, coral) · New thread
 // (compose). The center tab is the elevated active voice tab.
-export function BottomTabBar({
-  onThreads,
-  onNewThread
-}: {
-  onThreads?: () => void;
-  onNewThread?: () => void;
-}) {
+export function BottomTabBar({ onThreads, onNewThread }: { onThreads?: () => void; onNewThread?: () => void }) {
   return (
     <nav className="flex shrink-0 items-center justify-around border-t border-hairline bg-surface/80 px-6 pb-2 pt-2.5 backdrop-blur-sm">
       <Tab label="Threads" onClick={onThreads}>
@@ -32,15 +26,7 @@ export function BottomTabBar({
   );
 }
 
-function Tab({
-  label,
-  onClick,
-  children
-}: {
-  label: string;
-  onClick?: () => void;
-  children: React.ReactNode;
-}) {
+function Tab({ label, onClick, children }: { label: string; onClick?: () => void; children: React.ReactNode }) {
   return (
     <button
       type="button"

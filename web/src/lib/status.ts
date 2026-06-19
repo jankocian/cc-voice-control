@@ -41,8 +41,8 @@ export type StatusInputs = {
 // Pure port of the vanilla `render()` state machine (the ordering of branches is
 // load-bearing — it is a priority cascade).
 export function deriveStatus(inputs: StatusInputs): StatusView {
-  const { connected, daemonConnected, recording, transcribing, speaking, runtimeState, currentTask, listening, flash } =
-    inputs;
+  // currentTask is intentionally ignored (see the working branch below).
+  const { connected, daemonConnected, recording, transcribing, speaking, runtimeState, listening, flash } = inputs;
   const ready = connected && daemonConnected === true;
 
   let key: StatusKey = "offline";
@@ -77,7 +77,10 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
     key = "working";
     dataState = "working";
     title = "Agent is working…";
-    detail = currentTask || "Working on your request";
+    // Intentionally NO detail line here: currentTask is the user's full (often very
+    // long) transcript, which is noise under the timer. The elapsed clock + title
+    // carry the state; a transient flash can still override `detail` below.
+    detail = "";
   } else if (!listening) {
     key = "not-listening";
     dataState = "offline";
