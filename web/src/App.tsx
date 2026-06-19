@@ -9,6 +9,7 @@ import { useFlash } from "./hooks/useFlash";
 import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
 import { useWakeLock } from "./hooks/useWakeLock";
+import { FEATURES } from "./lib/features";
 import { MAX_LOG, type Message, makeMessage } from "./lib/messages";
 import type { SessionCredentials } from "./lib/session";
 import { deriveStatus } from "./lib/status";
@@ -237,7 +238,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
         />
       </main>
 
-      <BottomTabBar />
+      {FEATURES.threadNav && <BottomTabBar />}
     </div>
   );
 }

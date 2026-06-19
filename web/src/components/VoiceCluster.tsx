@@ -2,12 +2,14 @@ import { AudioLines, Mic, Square } from "lucide-react";
 import type { RefObject } from "react";
 import { SpeedPill } from "@/components/SpeedPill";
 import { Button } from "@/components/ui/button";
+import { FEATURES } from "@/lib/features";
 import { cn } from "@/lib/utils";
 
 // The voice cluster (idle + recording): speed pill (left), the big circular mic
-// FAB (center) that becomes a red rounded STOP square while recording, and a
-// small waveform/visualizer button (right). Label reads "Tap to speak" /
-// "Tap to stop". The live mic waveform draws into `canvasRef` (useRecorder).
+// FAB (center) that becomes a red rounded STOP square while recording, and an
+// optional waveform button (right, hidden by default — FEATURES.micSideButton).
+// Label reads "Tap to speak" / "Tap to stop". The live mic waveform draws into
+// `canvasRef` (useRecorder).
 export function VoiceCluster({
   recording,
   disabled,
@@ -54,26 +56,25 @@ export function VoiceCluster({
           </Button>
         </div>
 
-        {/* Right: waveform / visualizer button */}
+        {/* Right: optional waveform/visualizer button (hidden by default). */}
         <div className="flex justify-end">
-          <Button
-            variant="surface"
-            size="icon"
-            aria-label="Voice visualizer"
-            className={cn(recording && "text-coral")}
-          >
-            <AudioLines />
-          </Button>
+          {FEATURES.micSideButton && (
+            <Button
+              variant="surface"
+              size="icon"
+              aria-label="Voice visualizer"
+              className={cn(recording && "text-coral")}
+            >
+              <AudioLines />
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Live mic waveform (only painted while recording) */}
+      {/* Live mic waveform (only painted while recording). */}
       <canvas
         ref={canvasRef}
-        className={cn(
-          "h-9 w-44 transition-opacity duration-200",
-          visualizerActive ? "opacity-100" : "opacity-0"
-        )}
+        className={cn("h-9 w-44 transition-opacity duration-200", visualizerActive ? "opacity-100" : "opacity-0")}
         aria-hidden="true"
       />
 

@@ -70,7 +70,10 @@ export function Hero({
         ) : (
           <VoiceCluster
             recording={recording}
-            disabled={!status.canAct && !recording}
+            // Always tappable so a tap gives feedback even before a daemon attaches
+            // (App.toggleRecording flashes "Not connected…"); matches the reference's
+            // always-vibrant mic.
+            disabled={false}
             visualizerActive={visualizerActive}
             canvasRef={canvasRef}
             speedLabel={speedLabel}
