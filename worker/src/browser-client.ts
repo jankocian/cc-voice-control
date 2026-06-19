@@ -257,8 +257,6 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
           flash("Sent to Claude Code ✓");
           render();
           return;
-        case "ack":
-          return; // delivery receipt only — the ✓ on your message is the confirmation
         case "claude_reply":
           addLog("Claude Code", event.text, event.requestId);
           render();
@@ -409,10 +407,6 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
         stateKey = "working";
         title = "Claude is working";
         detail = runtime.currentTask || "Working on your request…";
-      } else if (runtime.state === "paused_for_user") {
-        stateKey = "working";
-        title = "Paused for you";
-        detail = runtime.currentTask || "Awaiting your input";
       } else if (!runtime.listening) {
         stateKey = "offline";
         title = "Claude isn't listening";
@@ -430,12 +424,14 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       el.state.textContent = title;
       el.detail.textContent = detail;
 
+      // Only allow speaking/acting when the daemon can actually reach the Claude pane.
+      const canAct = ready && runtime.listening;
       el.voiceLabel.textContent = recording ? "Tap to Send" : transcribing ? "Sending…" : "Tap to Speak";
       el.voiceButton.classList.toggle("recording", recording);
-      el.voiceButton.disabled = !ready || transcribing;
-      el.summaryButton.disabled = !ready;
-      el.statusButton.disabled = !ready;
-      el.stopButton.disabled = !ready;
+      el.voiceButton.disabled = !canAct || transcribing;
+      el.summaryButton.disabled = !canAct;
+      el.statusButton.disabled = !canAct;
+      el.stopButton.disabled = !canAct;
     }
 
     function addLog(title, body, requestId) {

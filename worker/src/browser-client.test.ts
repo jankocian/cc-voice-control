@@ -35,8 +35,9 @@ describe("push-to-talk browser client", () => {
     expect(script).toContain("localStorage.setItem(RATE_KEY, String(playbackRate))");
   });
 
-  it("keeps the activity log clean — no fabricated or system chatter", () => {
-    expect(script).toContain('case "ack":'); // ack returns without logging
+  it("keeps the activity log clean — only the user transcript and Claude's real reply are logged", () => {
+    expect(script).toContain('addLog("You", event.text)');
+    expect(script).toContain('addLog("Claude Code", event.text, event.requestId)');
     expect(script).not.toContain("Queued after the current task");
     expect(script).not.toContain("Connected to Claude Code bridge");
   });

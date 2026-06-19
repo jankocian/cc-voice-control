@@ -1,7 +1,7 @@
 {
   "name": "voice-command",
-  "version": "1.0.0",
-  "description": "Control an active Claude Code session from a phone via ElevenLabs voice.",
+  "version": "2.0.0",
+  "description": "Phone voice remote for your interactive Claude Code session — types your speech into the cmux pane and speaks replies back.",
   "author": {
     "name": "cc-voice-control"
   }

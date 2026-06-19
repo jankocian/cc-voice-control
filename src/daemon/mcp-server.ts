@@ -1,213 +1,115 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import * as z from "zod/v4";
-import { loadConfig } from "./config.js";
-import { VoiceRemoteManager } from "./session.js";
+import { existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { loadConfig, stateDir } from "./config.js";
+import { VoiceDaemon, createDaemonInit } from "./voice-daemon.js";
 
-const manager = new VoiceRemoteManager();
+/**
+ * Plugin MCP server that hosts the voice-remote daemon.
+ *
+ * Why an MCP server: Claude Code spawns it as a CHILD of the Claude process, so
+ * it stays inside cmux's process tree and keeps the socket trust needed to type
+ * into the pane. (A `nohup &` daemon is reparented to launchd and cmux rejects
+ * it.) Claude never calls any tool here — the server is purely a lineage-
+ * preserving background host. `/voice-command:start` activates it by creating a
+ * flag file; `/voice-command:stop` removes it.
+ *
+ * stdout is the MCP JSON-RPC channel and MUST stay clean — route every log to
+ * stderr (including any stray console.log from dependencies).
+ */
+console.log = (...args: unknown[]) => console.error(...args);
 
-const server = new McpServer({
-  name: "voice-command",
-  version: "1.0.0"
-});
+const ACTIVE_FLAG = join(stateDir(), "active");
 
-server.registerTool(
-  "voice_remote_start",
-  {
-    title: "Start voice remote session",
-    description: "Start or return the active phone voice remote session.",
-    outputSchema: {
-      sessionId: z.string(),
-      url: z.string(),
-      expiresAt: z.string()
-    }
-  },
-  async () => {
+let daemon: VoiceDaemon | undefined;
+let activating = false;
+
+async function activate(): Promise<void> {
+  if (daemon || activating) return;
+  activating = true;
+  try {
     const config = await loadConfig();
-    const session = await manager.start(config);
-    const structuredContent = {
-      sessionId: session.sessionId,
-      url: session.browserUrl,
-      expiresAt: new Date(session.expiresAt).toISOString()
-    };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
+    const next = new VoiceDaemon(createDaemonInit(config));
+    await next.start();
+    daemon = next;
+    console.error("[mcp] voice remote activated");
+  } catch (error) {
+    console.error(`[mcp] activation failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    activating = false;
   }
-);
+}
 
-server.registerTool(
-  "voice_remote_stop",
-  {
-    title: "Stop voice remote session",
-    description: "Terminate the active voice remote session.",
-    outputSchema: {
-      stopped: z.boolean()
+function deactivate(): void {
+  if (!daemon) return;
+  daemon.stop();
+  daemon = undefined;
+  console.error("[mcp] voice remote deactivated");
+}
+
+async function pollFlag(): Promise<void> {
+  try {
+    const active = existsSync(ACTIVE_FLAG);
+    if (active && !daemon) await activate();
+    else if (!active && daemon) deactivate();
+  } catch (error) {
+    console.error(`[mcp] flag poll error: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// ---- minimal MCP stdio (JSON-RPC, newline-delimited) ------------------------
+
+function reply(id: unknown, result: unknown): void {
+  if (id === undefined || id === null) return;
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+}
+
+function handle(msg: { id?: unknown; method?: string; params?: { protocolVersion?: string } }): void {
+  switch (msg.method) {
+    case "initialize":
+      reply(msg.id, {
+        protocolVersion: msg.params?.protocolVersion || "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "voice-command", version: "2.0.0" }
+      });
+      return;
+    case "tools/list":
+      reply(msg.id, { tools: [] });
+      return;
+    case "ping":
+      reply(msg.id, {});
+      return;
+    default:
+      // Other requests get a benign ack; notifications (no id) are ignored.
+      if (msg.id !== undefined && msg.id !== null && msg.method) reply(msg.id, {});
+  }
+}
+
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString();
+  let nl: number;
+  while ((nl = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, nl);
+    buffer = buffer.slice(nl + 1);
+    if (!line.trim()) continue;
+    try {
+      handle(JSON.parse(line));
+    } catch {
+      // ignore non-JSON lines
     }
-  },
-  async () => {
-    const structuredContent = { stopped: manager.stop() };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
   }
-);
+});
+process.stdin.on("end", () => shutdown());
 
-server.registerTool(
-  "voice_remote_status",
-  {
-    title: "Voice remote status",
-    description: "Return the active voice remote session status and memory.",
-    outputSchema: {
-      active: z.boolean(),
-      status: z.unknown().optional()
-    }
-  },
-  async () => {
-    const session = manager.current();
-    const structuredContent = {
-      active: Boolean(session),
-      status: session?.getStatus()
-    };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
-  }
-);
+function shutdown(): void {
+  deactivate();
+  process.exit(0);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
-server.registerTool(
-  "voice_next_message",
-  {
-    title: "Wait for next voice message",
-    description: "Blocking queue retrieval for the next instruction or control message from the phone.",
-    inputSchema: {
-      // Kept under the typical 60s MCP client request timeout so the long-poll
-      // returns (empty) and the skill loops, instead of the client erroring out.
-      timeoutMs: z.number().int().min(1000).max(55000).default(45000)
-    },
-    outputSchema: {
-      message: z.unknown().optional()
-    }
-  },
-  async ({ timeoutMs }, extra) => {
-    const session = manager.current();
-    // No active session means the remote was stopped — tell the skill to exit its loop.
-    const message = session
-      ? await session.nextMessage(timeoutMs, extra?.signal)
-      : { kind: "session_ended", text: "Voice session ended." };
-    const structuredContent = { message };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
-  }
-);
-
-server.registerTool(
-  "voice_reply",
-  {
-    title: "Send Claude reply to voice remote",
-    description: "Send Claude Code's response to the phone UI and voice layer.",
-    inputSchema: {
-      requestId: z.string().optional(),
-      text: z.string().min(1),
-      summary: z.string().optional(),
-      backgroundMode: z.boolean().default(false),
-      taskState: z.enum(["idle", "working", "voice_connected", "voice_suspended", "paused_for_user", "stopping"]).optional()
-    },
-    outputSchema: {
-      delivered: z.boolean()
-    }
-  },
-  async ({ requestId, text, summary, backgroundMode, taskState }) => {
-    const session = manager.current();
-    const delivered = session?.reply(text, { requestId, summary, backgroundMode, taskState }) ?? false;
-    const structuredContent = { delivered };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
-  }
-);
-
-server.registerTool(
-  "voice_get_steering_notes",
-  {
-    title: "Get steering notes",
-    description: "Return active steering notes collected while Claude Code is working.",
-    inputSchema: {
-      clear: z.boolean().default(false)
-    },
-    outputSchema: {
-      notes: z.array(z.string())
-    }
-  },
-  async ({ clear }) => {
-    const notes = manager.current()?.getSteeringNotes(clear) ?? [];
-    const structuredContent = { notes };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
-  }
-);
-
-server.registerTool(
-  "voice_check_control_message",
-  {
-    title: "Check control message",
-    description: "Return status or summary requests collected while Claude Code is working.",
-    inputSchema: {
-      clear: z.boolean().default(true)
-    },
-    outputSchema: {
-      message: z.unknown().optional()
-    }
-  },
-  async ({ clear }) => {
-    const message = manager.current()?.checkControlMessage(clear);
-    const structuredContent = { message };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
-  }
-);
-
-server.registerTool(
-  "voice_check_interrupt",
-  {
-    title: "Check interrupt",
-    description: "Return high-priority user interrupts such as stop, cancel, wait, or do not do that.",
-    inputSchema: {
-      clear: z.boolean().default(true)
-    },
-    outputSchema: {
-      interrupted: z.boolean(),
-      requestId: z.string().optional(),
-      text: z.string().optional(),
-      createdAt: z.number().optional()
-    }
-  },
-  async ({ clear }) => {
-    const interrupt = manager.current()?.checkInterrupt(clear);
-    const structuredContent = {
-      interrupted: Boolean(interrupt),
-      requestId: interrupt?.requestId,
-      text: interrupt?.text,
-      createdAt: interrupt?.createdAt
-    };
-    return {
-      content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent
-    };
-  }
-);
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error("voice-command MCP server running on stdio");
+mkdirSync(stateDir(), { recursive: true });
+setInterval(() => void pollFlag(), 1000);
+void pollFlag();
+console.error("[mcp] voice-command server up; waiting for /voice-command:start");

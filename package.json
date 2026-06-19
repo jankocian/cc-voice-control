@@ -1,30 +1,25 @@
 {
   "name": "cc-voice-control",
   "version": "1.0.0",
-  "description": "Voice remote for Claude Code using an MCP daemon, Cloudflare bridge, and ElevenLabs Agents.",
+  "description": "Voice remote for an interactive Claude Code session: phone push-to-talk, a Cloudflare bridge, and a local daemon that types transcripts into your cmux Claude pane and speaks replies back via ElevenLabs.",
   "type": "module",
-  "bin": {
-    "voice-remote-mcp": "./dist/daemon/mcp-server.js"
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
     "test": "vitest run",
-    "dev:daemon": "tsx src/daemon/mcp-server.ts",
     "dev:worker": "wrangler dev --config worker/wrangler.toml",
     "deploy:worker": "wrangler deploy --config worker/wrangler.toml"
   },
   "keywords": [
     "claude-code",
-    "mcp",
+    "voice",
+    "cmux",
     "elevenlabs",
     "cloudflare"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@elevenlabs/client": "^1.9.0",
-    "@modelcontextprotocol/sdk": "^1.24.1",
     "ws": "^8.18.3",
     "zod": "^4.2.0"
   },
@@ -32,7 +27,6 @@
     "@cloudflare/workers-types": "^4.20260603.0",
     "@types/node": "^25.0.0",
     "@types/ws": "^8.18.1",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.14",
     "wrangler": "^4.52.0"

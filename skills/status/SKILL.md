@@ -1,9 +1,15 @@
 ---
-description: Show the active phone voice remote session status.
+description: Show the phone voice remote status.
 disable-model-invocation: true
-allowed-tools: mcp__voice-command__voice_remote_status
+allowed-tools: Bash
 ---
 
-Call `voice_remote_status`.
+Report whether the voice remote is active and show its phone URL:
 
-Summarize whether the session is active, the public URL if present, connection status, state, current task, steering notes, and last summary.
+```sh
+D="${CLAUDE_PLUGIN_DATA}"
+if [ -f "$D/active" ]; then echo "active"; else echo "stopped"; fi
+cat "$D/runtime.json" 2>/dev/null || echo "no active session"
+```
+
+Summarize for the user: active or stopped, and the phone `sessionUrl` if present.

@@ -1,5 +1,5 @@
 import { stat, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
 import {
@@ -15,29 +15,58 @@ const ConfigSchema = z.object({
   // ElevenLabs model ids; sensible defaults applied at call sites when omitted.
   ttsModelId: z.string().min(1).optional(),
   sttModelId: z.string().min(1).optional(),
-  // Legacy: the conversational-agent id. No longer used by the push-to-talk flow.
-  agentId: z.string().min(1).optional(),
   bridgeUrl: z.string().url(),
   sessionTimeoutMinutes: z.number().int().positive().default(120)
 });
 
 export type VoiceRemoteConfig = z.infer<typeof ConfigSchema>;
 
-export const DEFAULT_CONFIG_PATH = join(homedir(), ".config", "voice-remote", "config.json");
+/**
+ * Where the plugin keeps runtime state (phone-session URL, the active flag,
+ * logs). This is Claude Code's managed per-plugin data dir ($CLAUDE_PLUGIN_DATA),
+ * NOT the user's ~/.config — a plugin must not create folders there. Falls back
+ * to a temp dir if the variable is somehow unset.
+ */
+export function stateDir(): string {
+  return process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
+}
 
-export async function loadConfig(path = process.env.VOICE_REMOTE_CONFIG ?? DEFAULT_CONFIG_PATH): Promise<VoiceRemoteConfig> {
-  const fileStat = await stat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
-      throw new Error(`Missing config file at ${path}`);
+export function runtimePath(): string {
+  return join(stateDir(), "runtime.json");
+}
+
+const LEGACY_CONFIG_PATH = join(homedir(), ".config", "voice-remote", "config.json");
+
+// Config is looked up in order: explicit $VOICE_REMOTE_CONFIG, then the plugin
+// data dir, then the legacy ~/.config path (back-compat for existing setups).
+function configCandidates(): string[] {
+  const candidates: string[] = [];
+  if (process.env.VOICE_REMOTE_CONFIG) candidates.push(process.env.VOICE_REMOTE_CONFIG);
+  if (process.env.CLAUDE_PLUGIN_DATA) candidates.push(join(process.env.CLAUDE_PLUGIN_DATA, "config.json"));
+  candidates.push(LEGACY_CONFIG_PATH);
+  return candidates;
+}
+
+export async function loadConfig(explicitPath?: string): Promise<VoiceRemoteConfig> {
+  const candidates = explicitPath ? [explicitPath] : configCandidates();
+  let chosen: string | undefined;
+  for (const candidate of candidates) {
+    const isFile = await stat(candidate).then((s) => s.isFile()).catch(() => false);
+    if (isFile) {
+      chosen = candidate;
+      break;
     }
-    throw error;
-  });
-
-  if ((fileStat.mode & 0o077) !== 0) {
-    throw new Error(`Config file permissions must be 0600: ${path}`);
+  }
+  if (!chosen) {
+    throw new Error(`Missing config file. Looked in: ${candidates.join(", ")}`);
   }
 
-  const raw = await readFile(path, "utf8");
+  const fileStat = await stat(chosen);
+  if ((fileStat.mode & 0o077) !== 0) {
+    throw new Error(`Config file permissions must be 0600: ${chosen}`);
+  }
+
+  const raw = await readFile(chosen, "utf8");
   return ConfigSchema.parse(JSON.parse(raw));
 }
 
