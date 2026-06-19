@@ -4,8 +4,8 @@ import { Button } from "@/components/ui/button";
 // preserving the original tap-to-cycle behavior and tabular-nums rate label.
 export function Header({ rateLabel, onCycleSpeed }: { rateLabel: string; onCycleSpeed: () => void }) {
   return (
-    <header class="app-header">
-      <h1 class="app-title">voice control</h1>
+    <header className="app-header">
+      <h1 className="app-title">voice control</h1>
       <Button
         id="speedButton"
         type="button"
@@ -13,7 +13,7 @@ export function Header({ rateLabel, onCycleSpeed }: { rateLabel: string; onCycle
         size="sm"
         aria-label="Playback speed"
         onClick={onCycleSpeed}
-        class="h-[30px] rounded-full px-3 text-[12.5px] font-semibold tabular-nums text-[color:var(--text-2)] hover:text-[color:var(--text)]"
+        className="h-[30px] rounded-full px-3 text-[12.5px] font-semibold tabular-nums text-[color:var(--text-2)] hover:text-[color:var(--text)]"
       >
         {rateLabel}
       </Button>

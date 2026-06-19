@@ -18,10 +18,10 @@ export type MessageListProps = {
 // `.log:empty::after` "No activity yet" placeholder and row styling are preserved.
 export function MessageList({ messages, playableIds, playingId, onPlay, onReplay }: MessageListProps) {
   return (
-    <Card class="log-panel flex flex-1 flex-col gap-0 overflow-hidden rounded-[var(--radius)] py-0 shadow-none">
-      <div class="panel-head">Activity</div>
-      <ScrollArea class="flex-1 min-h-[120px]">
-        <div id="log" class="log" aria-label="Session events">
+    <Card className="log-panel flex flex-1 flex-col gap-0 overflow-hidden rounded-[var(--radius)] py-0 shadow-none">
+      <div className="panel-head">Activity</div>
+      <ScrollArea className="flex-1 min-h-[120px]">
+        <div id="log" className="log" aria-label="Session events">
           {messages.map((message) => (
             <MessageRow
               key={message.id}
@@ -56,18 +56,18 @@ function MessageRow({
 
   return (
     <article
-      class={className}
+      className={className}
       data-kind={message.kind}
       data-request-id={requestId}
       onClick={playable && requestId ? () => onPlay(requestId) : undefined}
     >
       {playable && requestId ? (
-        <span class="entry-controls">
+        <span className="entry-controls">
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            class="replay-btn size-[26px] rounded-full text-[color:var(--text-3)] hover:text-[color:var(--text)]"
+            className="replay-btn size-[26px] rounded-full text-[color:var(--text-3)] hover:text-[color:var(--text)]"
             aria-label="Replay this message"
             onClick={(event) => {
               event.stopPropagation();
@@ -76,7 +76,7 @@ function MessageRow({
           >
             <ReplayIcon />
           </Button>
-          <span class="entry-icon">
+          <span className="entry-icon">
             <PlayPauseIcons />
           </span>
         </span>

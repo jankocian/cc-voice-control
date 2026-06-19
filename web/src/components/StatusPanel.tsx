@@ -18,20 +18,20 @@ export function StatusPanel({ status }: { status: StatusView }) {
   return (
     <Card
       id="statusPanel"
-      class="status flex-row gap-0 rounded-[var(--radius)] py-0 shadow-none"
+      className="status flex-row gap-0 rounded-[var(--radius)] py-0 shadow-none"
       data-state={status.dataState}
       aria-live="polite"
     >
-      <div class="status-main">
-        <span id="lamp" class={status.lampClass} aria-hidden="true" />
-        <div class="status-text">
+      <div className="status-main">
+        <span id="lamp" className={status.lampClass} aria-hidden="true" />
+        <div className="status-text">
           <strong id="stateLabel">{status.title}</strong>
           <span id="detailLabel">{status.detail}</span>
         </div>
       </div>
       <Badge
         variant={BADGE_VARIANT[status.dataState]}
-        class="shrink-0 uppercase tracking-wider text-[10px] font-semibold"
+        className="shrink-0 uppercase tracking-wider text-[10px] font-semibold"
       >
         {status.key === "not-listening" ? "offline" : status.dataState}
       </Badge>

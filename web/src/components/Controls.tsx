@@ -35,14 +35,14 @@ export function Controls(props: ControlsProps) {
   const voiceLabel = recording ? "Tap to Send" : transcribing ? "Sending…" : "Tap to Speak";
 
   return (
-    <section class="controls">
+    <section className="controls">
       <Button
         id="voiceButton"
         type="button"
         variant={recording ? "destructive" : "default"}
         disabled={!canAct || transcribing}
         onClick={props.onToggleRecord}
-        class={PRIMARY}
+        className={PRIMARY}
       >
         <MicIcon />
         <span id="voiceLabel">{voiceLabel}</span>
@@ -50,20 +50,20 @@ export function Controls(props: ControlsProps) {
 
       <Card
         id="visualizer"
-        class={`visualizer rounded-[var(--radius)] py-0 shadow-none${visualizerActive ? " active" : ""}`}
+        className={`visualizer rounded-[var(--radius)] py-0 shadow-none${visualizerActive ? " active" : ""}`}
         aria-hidden="true"
       >
         <canvas id="waveform" ref={canvasRef} />
       </Card>
 
-      <div id="sendChoice" class="controls-row two" hidden={!pending}>
+      <div id="sendChoice" className="controls-row two" hidden={!pending}>
         <Button
           id="queueButton"
           type="button"
           variant="secondary"
           disabled={!canAct}
           onClick={props.onQueue}
-          class={SECONDARY}
+          className={SECONDARY}
         >
           Queue it
         </Button>
@@ -73,20 +73,20 @@ export function Controls(props: ControlsProps) {
           variant="destructive"
           disabled={!canAct}
           onClick={props.onInterrupt}
-          class={SECONDARY}
+          className={SECONDARY}
         >
           Interrupt &amp; send
         </Button>
       </div>
 
-      <div class="controls-row">
+      <div className="controls-row">
         <Button
           id="summaryButton"
           type="button"
           variant="ghost"
           disabled={!canAct}
           onClick={props.onSummary}
-          class={GHOST}
+          className={GHOST}
         >
           Get summary
         </Button>
@@ -96,7 +96,7 @@ export function Controls(props: ControlsProps) {
           variant="ghost"
           disabled={!canAct}
           onClick={props.onStatus}
-          class={GHOST}
+          className={GHOST}
         >
           Get status
         </Button>
@@ -106,7 +106,7 @@ export function Controls(props: ControlsProps) {
           variant="ghost"
           disabled={!canAct}
           onClick={props.onStop}
-          class={`${GHOST} text-[color:var(--red)] hover:text-[color:var(--red)]`}
+          className={`${GHOST} text-[color:var(--red)] hover:text-[color:var(--red)]`}
         >
           Stop Claude
         </Button>
