@@ -23,13 +23,21 @@ Replace ElevenLabs with OpenAI for both directions — it's significantly cheape
 
 ---
 
-## 2. QR code to open the remote
+## 2. QR code to open the remote ✅
 
 Scanning beats copy-pasting a link to a phone.
 
-- [ ] The Claude Code chat (`/voice-control:start`) returns a **scannable QR code** encoding the session URL.
-- [ ] Render it so it's visible directly in the Claude Code terminal/chat (ASCII/Unicode QR).
-- [ ] Keep the plain URL as a fallback (for desktop / copy-paste).
+- [x] The Claude Code chat (`/voice-control:start`) returns a **scannable QR code** encoding the session URL.
+- [x] Render it so it's visible directly in the Claude Code terminal/chat (ASCII/Unicode QR).
+- [x] Keep the plain URL as a fallback (for desktop / copy-paste).
+
+**Implemented:** the daemon pre-renders a half-block Unicode QR of the phone URL to
+`$CLAUDE_PLUGIN_DATA/qr.txt` (next to `runtime.json`); the start/status skills print it into the
+chat inside a fenced code block, with the `sessionUrl` beneath it as a fallback. Encoder is
+`qrcode-generator` (ECC L for the smallest, least-wrap-prone code, bundled into the daemon by
+`bun build`); rendering uses foreground-only glyphs so it's theme-agnostic. `src/daemon/qr.ts` +
+tests (`qr.test.ts`) include a `jsqr` round-trip that proves the rendered code decodes back to
+the URL.
 
 ---
 

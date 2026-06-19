@@ -37,14 +37,14 @@ The MCP server ships pre-built as a single self-contained `dist/daemon/mcp-serve
 In your cmux Claude Code pane (the plugin must be loaded, e.g. `claude --plugin-dir .`):
 
 ```text
-/voice-control:start    # activates the remote, prints the phone URL
+/voice-control:start    # activates the remote, prints a scannable QR code + phone URL
 /voice-control:status
 /voice-control:stop
 ```
 
 `/voice-control:start` just flips the remote on and returns — your session stays
-fully interactive. Open the printed URL on your phone, tap to speak, and your words
-appear as messages in this session with replies spoken back.
+fully interactive. Scan the printed QR code with your phone (or open the URL beneath it),
+tap to speak, and your words appear as messages in this session with replies spoken back.
 
 ## How it works
 
