@@ -40,17 +40,22 @@ export function Orb({ state = "idle", className }: { state?: OrbState; className
         )}
       />
 
-      {/* The liquid blob itself */}
+      {/* The liquid blob itself: a warm peach core melting into cool violet at the
+          edge (radial), with a diagonal warm→cool wash layered over for depth. */}
       <div
         className={cn(
-          "relative size-[72%] animate-orb-morph animate-orb-drift bg-gradient-to-br from-orb-warm via-orb-mid to-orb-cool shadow-orb transition-[filter] duration-700",
-          dimmed && "saturate-[0.8] brightness-105"
+          "relative size-[72%] animate-orb-morph animate-orb-drift overflow-hidden bg-gradient-to-br from-orb-warm via-orb-mid to-orb-cool shadow-orb transition-[filter] duration-700",
+          dimmed && "saturate-[0.85] brightness-105"
         )}
       >
-        {/* Inner light wash for a glassy liquid sheen */}
-        <div className="absolute inset-0 rounded-[inherit] bg-gradient-to-t from-transparent via-white/10 to-white/45 mix-blend-soft-light" />
-        {/* Bright specular highlight, top-left */}
-        <div className="absolute left-[18%] top-[14%] size-[34%] rounded-full bg-white/60 blur-xl" />
+        {/* Radial warm core → cool periphery (the dominant read of the reference orb). */}
+        <div className="absolute inset-0 rounded-[inherit] bg-[radial-gradient(120%_120%_at_38%_34%,var(--color-orb-warm)_0%,var(--color-orb-mid)_38%,var(--color-orb-cool)_88%)]" />
+        {/* Cool violet bloom anchored lower-right for the lavender wrap. */}
+        <div className="absolute inset-0 rounded-[inherit] bg-[radial-gradient(80%_80%_at_82%_78%,var(--color-orb-cool)_0%,transparent_60%)] opacity-80" />
+        {/* Glassy liquid sheen. */}
+        <div className="absolute inset-0 rounded-[inherit] bg-gradient-to-t from-transparent via-white/10 to-white/40 mix-blend-soft-light" />
+        {/* Bright specular highlight, top-left. */}
+        <div className="absolute left-[20%] top-[16%] size-[32%] rounded-full bg-white/55 blur-xl" />
       </div>
 
       {/* Floating accent dots */}
