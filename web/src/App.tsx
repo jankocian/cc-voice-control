@@ -77,8 +77,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const getLastReplyId = useCallback(() => lastReplyIdRef.current, []);
 
   const bridge = useBridge({
-    sessionId: credentials.sessionId,
-    token: credentials.token,
+    secret: credentials.secret,
     onEvent: handleContentEvent,
     getLastReplyId
   });

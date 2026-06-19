@@ -18852,41 +18852,36 @@ config(en_default());
 // src/shared/bridge-contract.ts
 var BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 var BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
-var BRIDGE_TOKEN_QUERY_PARAM = "token";
 var BRIDGE_ROLE_QUERY_PARAM = "role";
-function toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token) {
+function toBridgeBrowserSessionUrl(bridgeUrl, secret) {
   const url2 = new URL(bridgeUrl);
-  url2.pathname = toBridgeBrowserSessionPath(sessionId);
-  writeBridgeAuthQuery(url2.searchParams, token);
+  url2.pathname = toBridgeBrowserSessionPath(secret);
   return url2.toString();
 }
-function toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role) {
+function toBridgeWebSocketUrl(bridgeUrl, secret, role) {
   const url2 = new URL(bridgeUrl);
   url2.protocol = toBridgeWebSocketProtocol(url2.protocol);
-  url2.pathname = toBridgeWebSocketPath(sessionId);
-  writeBridgeAuthQuery(url2.searchParams, token, role);
+  url2.pathname = toBridgeWebSocketPath(secret);
+  writeBridgeAuthQuery(url2.searchParams, role);
   return url2.toString();
 }
-function toBridgeBrowserSessionPath(sessionId) {
-  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSessionId(sessionId)}`;
+function toBridgeBrowserSessionPath(secret) {
+  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
-function toBridgeWebSocketPath(sessionId) {
-  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSessionId(sessionId)}`;
+function toBridgeWebSocketPath(secret) {
+  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
-function writeBridgeAuthQuery(searchParams, token, role) {
-  if (!token)
-    throw new Error("token is required");
-  searchParams.set(BRIDGE_TOKEN_QUERY_PARAM, token);
+function writeBridgeAuthQuery(searchParams, role) {
   if (role)
     searchParams.set(BRIDGE_ROLE_QUERY_PARAM, role);
 }
 function toBridgeWebSocketProtocol(protocol) {
   return protocol === "https:" || protocol === "wss:" ? "wss:" : "ws:";
 }
-function encodeSessionId(sessionId) {
-  if (!sessionId)
-    throw new Error("sessionId is required");
-  return encodeURIComponent(sessionId);
+function encodeSecret(secret) {
+  if (!secret)
+    throw new Error("secret is required");
+  return encodeURIComponent(secret);
 }
 
 // src/daemon/config.ts
@@ -18936,11 +18931,11 @@ async function loadConfig(explicitPath) {
   const raw = await readFile(chosen, "utf8");
   return ConfigSchema.parse(JSON.parse(raw));
 }
-function toWebSocketUrl(bridgeUrl, sessionId, token, role) {
-  return toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role);
+function toWebSocketUrl(bridgeUrl, secret, role) {
+  return toBridgeWebSocketUrl(bridgeUrl, secret, role);
 }
-function toBrowserUrl(bridgeUrl, sessionId, token) {
-  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token);
+function toBrowserUrl(bridgeUrl, secret) {
+  return toBridgeBrowserSessionUrl(bridgeUrl, secret);
 }
 
 // src/daemon/reconcile.ts
@@ -18956,7 +18951,7 @@ async function reconcile(actions) {
 }
 
 // src/daemon/voice-daemon.ts
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 
@@ -19140,10 +19135,10 @@ function selectMissedReply(lastReply, lastSeenReplyId) {
 }
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
-  const sessionId = randomUUID();
-  const token = randomBytes(32).toString("base64url");
-  const browserUrl = toBrowserUrl(config2.bridgeUrl, sessionId, token);
-  return { config: config2, surface, sessionId, token, browserUrl };
+  const secret = randomBytes(16).toString("base64url");
+  const sessionId = createHash("sha256").update(secret).digest("base64url").slice(0, 12);
+  const browserUrl = toBrowserUrl(config2.bridgeUrl, secret);
+  return { config: config2, surface, secret, sessionId, browserUrl };
 }
 
 class VoiceDaemon {
@@ -19222,7 +19217,7 @@ class VoiceDaemon {
   connectBridge() {
     if (this.stopped)
       return;
-    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.sessionId, this.init.token, "daemon");
+    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon");
     const ws = new wrapper_default(url2);
     this.ws = ws;
     ws.on("open", () => this.emitStatus());

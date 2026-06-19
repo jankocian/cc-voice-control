@@ -75,10 +75,10 @@ export async function loadConfig(explicitPath?: string): Promise<VoiceRemoteConf
   return ConfigSchema.parse(JSON.parse(raw));
 }
 
-export function toWebSocketUrl(bridgeUrl: string, sessionId: string, token: string, role: BridgeClientRole): string {
-  return toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role);
+export function toWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole): string {
+  return toBridgeWebSocketUrl(bridgeUrl, secret, role);
 }
 
-export function toBrowserUrl(bridgeUrl: string, sessionId: string, token: string): string {
-  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token);
+export function toBrowserUrl(bridgeUrl: string, secret: string): string {
+  return toBridgeBrowserSessionUrl(bridgeUrl, secret);
 }

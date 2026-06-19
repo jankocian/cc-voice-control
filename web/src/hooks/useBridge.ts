@@ -24,8 +24,9 @@ export type BridgeRuntime = {
 };
 
 export type UseBridgeOptions = {
-  sessionId: string;
-  token: string;
+  // The single capability secret from the URL path (/s/<secret>); used to build the
+  // /ws/<secret>?role=browser bridge socket URL.
+  secret: string;
   // Called for transcript / claude_reply / tts_audio / error events.
   onEvent: (event: BridgeContentEvent) => void;
   // The requestId of the most recent reply already shown, sent on (re)connect so
@@ -48,7 +49,7 @@ export type Bridge = {
 const RECONNECT_MS = 1500;
 
 export function useBridge(options: UseBridgeOptions): Bridge {
-  const { sessionId, token, onEvent, getLastReplyId, onSendFailed } = options;
+  const { secret, onEvent, getLastReplyId, onSendFailed } = options;
 
   const [connected, setConnected] = useState(false);
   const [daemonConnected, setDaemonConnected] = useState(false);
@@ -142,7 +143,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
 
     function connect(): void {
       if (stopped) return;
-      const socket = new WebSocket(buildWebSocketUrl(sessionId, token));
+      const socket = new WebSocket(buildWebSocketUrl(secret));
       socketRef.current = socket;
 
       socket.addEventListener("message", (messageEvent) => {
@@ -190,7 +191,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         }
       }
     };
-  }, [sessionId, token]);
+  }, [secret]);
 
   // Surface a send-failure callback for sendControl-style flashes without
   // re-creating sendDaemon. (onSendFailed is read from the ref by callers.)

@@ -17,11 +17,6 @@ type SocketAttachment = {
   role: BridgeClientRole;
 };
 
-type StoredAuth = {
-  tokenHash: string;
-  sessionId: string;
-};
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -34,14 +29,18 @@ export default {
       return new Response(null, { status: 204 });
     }
 
-    const browserSessionId = parseBridgeBrowserSessionPath(url.pathname);
-    if (request.method === "GET" && browserSessionId) {
-      return renderSessionPage(env, browserSessionId, readBridgeAuthQuery(url.searchParams).token);
+    const browserSecret = parseBridgeBrowserSessionPath(url.pathname);
+    if (request.method === "GET" && browserSecret) {
+      return renderSessionPage(env);
     }
 
-    const webSocketSessionId = parseBridgeWebSocketPath(url.pathname);
-    if (request.method === "GET" && webSocketSessionId) {
-      const id = env.VOICE_SESSIONS.idFromName(webSocketSessionId);
+    const webSocketSecret = parseBridgeWebSocketPath(url.pathname);
+    if (request.method === "GET" && webSocketSecret) {
+      // Route by the secret's hash, never the raw secret: the Durable Object name is a
+      // non-secret, one-way derivative, so reaching a session's DO already proves knowledge
+      // of its secret (sha256 is preimage-resistant). That routing IS the capability gate —
+      // a guessed path lands on a different, empty DO, never the victim's session.
+      const id = env.VOICE_SESSIONS.idFromName(await sha256(webSocketSecret));
       return env.VOICE_SESSIONS.get(id).fetch(request);
     }
 
@@ -54,8 +53,7 @@ export default {
 export class VoiceSessionDurableObject extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const sessionId = parseBridgeWebSocketPath(url.pathname) ?? "";
-    const { token, role } = readBridgeAuthQuery(url.searchParams);
+    const { role } = readBridgeAuthQuery(url.searchParams);
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
@@ -73,10 +71,10 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       return new Response("Invalid role", { status: 400 });
     }
 
-    if (!token || !(await this.authorize(sessionId, token))) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
+    // No token/credential check here: this DO is only reachable via /ws/<secret> routed
+    // through idFromName(sha256(secret)), so arriving at this object already proves the
+    // caller knows the session secret. The secret is the whole capability; the session
+    // lives until the daemon terminates it (no wall-clock expiry).
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.serializeAttachment({ role } satisfies SocketAttachment);
@@ -122,26 +120,6 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
   async webSocketError(ws: WebSocket): Promise<void> {
     this.broadcastPresence(ws);
-  }
-
-  // Trust-on-first-use: the first connection for a session binds its token; later
-  // connections must match it and the session id. `blockConcurrencyWhile` makes the
-  // read-decide-write atomic — without it the non-storage `await sha256` opens the DO
-  // input gate, letting two simultaneous first-connects both observe no auth and both
-  // write (last writer wins). The session lives until the daemon terminates it; there
-  // is no wall-clock expiry — capability is bounded by the daemon's (session's) lifetime.
-  private authorize(sessionId: string, token: string): Promise<boolean> {
-    return this.ctx.blockConcurrencyWhile(async () => {
-      const tokenHash = await sha256(token);
-      const stored = await this.ctx.storage.get<StoredAuth>("auth");
-
-      if (!stored) {
-        await this.ctx.storage.put("auth", { tokenHash, sessionId } satisfies StoredAuth);
-        return true;
-      }
-
-      return stored.sessionId === sessionId && stored.tokenHash === tokenHash;
-    });
   }
 
   private async expireSession(): Promise<void> {
@@ -240,15 +218,11 @@ function loadSpaAssets(env: Env): Promise<SpaAssets> {
   return spaAssetsCache;
 }
 
-async function renderSessionPage(env: Env, sessionId: string, token: string): Promise<Response> {
-  if (!token) {
-    return new Response("Missing session token", { status: 401 });
-  }
-
-  // sessionId is in the path the SPA reads; reference it so the signature stays
-  // honest even though credentials are no longer injected server-side.
-  void sessionId;
-
+// The phone shell is a built static SPA served from this origin; the single capability
+// secret lives in the URL path (/s/<secret>) and the client reads it from there. Nothing
+// is injected server-side, so reaching a valid /s/<secret> route is enough to serve the
+// shell — the WS handshake (idFromName(sha256(secret))) is where the secret is enforced.
+async function renderSessionPage(env: Env): Promise<Response> {
   let assets: SpaAssets;
   try {
     assets = await loadSpaAssets(env);
@@ -259,8 +233,8 @@ async function renderSessionPage(env: Env, sessionId: string, token: string): Pr
   const styleLinks = assets.styles.map((href) => `  <link rel="stylesheet" href="${href}" />`).join("\n");
 
   // Minimal shell: the Worker owns this HTML + the CSP, but the SPA is a built
-  // static bundle served from 'self'. The client reads sessionId/token/expiresAt
-  // straight from the URL — nothing is injected here.
+  // static bundle served from 'self'. The client reads the single capability secret
+  // straight from the URL path (/s/<secret>) — nothing is injected here.
   const html = `<!doctype html>
 <html lang="en">
 <head>

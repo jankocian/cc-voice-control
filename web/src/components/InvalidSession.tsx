@@ -1,7 +1,7 @@
 import { LinkIcon } from "lucide-react";
 
-// Shown when the URL has no valid /s/<id>?token=… — an honest message rather than
-// a broken UI. (The Worker also refuses to serve the shell without a token.)
+// Shown when the URL has no valid /s/<secret> path — an honest message rather than
+// a broken UI. The capability secret lives in the path; there is no separate token.
 export function InvalidSession() {
   return (
     <main className="grid min-h-full place-items-center bg-canvas px-8">

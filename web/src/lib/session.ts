@@ -1,12 +1,12 @@
-// Reads the session credentials straight from the URL the daemon handed the phone:
-//   /s/<sessionId>?token=…   (optionally &expiresAt=… — forward-compatible; the
-// current daemon does not set it, and the bridge has no wall-clock expiry).
-// No server-side injection — the SPA is a static asset.
+// Reads the session capability from the URL the daemon handed the phone:
+//   /s/<secret>
+// A session is gated by a single secret carried in the URL path. There is no separate
+// token: the secret both routes the session (the worker derives the Durable Object name
+// by hashing it) and authorizes joining it, so knowledge of the secret IS the capability.
+// No server-side injection — the SPA is a static asset and reads the secret from the path.
 
 export type SessionCredentials = {
-  sessionId: string;
-  token: string;
-  expiresAt: number | null;
+  secret: string;
 };
 
 const SESSION_PATH_PATTERN = /^\/s\/([^/]+)$/;
@@ -15,34 +15,24 @@ export function readSessionCredentials(loc: Location = window.location): Session
   const match = loc.pathname.match(SESSION_PATH_PATTERN);
   if (!match) return null;
 
-  let sessionId: string;
+  let secret: string;
   try {
-    sessionId = decodeURIComponent(match[1]);
+    secret = decodeURIComponent(match[1]);
   } catch {
     return null;
   }
-  if (!sessionId) return null;
+  if (!secret) return null;
 
-  const params = new URLSearchParams(loc.search);
-  const token = params.get("token") ?? "";
-  if (!token) return null;
-
-  const rawExpiresAt = params.get("expiresAt");
-  const expiresAt = rawExpiresAt ? Number.parseInt(rawExpiresAt, 10) : NaN;
-
-  return {
-    sessionId,
-    token,
-    expiresAt: Number.isFinite(expiresAt) ? expiresAt : null
-  };
+  return { secret };
 }
 
-// Mirrors the original: wss when the page is https, the bridge socket path is
-// /ws/<sessionId>, carrying the token and role=browser.
-export function buildWebSocketUrl(sessionId: string, token: string, loc: Location = window.location): string {
-  const wsUrl = new URL(`/ws/${encodeURIComponent(sessionId)}`, loc.href);
+// Mirrors the bridge contract: wss when the page is https, the bridge socket path is
+// /ws/<secret>, carrying only role=browser. The secret in the path is the whole
+// capability — the worker routes by idFromName(sha256(secret)), so reaching the
+// session's Durable Object already proves knowledge of the secret.
+export function buildWebSocketUrl(secret: string, loc: Location = window.location): string {
+  const wsUrl = new URL(`/ws/${encodeURIComponent(secret)}`, loc.href);
   wsUrl.protocol = loc.protocol === "https:" ? "wss:" : "ws:";
-  wsUrl.searchParams.set("token", token);
   wsUrl.searchParams.set("role", "browser");
   return wsUrl.toString();
 }
