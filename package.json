@@ -9,8 +9,10 @@
     "test": "vitest run",
     "lint": "biome ci .",
     "format": "biome check --write .",
-    "dev:worker": "wrangler dev --config worker/wrangler.toml",
-    "deploy:worker": "wrangler deploy --config worker/wrangler.toml"
+    "build:web": "cd web && vite build",
+    "dev:web": "cd web && vite",
+    "dev:worker": "npm run build:web && wrangler dev --config worker/wrangler.toml",
+    "deploy:worker": "npm run build:web && wrangler deploy --config worker/wrangler.toml"
   },
   "keywords": [
     "claude-code",
