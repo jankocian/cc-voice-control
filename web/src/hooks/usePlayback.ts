@@ -88,25 +88,46 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
   // client toggled the .playing class on play and cleared it on pause/ended/error.
   useEffect(() => {
     const onPlay = () => setPlayingId(currentPlayingIdRef.current);
-    const onPause = () => {
-      setPlayingId(null);
-      // Hand the audio session back so iOS resumes any background music we ducked. A
-      // follow-on clip re-claims "transient-solo" in startPlayback before it plays.
-      setAudioSessionType("auto");
-    };
-    const onEnded = () => {
-      // Keep the row loaded (scrubber stays visible) but reset the playhead so a
-      // tap on play restarts; only the "playing" pause-icon state clears.
-      setPlayingId(null);
-      setPosition(0);
-      setAudioSessionType("auto");
-    };
-    const onError = () => {
+    // Fully tear down the <audio> element. This is the load-bearing fix for "background
+    // music never resumes": on iOS a still-loaded element keeps WebKit's native audio
+    // session ACTIVE, which suppresses the resume of the other app (Spotify/Apple Music).
+    // Removing the src + calling load() forces the session to deactivate — the reliable
+    // trigger for the other app to come back. We then mark the session explicitly mixable
+    // ("ambient"); the next reply re-claims "transient-solo" in startPlayback.
+    const unload = () => {
+      try {
+        player.pause();
+      } catch {
+        /* ignore */
+      }
+      player.removeAttribute("src");
+      try {
+        player.load();
+      } catch {
+        /* ignore */
+      }
+      if (currentUrlRef.current) {
+        URL.revokeObjectURL(currentUrlRef.current);
+        currentUrlRef.current = null;
+      }
       currentPlayingIdRef.current = null;
       setPlayingId(null);
       setLoadedId(null);
-      setAudioSessionType("auto");
+      setPosition(0);
+      setDuration(0);
+      setAudioSessionType("ambient");
     };
+    const onPause = () => {
+      setPlayingId(null);
+      // A manual pause keeps the clip loaded (so it can be resumed from the scrubber) but
+      // still hands the session back as mixable so background audio isn't held hostage.
+      setAudioSessionType("ambient");
+    };
+    // Natural end / load error → tear the element down so the native session deactivates
+    // and any ducked background music resumes. The row falls back to its replay control
+    // (still in playableIds); a tap reloads it fresh.
+    const onEnded = () => unload();
+    const onError = () => unload();
     const onTime = () => setPosition(player.currentTime || 0);
     const onMeta = () => setDuration(Number.isFinite(player.duration) ? player.duration : 0);
     player.addEventListener("play", onPlay);
