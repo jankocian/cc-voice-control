@@ -1,5 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { blobToBase64, pickMimeType } from "../lib/audio";
+import { ensureAudioRunning, getAudioContext, wireAudioContextRecovery } from "../lib/audioContext";
+import { setAudioSessionType } from "../lib/audioSession";
 
 export type RecordedClip = { audioBase64: string; mimeType: string };
 
@@ -18,6 +20,14 @@ export type UseRecorderOptions = {
   // Called when recording starts so playback can be stopped (vanilla: stopPlayback()).
   onStart?: () => void;
 };
+
+// A mic track is only usable when it's live AND its source is delivering media. After an
+// iOS screen lock a freshly-granted track can come back muted (silence → empty clip) or
+// already ended, so we verify rather than trust "permission granted".
+function trackHealthy(stream: MediaStream | null): boolean {
+  const track = stream?.getAudioTracks()[0];
+  return !!track && track.readyState === "live" && track.muted === false;
+}
 
 export type Recorder = {
   recording: boolean;
@@ -44,7 +54,10 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   // Set by cancel(): the next `stop` event drops its clip instead of submitting.
   const canceledRef = useRef(false);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
+  // The AudioContext is the shared, app-wide singleton (see lib/audioContext) — never
+  // created or closed here, only resumed. `sourceRef` is the per-recording mic node we
+  // connect/disconnect around the shared analyser.
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const freqDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const rafRef = useRef(0);
@@ -117,11 +130,12 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     const stream = mediaStreamRef.current;
     if (!stream) return;
     try {
-      const AudioCtor =
-        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const audioCtx = new AudioCtor();
-      audioCtxRef.current = audioCtx;
+      // Reuse the shared context (already resumed inside the record gesture by start()).
+      // A fresh per-recording context would risk being born suspended/interrupted on iOS
+      // and paint a flat waveform.
+      const audioCtx = getAudioContext();
       const source = audioCtx.createMediaStreamSource(stream);
+      sourceRef.current = source;
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
       analyser.smoothingTimeConstant = 0.82;
@@ -143,13 +157,22 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
       cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
     }
-    if (audioCtxRef.current) {
+    // Disconnect the per-recording mic node but leave the SHARED context open (closing it
+    // would defeat the keep-one-context-alive strategy and break the next recording).
+    if (sourceRef.current) {
       try {
-        void audioCtxRef.current.close();
+        sourceRef.current.disconnect();
       } catch {
         /* ignore */
       }
-      audioCtxRef.current = null;
+      sourceRef.current = null;
+    }
+    if (analyserRef.current) {
+      try {
+        analyserRef.current.disconnect();
+      } catch {
+        /* ignore */
+      }
     }
     analyserRef.current = null;
     freqDataRef.current = null;
@@ -169,6 +192,9 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     const blob = new Blob(chunksRef.current, { type: mimeType });
     chunksRef.current = [];
     stopStream();
+    // Leave the exclusive recording category so iOS lets background music (Spotify)
+    // resume. A reply's TTS will re-claim the session as "transient-solo" when it plays.
+    setAudioSessionType("auto");
     // Cancelled by the user — drop the clip silently (no clip, no error flash).
     if (canceled) return;
     if (!blob.size) {
@@ -213,19 +239,55 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     }
   }, [stopVisualizer]);
 
+  // Re-acquire the mic from scratch. The old track is stopped first: iOS mutes the prior
+  // track of the same kind when you call getUserMedia again, and that mute is unrecoverable.
+  const acquireMic = useCallback(async (): Promise<MediaStream> => {
+    stopStream();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaStreamRef.current = stream;
+    // If the source is permanently lost mid-recording (interruption relinquishes the
+    // device), stop cleanly and keep what we captured — iOS won't reliably resume the
+    // same MediaRecorder across the boundary. We bail on `ended` only; a transient `mute`
+    // may auto-recover, and stopping on it would cut otherwise-good recordings short.
+    stream.getAudioTracks()[0]?.addEventListener("ended", () => {
+      if (recordingRef.current) stop();
+    });
+    return stream;
+  }, [stopStream, stop]);
+
   const start = useCallback(async (): Promise<void> => {
     if (!navigator.mediaDevices || !window.MediaRecorder) {
       onErrorRef.current("not-supported");
       return;
     }
+    // Claim the recording category BEFORE getUserMedia. Without play-and-record the Audio
+    // Session spec ends the mic track on the next interruption; setting it here is what
+    // lets recording survive (and recover after) a screen lock. No-op off iOS.
+    setAudioSessionType("play-and-record");
+    // Resume the shared context inside this tap gesture so the visualiser isn't a flat
+    // line after returning from a lock (a backgrounded context comes back suspended).
+    try {
+      await ensureAudioRunning();
+    } catch {
+      /* visualiser is decorative; recording proceeds regardless */
+    }
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await acquireMic();
+      // One retry: the device may have been relinquished during the lock and the first
+      // re-acquire can hand back a still-muted track.
+      if (!trackHealthy(stream)) stream = await acquireMic();
     } catch {
+      setAudioSessionType("auto");
       onErrorRef.current("mic-blocked");
       return;
     }
-    mediaStreamRef.current = stream;
+    if (!trackHealthy(stream)) {
+      stopStream();
+      setAudioSessionType("auto");
+      onErrorRef.current("mic-blocked");
+      return;
+    }
     onStartRef.current?.();
     chunksRef.current = [];
     const mime = pickMimeType();
@@ -235,16 +297,26 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
       if (event.data && event.data.size > 0) chunksRef.current.push(event.data);
     });
     recorder.addEventListener("stop", () => void submitRecording());
-    recorder.start();
+    // Timeslice so chunks flush periodically — iOS may stop the recorder abruptly on an
+    // interruption, and regularly-flushed chunks mean we keep the audio up to that point.
+    recorder.start(250);
     recordingRef.current = true;
     setRecording(true);
     startVisualizer();
-  }, [startVisualizer, submitRecording]);
+  }, [acquireMic, stopStream, startVisualizer, submitRecording]);
 
   const teardown = useCallback((): void => {
     stopVisualizer();
     stopStream();
+    // Release the recording category on hard teardown so background audio isn't left paused.
+    setAudioSessionType("auto");
   }, [stopVisualizer, stopStream]);
+
+  // Keep the shared AudioContext warm across gestures / foreground returns so the first
+  // record tap after a screen lock finds a live context instead of a flat one.
+  useEffect(() => {
+    wireAudioContextRecovery();
+  }, []);
 
   // Clean up on unmount.
   useEffect(() => teardown, [teardown]);
