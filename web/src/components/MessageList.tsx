@@ -1,3 +1,6 @@
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Message } from "../lib/messages";
 import { PlayPauseIcons, ReplayIcon } from "./icons";
 
@@ -10,23 +13,28 @@ export type MessageListProps = {
   onReplay: (requestId: string) => void;
 };
 
+// The activity panel is a shadcn <Card>; its scroll region is a shadcn
+// <ScrollArea> (Radix). The `.log` class stays on the inner content div so the
+// `.log:empty::after` "No activity yet" placeholder and row styling are preserved.
 export function MessageList({ messages, playableIds, playingId, onPlay, onReplay }: MessageListProps) {
   return (
-    <section class="panel log-panel">
+    <Card class="log-panel flex flex-1 flex-col gap-0 overflow-hidden rounded-[var(--radius)] py-0 shadow-none">
       <div class="panel-head">Activity</div>
-      <div id="log" class="log" aria-label="Session events">
-        {messages.map((message) => (
-          <MessageRow
-            key={message.id}
-            message={message}
-            playable={Boolean(message.requestId && playableIds.has(message.requestId))}
-            playing={Boolean(message.requestId && playingId === message.requestId)}
-            onPlay={onPlay}
-            onReplay={onReplay}
-          />
-        ))}
-      </div>
-    </section>
+      <ScrollArea class="flex-1 min-h-[120px]">
+        <div id="log" class="log" aria-label="Session events">
+          {messages.map((message) => (
+            <MessageRow
+              key={message.id}
+              message={message}
+              playable={Boolean(message.requestId && playableIds.has(message.requestId))}
+              playing={Boolean(message.requestId && playingId === message.requestId)}
+              onPlay={onPlay}
+              onReplay={onReplay}
+            />
+          ))}
+        </div>
+      </ScrollArea>
+    </Card>
   );
 }
 
@@ -55,9 +63,11 @@ function MessageRow({
     >
       {playable && requestId ? (
         <span class="entry-controls">
-          <button
+          <Button
             type="button"
-            class="ec-btn replay-btn"
+            variant="ghost"
+            size="icon-sm"
+            class="replay-btn size-[26px] rounded-full text-[color:var(--text-3)] hover:text-[color:var(--text)]"
             aria-label="Replay this message"
             onClick={(event) => {
               event.stopPropagation();
@@ -65,7 +75,7 @@ function MessageRow({
             }}
           >
             <ReplayIcon />
-          </button>
+          </Button>
           <span class="entry-icon">
             <PlayPauseIcons />
           </span>

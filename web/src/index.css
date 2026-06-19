@@ -1,13 +1,18 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 /*
  * Faithful port of the original server-rendered <style> block. Clean, minimal,
  * monochrome. One hairline border token (--border) is used for every surface,
  * divider and control so the whole UI shares the same edge.
  *
- * Design tokens live in @theme so Tailwind exposes them; the component/state
- * rules below are plain CSS, ported verbatim from the vanilla build.
+ * The UI is composed from shadcn/ui components (Button, Card, Badge, ScrollArea).
+ * The shadcn semantic theme tokens below are mapped onto this app's existing
+ * monochrome palette so the shadcn components inherit the exact same look —
+ * no separate light/dark theme, the whole app is the original dark surface.
  */
+@custom-variant dark (&:is(.dark *));
+
 @theme {
   --color-bg: #0a0a0b;
   --color-panel: #141416;
@@ -23,13 +28,68 @@
   --radius-app: 10px;
 }
 
+/*
+ * shadcn semantic tokens. Mapped onto the app palette above so <Button>, <Card>,
+ * <Badge> and <ScrollArea> render in the app's own colours. `--radius` feeds
+ * shadcn's rounded-* scale; we keep the app's 10px corner.
+ */
+:root {
+  --radius: 10px;
+
+  --background: var(--color-bg);
+  --foreground: var(--color-text);
+  --card: var(--color-panel);
+  --card-foreground: var(--color-text);
+  --popover: var(--color-panel);
+  --popover-foreground: var(--color-text);
+  /* Primary = the one deliberate emphasis: inverted (light fill, dark text). */
+  --primary: var(--color-text);
+  --primary-foreground: #0a0a0b;
+  --secondary: var(--color-panel-2);
+  --secondary-foreground: var(--color-text);
+  --muted: var(--color-panel-2);
+  --muted-foreground: var(--color-text-2);
+  --accent: var(--color-panel-2);
+  --accent-foreground: var(--color-text);
+  --destructive: var(--color-red);
+  --destructive-foreground: #fff;
+  --border: var(--color-border);
+  --input: var(--color-border);
+  --ring: var(--color-text-2);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
 :root {
   color-scheme: dark;
   /* Aliases so the ported CSS can keep its original var() names. */
   --bg: var(--color-bg);
   --panel: var(--color-panel);
   --panel-2: var(--color-panel-2);
-  --border: var(--color-border);
   --text: var(--color-text);
   --text-2: var(--color-text-2);
   --text-3: var(--color-text-3);
@@ -37,7 +97,6 @@
   --blue: var(--color-blue);
   --violet: var(--color-violet);
   --red: var(--color-red);
-  --radius: var(--radius-app);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -100,14 +159,8 @@ main {
   text-align: right;
 }
 
-/* Shared surface — every panel uses the same hairline border */
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-/* Status — the primary feedback surface: a solid color fill per state */
+/* Status — the primary feedback surface: a solid color fill per state. Applied
+ * to the shadcn <Card> via data-state so the Card inherits each state's tint. */
 .status {
   display: flex;
   align-items: center;
@@ -231,27 +284,7 @@ main {
   white-space: nowrap;
 }
 
-.status-meta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  flex: 0 0 auto;
-}
-.meta-label {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-.elapsed {
-  font-size: 14px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-2);
-  margin-top: 2px;
-}
-
-/* Controls */
+/* Controls layout (the buttons themselves are shadcn <Button>). */
 .controls {
   display: flex;
   flex-direction: column;
@@ -269,115 +302,25 @@ main {
   display: none !important;
 }
 
-.btn {
-  -webkit-appearance: none;
-  appearance: none;
-  cursor: pointer;
-  font: inherit;
-  color: var(--text);
-  display: inline-flex;
+/* Listening visualizer — audio-reactive bars driven by the mic AnalyserNode.
+ * The wrapper is a shadcn <Card>; only the show/hide + sizing live here. */
+.visualizer {
+  display: none;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 52px;
-  padding: 0 16px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--panel);
-  font-size: 14px;
-  font-weight: 540;
-  letter-spacing: -0.005em;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease,
-    color 0.15s ease,
-    opacity 0.15s ease,
-    transform 0.1s ease;
+  height: 78px;
+  padding: 8px 16px;
 }
-
-.btn svg {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-}
-.btn:active {
-  transform: scale(0.99);
-}
-.btn:disabled {
-  opacity: 0.4;
-  pointer-events: none;
-}
-.btn:focus-visible {
-  outline: 2px solid var(--text-2);
-  outline-offset: 2px;
-}
-
-@media (hover: hover) {
-  .btn:hover {
-    background: var(--panel-2);
-    border-color: #34343a;
-  }
-}
-
-/* Primary — the one deliberate emphasis: a solid, inverted fill */
-.btn.primary {
-  min-height: 56px;
-  background: var(--text);
-  border-color: var(--text);
-  color: #0a0a0b;
-  font-weight: 580;
-}
-
-.btn.primary.recording {
-  background: var(--red);
-  border-color: var(--red);
-  color: #fff;
-}
-
-@media (hover: hover) {
-  .btn.primary:hover {
-    background: #fff;
-    border-color: #fff;
-  }
-  .btn.primary.recording:hover {
-    background: #ef5e62;
-    border-color: #ef5e62;
-  }
-}
-
-/* Secondary — quiet ghost buttons, same hairline border */
-.btn.ghost {
-  background: transparent;
-  color: var(--text-2);
-  font-size: 13px;
-  min-height: 46px;
-}
-.btn.ghost.danger {
-  color: var(--red);
-}
-
-@media (hover: hover) {
-  .btn.ghost:hover {
-    background: var(--panel);
-    color: var(--text);
-    border-color: #34343a;
-  }
-  .btn.ghost.danger:hover {
-    color: #ef5e62;
-  }
-}
-
-/* Activity */
-.log-panel {
-  flex: 1;
-  min-height: 180px;
+.visualizer.active {
   display: flex;
-  flex-direction: column;
-  overflow: hidden;
+}
+#waveform {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
+/* Activity log rows (inside the shadcn <Card> + <ScrollArea>). */
 .panel-head {
   padding: 12px 16px;
   font-size: 11px;
@@ -388,24 +331,12 @@ main {
   border-bottom: 1px solid var(--border);
 }
 
-.log {
-  flex: 1;
-  min-height: 120px;
-  overflow-y: auto;
-}
 .log:empty::after {
   content: "No activity yet";
   display: block;
   padding: 18px 16px;
   color: var(--text-3);
   font-size: 13px;
-}
-.log::-webkit-scrollbar {
-  width: 8px;
-}
-.log::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 99px;
 }
 
 .entry {
@@ -449,53 +380,6 @@ main {
   font-weight: 600;
 }
 
-/* Listening visualizer — audio-reactive bars driven by the mic AnalyserNode */
-.visualizer {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  height: 78px;
-  padding: 8px 16px;
-}
-.visualizer.active {
-  display: flex;
-}
-#waveform {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-/* Header playback-speed pill (top-right) */
-.speed-pill {
-  -webkit-appearance: none;
-  appearance: none;
-  cursor: pointer;
-  flex: 0 0 auto;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 99px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text-2);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-  transition:
-    color 0.15s ease,
-    border-color 0.15s ease,
-    background 0.15s ease;
-}
-@media (hover: hover) {
-  .speed-pill:hover {
-    color: var(--text);
-    border-color: #34343a;
-  }
-}
-
 /* Tappable message playback — tap a reply to play/pause, or use the replay button */
 .entry.playable {
   cursor: pointer;
@@ -512,36 +396,6 @@ main {
   align-items: center;
   gap: 4px;
   margin: -1px 0 6px 12px;
-}
-.entry .ec-btn {
-  -webkit-appearance: none;
-  appearance: none;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  border: 0;
-  background: transparent;
-  color: var(--text-3);
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-  transition:
-    color 0.15s ease,
-    background 0.15s ease;
-}
-.entry .ec-btn svg {
-  width: 15px;
-  height: 15px;
-  display: block;
-}
-@media (hover: hover) {
-  .entry .ec-btn:hover {
-    color: var(--text);
-    background: var(--panel);
-  }
 }
 .entry .entry-icon {
   display: inline-flex;
@@ -568,9 +422,6 @@ main {
 }
 .entry.playing .entry-icon {
   color: var(--violet);
-}
-.entry.playing .ec-btn {
-  color: var(--text-2);
 }
 .entry.playing .entry-icon .ic-play {
   display: none;
