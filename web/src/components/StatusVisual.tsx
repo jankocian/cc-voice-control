@@ -15,14 +15,17 @@ import { cn } from "@/lib/utils";
 // Symmetric "tall in the middle" equalizer. Each bar carries a height and a
 // staggered animation delay; arbitrary-value classes are build-time (no inline
 // styles), consistent with the design-system rules.
+// `delay` staggers the strong working/speaking equalizer (mirrored, tall-in-middle).
+// `soft` staggers the calm ready wave as a left→right travelling ripple, so "ready"
+// reads as alive rather than a synchronised breathe.
 const BARS = [
-  { id: "l3", h: "h-4", delay: "[animation-delay:0ms]" },
-  { id: "l2", h: "h-7", delay: "[animation-delay:120ms]" },
-  { id: "l1", h: "h-10", delay: "[animation-delay:240ms]" },
-  { id: "c", h: "h-14", delay: "[animation-delay:360ms]" },
-  { id: "r1", h: "h-10", delay: "[animation-delay:240ms]" },
-  { id: "r2", h: "h-7", delay: "[animation-delay:120ms]" },
-  { id: "r3", h: "h-4", delay: "[animation-delay:0ms]" }
+  { id: "l3", h: "h-4", delay: "[animation-delay:0ms]", soft: "[animation-delay:0ms]" },
+  { id: "l2", h: "h-7", delay: "[animation-delay:120ms]", soft: "[animation-delay:80ms]" },
+  { id: "l1", h: "h-10", delay: "[animation-delay:240ms]", soft: "[animation-delay:160ms]" },
+  { id: "c", h: "h-14", delay: "[animation-delay:360ms]", soft: "[animation-delay:240ms]" },
+  { id: "r1", h: "h-10", delay: "[animation-delay:240ms]", soft: "[animation-delay:320ms]" },
+  { id: "r2", h: "h-7", delay: "[animation-delay:120ms]", soft: "[animation-delay:400ms]" },
+  { id: "r3", h: "h-4", delay: "[animation-delay:0ms]", soft: "[animation-delay:480ms]" }
 ] as const;
 
 export function StatusVisual({
@@ -86,7 +89,7 @@ export function StatusVisual({
                 active
                   ? cn("animate-bar", bar.delay)
                   : ready
-                    ? cn("animate-bar-soft opacity-80", bar.delay)
+                    ? cn("animate-bar-soft", bar.soft)
                     : "scale-y-[0.35] opacity-50"
               )}
             />
