@@ -1,4 +1,4 @@
-# voice-command — TODO
+# voice-control — TODO
 
 Roadmap for the voice remote. The **phone is the primary surface** — every UI decision
 is mobile-first, minimal, and beautiful. Implementation constraint: never edit system
@@ -27,7 +27,7 @@ Replace ElevenLabs with OpenAI for both directions — it's significantly cheape
 
 Scanning beats copy-pasting a link to a phone.
 
-- [ ] The Claude Code chat (`/voice-command:start`) returns a **scannable QR code** encoding the session URL.
+- [ ] The Claude Code chat (`/voice-control:start`) returns a **scannable QR code** encoding the session URL.
 - [ ] Render it so it's visible directly in the Claude Code terminal/chat (ASCII/Unicode QR).
 - [ ] Keep the plain URL as a fallback (for desktop / copy-paste).
 
@@ -116,7 +116,7 @@ plugin's **MCP server**. Claude Code spawns MCP servers as **children of the Cla
 process**, so the daemon stays in cmux's process tree and keeps the **socket trust**
 needed to `cmux send` into the pane (`mcp-server.ts:9-15`, `voice-daemon.ts:43-45`). A
 detached `nohup &` process gets reparented to launchd and cmux rejects its keystrokes.
-So `/voice-command:start` just flips a flag file the MCP server polls every 1s — no
+So `/voice-control:start` just flips a flag file the MCP server polls every 1s — no
 session-visible process. Replies come back via the **plugin Stop hook → HTTP POST**, not
 MCP tools, so **MCP isn't actually needed for replies**.
 
@@ -125,7 +125,7 @@ in `/bashes`, killable) so it's obvious voice is active and the user can kill it
 the session.
 
 - [ ] Research: does a Claude Code **background Bash task** (started by Claude) stay a **child of the Claude process** and thus **retain cmux socket trust** (unlike `nohup`)? If yes, this is the clean path.
-- [ ] If viable, have `/voice-command:start` launch the daemon as a **managed background task** instead of (or in addition to) the MCP host — visible in `/bashes`, killable.
+- [ ] If viable, have `/voice-control:start` launch the daemon as a **managed background task** instead of (or in addition to) the MCP host — visible in `/bashes`, killable.
 - [ ] Killing the background process should **cleanly tear down** the session (SIGTERM → close WS + local HTTP server, remove runtime/flag files).
 - [ ] Keep the existing **Stop-hook → HTTP POST** reply path (it doesn't depend on MCP) — likely lets us drop the MCP host entirely.
 - [ ] Give a clear **"voice mode active"** indication at start (the visible process itself + printed URL/QR).
@@ -154,7 +154,7 @@ interact with instance B while instance A is still working. High-value; must be 
 - [ ] **Multi-thread bridge** — one session/DO holds **N daemon connections** (one per instance) + browser(s); every envelope carries a **`threadId`**; browser→daemon routes to the selected thread; daemon→browser is tagged so the browser attributes it.
 - [ ] **Thread registry + labels** — each daemon registers as a thread with a human label (cmux surface/pane title, cwd, git branch) + per-thread status (idle/working/…); lifecycle + presence events so the UI can list and switch.
 - [ ] **Replace singleton state** — per-thread registration instead of one shared `active` / `runtime.json` (no clobbering); clean removal when a pane dies.
-- [ ] **Spawn-a-thread (incl. by voice)** — research cmux's API to open a new pane + launch Claude there running `/voice-command:start`, joining the same session (re-show same QR). Stay within "never touch system config" — cmux CLI only.
+- [ ] **Spawn-a-thread (incl. by voice)** — research cmux's API to open a new pane + launch Claude there running `/voice-control:start`, joining the same session (re-show same QR). Stay within "never touch system config" — cmux CLI only.
 - [ ] **Web UI** — a **thread switcher** (chat-list / tabs), per-thread status + unread badges; hero monitor + chat scoped to the active thread. Depends on **#3**.
 - [ ] **Security** — one token now reaches multiple instances; evaluate per-thread tokens vs one session token, blast radius, expiry, revoke-on-exit.
 - [ ] Cross-refs: **#2** (same URL/QR reused), **#3** (thread switcher UI), **#6** (each thread = a visible background process).
@@ -182,3 +182,27 @@ sane state and beautiful prebuilt **chat/conversation components**.
 - [ ] Keep the bundle lean — it loads on a phone, possibly over cellular.
 
 **Ordering:** **#8 → #3** (build the overhaul on the new stack); #8 also makes **#7**'s multi-thread state much easier.
+
+---
+
+## 9. Rename plugin "voice-command" → "voice-control" (repo stays cc-voice-control)
+
+The plugin drifted to **"voice-command"** — that name was never wanted. Canonical names:
+**plugin = `voice-control`**, **repo = `cc-voice-control`** (`CC` = Claude Code prefix).
+Rename every `voice-command` / `voice_command` occurrence to `voice-control`.
+
+Scope (grounded — files that currently contain `voice-command`):
+- [ ] `.claude-plugin/plugin.json` — plugin name (this drives the skill namespace → `/voice-control:*`).
+- [ ] `skills/*` — invocation becomes `/voice-control:start|stop|status`; fix in-text references.
+- [ ] `src/daemon/mcp-server.ts` — MCP `serverInfo.name` `"voice-command"` → `"voice-control"`.
+- [ ] `worker/src/index.ts` — `<title>` + any UI copy.
+- [ ] `worker/src/browser-client.ts`, `.mcp.json`, `.claude/settings.local.json`, `README.md`, `docs/configuration.md`.
+- [ ] Repo dir is already `cc-voice-control` — keep it.
+
+**Separate decision — `voice-remote` (a different term):** used for the config dir
+`~/.config/voice-remote/config.json`, `VOICE_REMOTE_CONFIG`, the `voice-remote-bridge`
+worker, and runtime paths. Not part of "voice-command" — handle deliberately:
+- [ ] Decide whether `voice-remote` also renames. If yes, **keep back-compat** — still read the legacy `~/.config/voice-remote/config.json` (config.ts already has a legacy fallback) so existing setups don't break, and **never edit the user's system config**.
+- [ ] Renaming the Cloudflare worker (`voice-remote-bridge`) / `bridgeUrl` changes the deployed URL — that's a deliberate infra change, not a blind find-replace.
+
+**Acceptance:** `grep -ri "voice-command"` returns nothing in source; skills invoke as `/voice-control:*`; existing configs still load.
