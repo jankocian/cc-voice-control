@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import WebSocket from "ws";
@@ -23,8 +23,13 @@ const MAX_SPEECH_CHARS = 2500;
 export type DaemonInit = {
   config: VoiceRemoteConfig;
   surface?: string;
+  // The whole capability: one unguessable secret that both routes the session and
+  // authorizes joining it. Carried in the phone URL path; never sent over the wire as a
+  // separate value.
+  secret: string;
+  // A short, non-secret label derived from `secret` (its hash). Safe to relay in status
+  // events and log; never the secret itself.
   sessionId: string;
-  token: string;
   browserUrl: string;
 };
 
@@ -49,13 +54,17 @@ export function selectMissedReply(
   return events;
 }
 
-/** Build a fresh session (id, token, phone URL) from config and the current cmux pane. */
+/** Build a fresh session (secret + phone URL) from config and the current cmux pane. */
 export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
   const surface = process.env.CMUX_SURFACE_ID;
-  const sessionId = randomUUID();
-  const token = randomBytes(32).toString("base64url");
-  const browserUrl = toBrowserUrl(config.bridgeUrl, sessionId, token);
-  return { config, surface, sessionId, token, browserUrl };
+  // 128 bits of entropy → 22 url-safe chars. Uncrackable by online guessing, and the
+  // session is ephemeral (it dies with the daemon), so a single secret is ample. Keeping
+  // it short also keeps the QR small. The bridge hashes it to route, so the raw secret is
+  // never used as an identifier or persisted anywhere.
+  const secret = randomBytes(16).toString("base64url");
+  const sessionId = createHash("sha256").update(secret).digest("base64url").slice(0, 12);
+  const browserUrl = toBrowserUrl(config.bridgeUrl, secret);
+  return { config, surface, secret, sessionId, browserUrl };
 }
 
 /**
@@ -190,7 +199,7 @@ export class VoiceDaemon {
 
   private connectBridge(): void {
     if (this.stopped) return;
-    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.sessionId, this.init.token, "daemon");
+    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon");
     const ws = new WebSocket(url);
     this.ws = ws;
 
