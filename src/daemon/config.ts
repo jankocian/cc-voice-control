@@ -1,12 +1,8 @@
-import { stat, readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
-import {
-  toBridgeBrowserSessionUrl,
-  toBridgeWebSocketUrl,
-  type BridgeClientRole
-} from "../shared/bridge-contract.js";
+import { type BridgeClientRole, toBridgeBrowserSessionUrl, toBridgeWebSocketUrl } from "../shared/bridge-contract.js";
 
 const ConfigSchema = z.object({
   elevenlabsApiKey: z.string().min(1),
@@ -15,8 +11,9 @@ const ConfigSchema = z.object({
   // ElevenLabs model ids; sensible defaults applied at call sites when omitted.
   ttsModelId: z.string().min(1).optional(),
   sttModelId: z.string().min(1).optional(),
-  bridgeUrl: z.string().url(),
-  sessionTimeoutMinutes: z.number().int().positive().default(120)
+  // Where the daemon connects (and the phone URL points). Defaults to the public bridge so
+  // installed users only set elevenlabsApiKey; override to self-host or for local dev.
+  bridgeUrl: z.string().url().default("https://voice-control.nee.rs")
 });
 
 export type VoiceRemoteConfig = z.infer<typeof ConfigSchema>;
@@ -51,7 +48,9 @@ export async function loadConfig(explicitPath?: string): Promise<VoiceRemoteConf
   const candidates = explicitPath ? [explicitPath] : configCandidates();
   let chosen: string | undefined;
   for (const candidate of candidates) {
-    const isFile = await stat(candidate).then((s) => s.isFile()).catch(() => false);
+    const isFile = await stat(candidate)
+      .then((s) => s.isFile())
+      .catch(() => false);
     if (isFile) {
       chosen = candidate;
       break;
@@ -70,16 +69,10 @@ export async function loadConfig(explicitPath?: string): Promise<VoiceRemoteConf
   return ConfigSchema.parse(JSON.parse(raw));
 }
 
-export function toWebSocketUrl(
-  bridgeUrl: string,
-  sessionId: string,
-  token: string,
-  role: BridgeClientRole,
-  expiresAt?: number
-): string {
-  return toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role, expiresAt);
+export function toWebSocketUrl(bridgeUrl: string, sessionId: string, token: string, role: BridgeClientRole): string {
+  return toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role);
 }
 
-export function toBrowserUrl(bridgeUrl: string, sessionId: string, token: string, expiresAt?: number): string {
-  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token, expiresAt);
+export function toBrowserUrl(bridgeUrl: string, sessionId: string, token: string): string {
+  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token);
 }

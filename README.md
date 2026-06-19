@@ -21,17 +21,28 @@ loads no third-party SDK.
 - An ElevenLabs API key and a `voiceId` (see [docs/configuration.md](docs/configuration.md)).
 - A reachable bridge URL — deploy the Worker, or run it locally for a desktop test.
 
+## Install
+
+```text
+/plugin marketplace add jankocian/cc-voice-control
+/plugin install voice-control@cc-voice-control
+```
+
+The MCP server ships pre-built as a single self-contained `dist/daemon/mcp-server.js`
+(dependencies inlined), so there's no build step on install. Add your ElevenLabs config
+(see [docs/configuration.md](docs/configuration.md)), then run `/voice-control:start`.
+
 ## Usage
 
 In your cmux Claude Code pane (the plugin must be loaded, e.g. `claude --plugin-dir .`):
 
 ```text
-/voice-command:start    # activates the remote, prints the phone URL
-/voice-command:status
-/voice-command:stop
+/voice-control:start    # activates the remote, prints the phone URL
+/voice-control:status
+/voice-control:stop
 ```
 
-`/voice-command:start` just flips the remote on and returns — your session stays
+`/voice-control:start` just flips the remote on and returns — your session stays
 fully interactive. Open the printed URL on your phone, tap to speak, and your words
 appear as messages in this session with replies spoken back.
 
@@ -79,7 +90,7 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
 
 ## Layout
 
-- `.mcp.json` — registers the daemon as the plugin's MCP server (the single entry point).
+- `.claude-plugin/plugin.json` — plugin manifest; declares the daemon as the plugin's MCP server (the single entry point).
 - `src/daemon/mcp-server.ts` — MCP host + flag-file activation.
 - `src/daemon/voice-daemon.ts` — the session: bridge client, STT/TTS, cmux injection.
 - `src/daemon/{cmux,elevenlabs,config}.ts` — cmux CLI, ElevenLabs calls, config loading.
@@ -90,10 +101,33 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
 
 ## Development
 
+Tooling is [Bun](https://bun.sh) (package manager + bundler) and [Biome](https://biomejs.dev)
+(lint + format).
+
 ```sh
-npm install
-npm run build      # produces dist/ (the plugin loads dist/daemon/mcp-server.js)
-npm test
-npm run typecheck
-npm run dev:worker # run the bridge locally on http://localhost:8787
+bun install
+bun run build       # bundles the MCP server → dist/daemon/mcp-server.js (deps inlined)
+bun run test
+bun run typecheck
+bun run lint        # Biome — the CI gate (read-only)
+bun run format      # Biome — apply fixes
+bun run dev:worker  # run the bridge locally on http://localhost:8787
 ```
+
+The committed `dist/daemon/mcp-server.js` is the artifact Claude Code runs — there is no
+install-time build. **CI is the source of truth for it**: `release.yml` rebuilds and commits
+the bundle (with a pinned Bun, so output is reproducible) on every push to `main`, so you never
+build it by hand. `ci.yml` runs the same gate on every PR.
+
+## Deploy the bridge
+
+The phone page + relay live in `worker/` (a Cloudflare Worker + Durable Object). Wrangler
+bundles it from source at deploy time:
+
+```sh
+bun run deploy:worker   # needs a Cloudflare login or CLOUDFLARE_API_TOKEN
+```
+
+`deploy-worker.yml` deploys it automatically on a `v*` tag (set `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` as repo secrets). Once it's live, point each user's config `bridgeUrl`
+at the deployed URL.

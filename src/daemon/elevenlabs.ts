@@ -4,11 +4,7 @@ const DEFAULT_STT_MODEL = "scribe_v1";
 const DEFAULT_TTS_MODEL = "eleven_turbo_v2_5";
 
 /** Transcribe a recorded audio clip with the ElevenLabs Scribe speech-to-text API. */
-export async function transcribeAudio(
-  config: VoiceRemoteConfig,
-  audio: Uint8Array,
-  mimeType: string
-): Promise<string> {
+export async function transcribeAudio(config: VoiceRemoteConfig, audio: Uint8Array, mimeType: string): Promise<string> {
   const form = new FormData();
   // Copy into a fresh ArrayBuffer-backed view so the DOM Blob type is satisfied.
   const bytes = new Uint8Array(audio.byteLength);

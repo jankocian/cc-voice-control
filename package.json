@@ -4,9 +4,11 @@
   "description": "Voice remote for an interactive Claude Code session: phone push-to-talk, a Cloudflare bridge, and a local daemon that types transcripts into your cmux Claude pane and speaks replies back via ElevenLabs.",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "bun build src/daemon/mcp-server.ts --target=node --format=esm --outfile=dist/daemon/mcp-server.js --external=bufferutil --external=utf-8-validate",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
     "test": "vitest run",
+    "lint": "biome ci .",
+    "format": "biome check --write .",
     "dev:worker": "wrangler dev --config worker/wrangler.toml",
     "deploy:worker": "wrangler deploy --config worker/wrangler.toml"
   },
@@ -17,13 +19,14 @@
     "elevenlabs",
     "cloudflare"
   ],
-  "author": "",
+  "author": "Jan Kocian <mail@jankocian.com>",
   "license": "MIT",
   "dependencies": {
     "ws": "^8.18.3",
     "zod": "^4.2.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
     "@cloudflare/workers-types": "^4.20260603.0",
     "@types/node": "^25.0.0",
     "@types/ws": "^8.18.1",

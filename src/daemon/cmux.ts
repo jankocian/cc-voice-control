@@ -78,9 +78,11 @@ export async function cmuxPing(): Promise<boolean> {
 
 /** Type text into the surface and submit it (as a real user message). */
 export async function cmuxSubmit(text: string, surface?: string): Promise<boolean> {
+  // Two ordered writes to the same surface socket: cmux delivers them in order, so the
+  // text is fully typed before Enter submits it. The daemon serializes injection (one
+  // in-flight turn at a time), so no other message can interleave between the two.
   const typed = await runCmux(["send", ...target(surface), "--", text]);
   if (!typed.ok) return false;
-  await delay(150);
   const submitted = await runCmux(["send-key", ...target(surface), "enter"]);
   return submitted.ok;
 }
@@ -89,8 +91,4 @@ export async function cmuxSubmit(text: string, surface?: string): Promise<boolea
 export async function cmuxInterrupt(surface?: string): Promise<boolean> {
   const r = await runCmux(["send-key", ...target(surface), "escape"]);
   return r.ok;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

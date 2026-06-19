@@ -1,6 +1,8 @@
-name = "voice-remote-bridge"
+name = "voice-control"
 main = "src/index.ts"
 compatibility_date = "2026-06-01"
+
+routes = [{ pattern = "voice-control.nee.rs", custom_domain = true }]
 
 [[durable_objects.bindings]]
 name = "VOICE_SESSIONS"

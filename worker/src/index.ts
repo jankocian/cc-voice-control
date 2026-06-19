@@ -18,18 +18,14 @@ type SocketAttachment = {
 type StoredAuth = {
   tokenHash: string;
   sessionId: string;
-  createdAt: number;
-  expiresAt: number;
 };
-
-const FALLBACK_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
-      return new Response("voice-command bridge", { status: 200 });
+      return new Response("voice-control bridge", { status: 200 });
     }
 
     if (url.pathname === "/favicon.ico") {
@@ -52,30 +48,28 @@ export default {
 };
 
 export class VoiceSessionDurableObject extends DurableObject<Env> {
-  constructor(
-    ctx: DurableObjectState,
-    env: Env
-  ) {
-    super(ctx, env);
-  }
-
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const sessionId = parseBridgeWebSocketPath(url.pathname) ?? "";
-    const authQuery = readBridgeAuthQuery(url.searchParams);
-    const role = authQuery.role;
-    const token = authQuery.token;
-    const requestedExpiresAt = authQuery.expiresAt;
+    const { token, role } = readBridgeAuthQuery(url.searchParams);
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
+    }
+
+    // Browsers must connect from the bridge's own origin; the daemon (Node `ws`) sends
+    // no Origin header. WebSockets bypass CORS, so this is the only thing stopping a
+    // malicious page from opening the socket if the session URL ever leaks.
+    const origin = request.headers.get("Origin");
+    if (origin !== null && origin !== url.origin) {
+      return new Response("Forbidden origin", { status: 403 });
     }
 
     if (!role) {
       return new Response("Invalid role", { status: 400 });
     }
 
-    if (!token || !(await this.authorize(sessionId, token, requestedExpiresAt))) {
+    if (!token || !(await this.authorize(sessionId, token))) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -95,16 +89,18 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return;
 
-    if (!(await this.isSessionActive())) {
-      await this.expireSession();
-      return;
-    }
-
     const envelope = safeJson<BridgeEnvelope>(message);
     if (!envelope) return;
 
     const attachment = ws.deserializeAttachment() as SocketAttachment | undefined;
     if (!attachment) return;
+
+    // The daemon ends the session on shutdown so a leaked URL can't reconnect to a
+    // daemon-less session. Only the daemon may terminate; never relayed to browsers.
+    if (attachment.role === "daemon" && envelope.channel === "control" && envelope.event.type === "terminate") {
+      await this.expireSession();
+      return;
+    }
 
     if (attachment.role === "daemon" && envelope.channel === "browser") {
       this.broadcastTo("browser", envelope);
@@ -124,40 +120,29 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     this.broadcastPresence(ws);
   }
 
-  private async authorize(sessionId: string, token: string, requestedExpiresAt?: number): Promise<boolean> {
-    const tokenHash = await sha256(token);
-    const stored = await this.ctx.storage.get<StoredAuth>("auth");
-    const now = Date.now();
+  // Trust-on-first-use: the first connection for a session binds its token; later
+  // connections must match it and the session id. `blockConcurrencyWhile` makes the
+  // read-decide-write atomic — without it the non-storage `await sha256` opens the DO
+  // input gate, letting two simultaneous first-connects both observe no auth and both
+  // write (last writer wins). The session lives until the daemon terminates it; there
+  // is no wall-clock expiry — capability is bounded by the daemon's (session's) lifetime.
+  private authorize(sessionId: string, token: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const tokenHash = await sha256(token);
+      const stored = await this.ctx.storage.get<StoredAuth>("auth");
 
-    if (!stored) {
-      if (requestedExpiresAt !== undefined && requestedExpiresAt <= now) {
-        return false;
+      if (!stored) {
+        await this.ctx.storage.put("auth", { tokenHash, sessionId } satisfies StoredAuth);
+        return true;
       }
-      await this.ctx.storage.put("auth", {
-        tokenHash,
-        sessionId,
-        createdAt: now,
-        expiresAt: requestedExpiresAt ?? now + FALLBACK_SESSION_TTL_MS
-      } satisfies StoredAuth);
-      return true;
-    }
 
-    if (stored.expiresAt <= now) {
-      await this.ctx.storage.deleteAll();
-      return false;
-    }
-
-    return stored.sessionId === sessionId && stored.tokenHash === tokenHash;
-  }
-
-  private async isSessionActive(): Promise<boolean> {
-    const stored = await this.ctx.storage.get<StoredAuth>("auth");
-    return Boolean(stored && stored.expiresAt > Date.now());
+      return stored.sessionId === sessionId && stored.tokenHash === tokenHash;
+    });
   }
 
   private async expireSession(): Promise<void> {
     for (const socket of this.ctx.getWebSockets()) {
-      socket.close(1008, "session expired");
+      socket.close(1008, "session ended");
     }
     await this.ctx.storage.deleteAll();
   }
@@ -229,14 +214,14 @@ function renderSessionPage(sessionId: string, token: string): Response {
 
   const nonce = crypto.randomUUID();
 
-  const html = String.raw`<!doctype html>
+  const html = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
   <meta name="theme-color" content="#0a0a0b" />
-  <title>voice-command</title>
+  <title>voice-control</title>
   <style nonce="${nonce}">
     /*
      * Clean, minimal, monochrome. One hairline border token (--border) is used
@@ -384,6 +369,8 @@ function renderSessionPage(sessionId: string, token: string): Response {
     /* Controls */
     .controls { display: flex; flex-direction: column; gap: 10px; }
     .controls-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .controls-row.two { grid-template-columns: repeat(2, 1fr); }
+    [hidden] { display: none !important; }
 
     .btn {
       -webkit-appearance: none;
@@ -517,7 +504,7 @@ function renderSessionPage(sessionId: string, token: string): Response {
 <body>
   <main>
     <header class="app-header">
-      <h1 class="app-title">voice command</h1>
+      <h1 class="app-title">voice control</h1>
       <button id="speedButton" class="speed-pill" type="button" aria-label="Playback speed">1×</button>
     </header>
 
@@ -541,6 +528,10 @@ function renderSessionPage(sessionId: string, token: string): Response {
         <span id="voiceLabel">Tap to Speak</span>
       </button>
       <div id="visualizer" class="visualizer panel" aria-hidden="true"><canvas id="waveform"></canvas></div>
+      <div id="sendChoice" class="controls-row two" hidden>
+        <button id="queueButton" class="btn" type="button">Queue it</button>
+        <button id="interruptButton" class="btn primary recording" type="button">Interrupt &amp; send</button>
+      </div>
       <div class="controls-row">
         <button id="summaryButton" class="btn ghost" type="button">Get summary</button>
         <button id="statusButton" class="btn ghost" type="button">Get status</button>

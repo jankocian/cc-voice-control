@@ -6,18 +6,15 @@ export const BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 export const BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
 export const BRIDGE_TOKEN_QUERY_PARAM = "token";
 export const BRIDGE_ROLE_QUERY_PARAM = "role";
-export const BRIDGE_EXPIRES_AT_QUERY_PARAM = "expiresAt";
 
 export type BridgeAuthQuery = {
   token: string;
   role?: BridgeClientRole;
-  expiresAt?: number;
 };
 
 export type ParsedBridgeBrowserSessionUrl = {
   sessionId: string;
   token: string;
-  expiresAt?: number;
 };
 
 export type ParsedBridgeWebSocketUrl = ParsedBridgeBrowserSessionUrl & {
@@ -27,15 +24,10 @@ export type ParsedBridgeWebSocketUrl = ParsedBridgeBrowserSessionUrl & {
 const BROWSER_SESSION_PATH_PATTERN = /^\/s\/([^/]+)$/;
 const WEBSOCKET_PATH_PATTERN = /^\/ws\/([^/]+)$/;
 
-export function toBridgeBrowserSessionUrl(
-  bridgeUrl: string,
-  sessionId: string,
-  token: string,
-  expiresAt?: number
-): string {
+export function toBridgeBrowserSessionUrl(bridgeUrl: string, sessionId: string, token: string): string {
   const url = new URL(bridgeUrl);
   url.pathname = toBridgeBrowserSessionPath(sessionId);
-  writeBridgeAuthQuery(url.searchParams, token, undefined, expiresAt);
+  writeBridgeAuthQuery(url.searchParams, token);
   return url.toString();
 }
 
@@ -43,13 +35,12 @@ export function toBridgeWebSocketUrl(
   bridgeUrl: string,
   sessionId: string,
   token: string,
-  role: BridgeClientRole,
-  expiresAt?: number
+  role: BridgeClientRole
 ): string {
   const url = new URL(bridgeUrl);
   url.protocol = toBridgeWebSocketProtocol(url.protocol);
   url.pathname = toBridgeWebSocketPath(sessionId);
-  writeBridgeAuthQuery(url.searchParams, token, role, expiresAt);
+  writeBridgeAuthQuery(url.searchParams, token, role);
   return url.toString();
 }
 
@@ -67,7 +58,7 @@ export function parseBridgeBrowserSessionUrl(input: string | URL): ParsedBridgeB
   const query = readBridgeAuthQuery(url.searchParams);
 
   if (!sessionId || !query.token) return undefined;
-  return withOptionalExpiresAt({ sessionId, token: query.token }, query.expiresAt);
+  return { sessionId, token: query.token };
 }
 
 export function parseBridgeWebSocketUrl(input: string | URL): ParsedBridgeWebSocketUrl | undefined {
@@ -76,7 +67,7 @@ export function parseBridgeWebSocketUrl(input: string | URL): ParsedBridgeWebSoc
   const query = readBridgeAuthQuery(url.searchParams);
 
   if (!sessionId || !query.token || !query.role) return undefined;
-  return withOptionalExpiresAt({ sessionId, token: query.token, role: query.role }, query.expiresAt);
+  return { sessionId, token: query.token, role: query.role };
 }
 
 export function parseBridgeBrowserSessionPath(pathname: string): string | undefined {
@@ -90,8 +81,7 @@ export function parseBridgeWebSocketPath(pathname: string): string | undefined {
 export function readBridgeAuthQuery(searchParams: URLSearchParams): BridgeAuthQuery {
   return {
     token: searchParams.get(BRIDGE_TOKEN_QUERY_PARAM) ?? "",
-    role: parseBridgeClientRole(searchParams.get(BRIDGE_ROLE_QUERY_PARAM)),
-    expiresAt: parseBridgeExpiresAt(searchParams.get(BRIDGE_EXPIRES_AT_QUERY_PARAM))
+    role: parseBridgeClientRole(searchParams.get(BRIDGE_ROLE_QUERY_PARAM))
   };
 }
 
@@ -99,36 +89,11 @@ export function parseBridgeClientRole(value: string | null | undefined): BridgeC
   return value === "daemon" || value === "browser" ? value : undefined;
 }
 
-export function parseBridgeExpiresAt(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-
-  const expiresAt = Number(value);
-  return Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined;
-}
-
-export function formatBridgeExpiresAt(expiresAt: number | undefined): string | undefined {
-  if (expiresAt === undefined) return undefined;
-  if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
-    throw new RangeError("expiresAt must be a positive finite timestamp");
-  }
-  return String(expiresAt);
-}
-
-function writeBridgeAuthQuery(
-  searchParams: URLSearchParams,
-  token: string,
-  role?: BridgeClientRole,
-  expiresAt?: number
-): void {
+function writeBridgeAuthQuery(searchParams: URLSearchParams, token: string, role?: BridgeClientRole): void {
   if (!token) throw new Error("token is required");
 
   searchParams.set(BRIDGE_TOKEN_QUERY_PARAM, token);
   if (role) searchParams.set(BRIDGE_ROLE_QUERY_PARAM, role);
-
-  const formattedExpiresAt = formatBridgeExpiresAt(expiresAt);
-  if (formattedExpiresAt !== undefined) {
-    searchParams.set(BRIDGE_EXPIRES_AT_QUERY_PARAM, formattedExpiresAt);
-  }
 }
 
 function toBridgeWebSocketProtocol(protocol: string): "ws:" | "wss:" {
@@ -154,8 +119,4 @@ function encodeSessionId(sessionId: string): string {
 
 function asUrl(input: string | URL): URL {
   return typeof input === "string" ? new URL(input) : input;
-}
-
-function withOptionalExpiresAt<T extends object>(value: T, expiresAt: number | undefined): T & { expiresAt?: number } {
-  return expiresAt === undefined ? value : { ...value, expiresAt };
 }

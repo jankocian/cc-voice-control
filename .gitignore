@@ -1,7 +1,13 @@
-dist/
+# Build output: only the committed, self-contained plugin bundle is tracked.
+dist/*
+!dist/daemon/
+dist/daemon/*
+!dist/daemon/mcp-server.js
 node_modules/
 .wrangler/
 .dev.vars
 *.log
 .playwright-mcp/
 .claude/settings.local.json
+.claude/worktrees/
+.env*

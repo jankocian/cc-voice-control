@@ -4,7 +4,7 @@ disable-model-invocation: true
 allowed-tools: Bash
 ---
 
-The voice remote runs inside this session as the `voice-command` plugin MCP server
+The voice remote runs inside this session as the `voice-control` plugin MCP server
 (Claude Code starts it automatically). Starting just activates it and shows the phone URL.
 State lives in the plugin's own data dir (`${CLAUDE_PLUGIN_DATA}`), not in `~/.config`.
 
@@ -23,8 +23,8 @@ State lives in the plugin's own data dir (`${CLAUDE_PLUGIN_DATA}`), not in `~/.c
    tap to speak — their words arrive here as normal user messages and replies are spoken back.
 
 3. If you see `NOT_RUNNING`, either the MCP server isn't up — relaunch Claude with the plugin
-   loaded (`claude --plugin-dir <this repo>`), approving the `voice-command` MCP server once if
+   loaded (`claude --plugin-dir <this repo>`), approving the `voice-control` MCP server once if
    prompted — or it couldn't start because the ElevenLabs config is missing/invalid (see
-   `docs/configuration.md`). Fix that, then run `/voice-command:start` again.
+   `docs/configuration.md`). Fix that, then run `/voice-control:start` again.
 
-Then **stop and return to normal** — do not call any further tools. To end it, run `/voice-command:stop`.
+Then **stop and return to normal** — do not call any further tools. To end it, run `/voice-control:stop`.

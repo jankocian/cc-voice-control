@@ -9,21 +9,20 @@ export type BrowserClientScriptInput = {
  * - Tap to record (audio-reactive visualizer), tap to send → daemon transcribes
  *   (ElevenLabs STT) and the transcript appears as "You: …".
  * - The daemon never fabricates replies; only Claude's reply is shown and spoken.
- * - Replies auto-play; every reply has play/pause (tap it) and a replay button, and
+ * - Fresh replies auto-play; one re-sent after a reconnect (missed while away) is shown
+ *   for tap-to-play instead. Every reply has play/pause (tap it) and a replay button, and
  *   a header pill controls (and remembers) playback speed.
  * - The status panel is the primary feedback surface (color-filled per state, with a
  *   subtle sweep while Claude is working). No third-party SDK runs in the browser.
  */
 export function renderBrowserClientModuleScript({ sessionId, token }: BrowserClientScriptInput): string {
-  return String.raw`
+  return `
     const sessionId = ${toInlineJson(sessionId)};
     const token = ${toInlineJson(token)};
-    const expiresAt = new URL(location.href).searchParams.get("expiresAt") || "";
     const wsUrl = new URL("/ws/" + encodeURIComponent(sessionId), location.href);
     wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     wsUrl.searchParams.set("token", token);
     wsUrl.searchParams.set("role", "browser");
-    if (expiresAt) wsUrl.searchParams.set("expiresAt", expiresAt);
 
     const SPEEDS = [1, 1.25, 1.5, 1.75, 2];
     const RATE_KEY = "voiceRemote.playbackRate";
@@ -40,6 +39,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     let transientUntil = 0;
     let transientText = "";
     let transientTimer = 0;
+    let pending = null; // a recorded clip held for a Queue/Interrupt choice while Claude works
 
     let audioCtx;
     let analyser;
@@ -51,6 +51,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     let currentUrl = null;
     const audioByRequest = new Map();
     const entryByRequest = new Map();
+    let lastReplyId = null; // requestId of the latest reply rendered; sent on sync so the daemon can replay one the phone missed
 
     const bridge = { daemonConnected: false, browserConnected: false };
     const runtime = { state: "idle", currentTask: undefined, listening: true };
@@ -68,6 +69,9 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       statusButton: document.getElementById("statusButton"),
       stopButton: document.getElementById("stopButton"),
       speedButton: document.getElementById("speedButton"),
+      sendChoice: document.getElementById("sendChoice"),
+      queueButton: document.getElementById("queueButton"),
+      interruptButton: document.getElementById("interruptButton"),
       visualizer: document.getElementById("visualizer"),
       canvas: document.getElementById("waveform")
     };
@@ -89,6 +93,8 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     el.statusButton.addEventListener("click", () => sendControl({ type: "status_request" }));
     el.stopButton.addEventListener("click", () => sendControl({ type: "stop_task" }));
     el.speedButton.addEventListener("click", cycleSpeed);
+    el.queueButton.addEventListener("click", () => sendPending("queue"));
+    el.interruptButton.addEventListener("click", () => sendPending("interrupt"));
     el.log.addEventListener("click", (event) => {
       const entry = event.target.closest(".entry.playable");
       if (!entry || !entry.dataset.requestId) return;
@@ -108,6 +114,8 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       socket.addEventListener("close", () => {
         bridge.daemonConnected = false;
         bridge.browserConnected = false;
+        transcribing = false; // a dropped socket loses any in-flight send — re-enable the mic
+        clearPending();
         render();
         setTimeout(connectBridge, 1500);
       });
@@ -119,6 +127,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     function toggleRecording() {
       if (transcribing) return;
       if (recording) { stopRecording(); return; }
+      clearPending(); // re-recording discards a clip that was awaiting a send choice
       startRecording();
     }
 
@@ -158,9 +167,26 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       if (!blob.size) { flash("Didn't catch that — tap to retry"); render(); return; }
       let audioBase64;
       try { audioBase64 = await blobToBase64(blob); } catch { flash("Could not read the recording"); render(); return; }
-      if (!sendDaemon({ type: "submit_audio", audioBase64, mimeType })) { flash("Lost the connection before sending"); render(); return; }
+      // While Claude is working, let the user choose: queue behind the turn, or interrupt it.
+      if (runtime.state === "working") { pending = { audioBase64, mimeType }; render(); return; }
+      sendAudio(audioBase64, mimeType, "queue");
+    }
+
+    function sendPending(mode) {
+      if (!pending) return;
+      const { audioBase64, mimeType } = pending;
+      pending = null;
+      sendAudio(audioBase64, mimeType, mode);
+    }
+
+    function sendAudio(audioBase64, mimeType, mode) {
+      if (!sendDaemon({ type: "submit_audio", audioBase64, mimeType, mode })) { flash("Lost the connection before sending"); render(); return; }
       transcribing = true;
       render();
+    }
+
+    function clearPending() {
+      if (pending) { pending = null; render(); }
     }
 
     function stopStream() {
@@ -238,14 +264,17 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
     function handleBrowserEvent(event) {
       if (!event) return;
       switch (event.type) {
-        case "bridge_presence":
+        case "bridge_presence": {
+          const wasConnected = bridge.daemonConnected;
           bridge.daemonConnected = event.daemonConnected === true;
           bridge.browserConnected = event.browserConnected === true;
+          // The daemon emits status only on change; on (re)connect, ask for the current one
+          // and tell it the latest reply we have so it can replay one we missed while away.
+          if (bridge.daemonConnected && !wasConnected) sendDaemon(lastReplyId ? { type: "sync", lastSeenReplyId: lastReplyId } : { type: "sync" });
           render();
           return;
+        }
         case "session_status":
-          bridge.daemonConnected = event.state.daemonConnected === true;
-          bridge.browserConnected = event.state.browserConnected === true;
           runtime.listening = event.state.listening === true;
           runtime.state = event.state.state;
           runtime.currentTask = event.memory && event.memory.currentTask;
@@ -262,7 +291,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
           render();
           return;
         case "tts_audio":
-          attachAudio(event.requestId, event.audioBase64, event.mimeType);
+          attachAudio(event.requestId, event.audioBase64, event.mimeType, event.replay === true);
           return;
         case "error":
           transcribing = false;
@@ -274,7 +303,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
 
     // ---- playback (per message) -----------------------------------------------
 
-    function attachAudio(requestId, audioBase64, mimeType) {
+    function attachAudio(requestId, audioBase64, mimeType, replay) {
       if (!requestId || !audioBase64) return;
       audioByRequest.set(requestId, { audioBase64, mimeType });
       const entry = entryByRequest.get(requestId);
@@ -293,7 +322,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
         controls.append(replay, icon);
         entry.insertBefore(controls, entry.firstChild);
       }
-      if (!recording) playEntry(requestId); // auto-play the reply
+      if (!recording && !replay) playEntry(requestId); // auto-play a fresh reply; a missed one waits for a tap
     }
 
     function loadEntry(requestId) {
@@ -410,7 +439,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       } else if (!runtime.listening) {
         stateKey = "offline";
         title = "Claude isn't listening";
-        detail = "Restart with /voice-command:start in the terminal";
+        detail = "Restart with /voice-control:start in the terminal";
       } else {
         stateKey = "ready";
         title = "Ready";
@@ -432,6 +461,9 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       el.summaryButton.disabled = !canAct;
       el.statusButton.disabled = !canAct;
       el.stopButton.disabled = !canAct;
+      el.queueButton.disabled = !canAct;
+      el.interruptButton.disabled = !canAct;
+      el.sendChoice.hidden = !pending;
     }
 
     function addLog(title, body, requestId) {
@@ -446,7 +478,7 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
       p.textContent = body;
       row.append(time, p);
       el.log.prepend(row);
-      if (title === "Claude Code" && requestId) entryByRequest.set(requestId, row);
+      if (title === "Claude Code" && requestId) { entryByRequest.set(requestId, row); lastReplyId = requestId; }
       pruneLog();
     }
 
@@ -504,5 +536,5 @@ export function renderBrowserClientModuleScript({ sessionId, token }: BrowserCli
 }
 
 function toInlineJson(value: unknown): string {
-  return JSON.stringify(value).replace(/[<>&]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+  return JSON.stringify(value).replace(/[<>&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }

@@ -1,0 +1,14 @@
+{
+  "name": "cc-voice-control",
+  "owner": {
+    "name": "Jan Kocian",
+    "email": "mail@jankocian.com"
+  },
+  "plugins": [
+    {
+      "name": "voice-control",
+      "source": "./",
+      "description": "Phone voice remote for your interactive Claude Code session — types your speech into the cmux pane and speaks replies back."
+    }
+  ]
+}

@@ -19,13 +19,4 @@ describe("voice remote URL helpers", () => {
       "ws://localhost:8787/ws/abc?token=secret&role=browser"
     );
   });
-
-  it("includes the configured session expiry when provided", () => {
-    expect(toBrowserUrl("https://voice.example.com", "abc", "secret", 123456)).toBe(
-      "https://voice.example.com/s/abc?token=secret&expiresAt=123456"
-    );
-    expect(toWebSocketUrl("https://voice.example.com", "abc", "secret", "daemon", 123456)).toBe(
-      "wss://voice.example.com/ws/abc?token=secret&role=daemon&expiresAt=123456"
-    );
-  });
 });

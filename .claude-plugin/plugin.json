@@ -1,8 +1,17 @@
 {
-  "name": "voice-command",
-  "version": "2.0.0",
+  "name": "voice-control",
+  "version": "1.0.0",
   "description": "Phone voice remote for your interactive Claude Code session — types your speech into the cmux pane and speaks replies back.",
   "author": {
-    "name": "cc-voice-control"
+    "name": "Jan Kocian",
+    "email": "mail@jankocian.com"
+  },
+  "homepage": "https://github.com/jankocian/cc-voice-control",
+  "license": "MIT",
+  "mcpServers": {
+    "voice-control": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/daemon/mcp-server.js"]
+    }
   }
 }

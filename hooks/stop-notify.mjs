@@ -2,19 +2,20 @@
 /**
  * Stop hook for the voice remote.
  *
- * Fires when the interactive Claude Code session finishes a turn. It reads the
- * last assistant message from the transcript and POSTs it to the local voice
- * daemon, which speaks it back on the phone. If the daemon isn't running, this
- * is a no-op. It never blocks the Stop event.
+ * Fires when the interactive Claude Code session finishes a turn. It reads, from the
+ * transcript, the user prompt that started the turn and the turn's FINAL assistant
+ * reply, then POSTs both to the local voice daemon. The daemon speaks the reply only
+ * if the prompt matches the turn it injected, so terminal-typed turns aren't read
+ * aloud. If the daemon isn't running, this is a no-op. It never blocks the Stop event.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, watch } from "node:fs";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { request } from "node:http";
 
 // Plugin runtime state lives in Claude Code's managed per-plugin data dir
-// ($CLAUDE_PLUGIN_DATA, exported to hook processes), never in the user's
-// ~/.config. Falls back to a temp dir if the variable is somehow unset.
+// ($CLAUDE_PLUGIN_DATA, exported to hook processes), never in the user's ~/.config.
+// Falls back to a temp dir if the variable is somehow unset.
 const STATE_DIR = process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
 const RUNTIME_PATH = join(STATE_DIR, "runtime.json");
 
@@ -30,12 +31,12 @@ async function main() {
   }
 
   const runtime = readRuntime();
-  if (!runtime || !runtime.port) process.exit(0); // daemon not running
+  if (!runtime?.port) process.exit(0); // daemon not running
 
-  const text = await resolveReplyText(hook.transcript_path);
-  if (!text) process.exit(0);
+  const turn = await resolveTurn(hook.transcript_path);
+  if (!turn) process.exit(0);
 
-  await post(runtime.port, { text, sessionId: hook.session_id || "" }).catch(() => {});
+  await post(runtime.port, { prompt: turn.prompt, text: turn.text, sessionId: hook.session_id || "" }).catch(() => {});
   process.exit(0);
 }
 
@@ -46,7 +47,6 @@ function readStdin() {
     process.stdin.on("data", (c) => (data += c));
     process.stdin.on("end", () => resolve(data));
     process.stdin.on("error", () => resolve(data));
-    setTimeout(() => resolve(data), 1500);
   });
 }
 
@@ -59,38 +59,49 @@ function readRuntime() {
 }
 
 /**
- * Return the FINAL assistant reply for the turn that just finished.
+ * Resolve the finished turn: its user prompt and the final assistant reply.
  *
- * Two problems this handles:
- *  1. Flush lag — the Stop hook can fire before Claude has flushed the latest
- *     message to the transcript JSONL, so we poll.
- *  2. Intermediary messages — a turn that uses tools emits several assistant
- *     text blocks (narration between tool calls). Those carry
- *     `stop_reason: "tool_use"`; only the real final answer carries a terminal
- *     stop_reason (`end_turn`, `max_tokens`, `stop_sequence`, ...). We return the
- *     last assistant message after the user prompt whose stop_reason is NOT
- *     "tool_use", polling until that final message appears. If a turn ever ends
- *     without a terminal stop_reason, we fall back to the latest assistant text.
+ * The Stop hook can fire before Claude has flushed the final assistant message to the
+ * transcript JSONL, so we read once and, if the final message isn't there yet, wait for
+ * the file to change (fs.watch — event-driven, no polling) and re-read. A turn ends with
+ * a terminal assistant message (stop_reason ≠ "tool_use"), so this resolves as soon as
+ * that write lands. The ultimate backstop is Claude Code's own hook timeout.
  */
-async function resolveReplyText(transcriptPath) {
-  if (!transcriptPath) return "";
-  let fallback = "";
-  for (let attempt = 0; attempt < 60; attempt++) {
-    // ~9s budget — tool-heavy turns flush their final message slightly later
-    const { final, latest } = readReply(transcriptPath);
-    if (final) return final;
-    if (latest) fallback = latest;
-    await delay(150);
-  }
-  return fallback;
+function resolveTurn(transcriptPath) {
+  if (!transcriptPath) return Promise.resolve(undefined);
+
+  const read = () => readTurn(transcriptPath);
+  const first = read();
+  if (first.final) return Promise.resolve({ prompt: first.prompt, text: first.text });
+
+  return new Promise((resolve) => {
+    let watcher;
+    let settled = false;
+    const finish = (turn) => {
+      if (settled) return;
+      settled = true;
+      if (watcher) watcher.close();
+      resolve(turn);
+    };
+    try {
+      watcher = watch(transcriptPath, () => {
+        const r = read();
+        if (r.final) finish({ prompt: r.prompt, text: r.text });
+      });
+      // If watching fails mid-flight, fall back to whatever we last read.
+      watcher.on("error", () => finish(first.prompt ? { prompt: first.prompt, text: first.text } : undefined));
+    } catch {
+      finish(first.prompt ? { prompt: first.prompt, text: first.text } : undefined);
+    }
+  });
 }
 
-function readReply(transcriptPath) {
+function readTurn(transcriptPath) {
   let raw;
   try {
     raw = readFileSync(transcriptPath, "utf8");
   } catch {
-    return { final: "", latest: "" };
+    return { final: false, prompt: "", text: "" };
   }
   const records = raw
     .split("\n")
@@ -106,22 +117,18 @@ function readReply(transcriptPath) {
 
   let lastUser = -1;
   for (let i = 0; i < records.length; i++) if (isUserPrompt(records[i])) lastUser = i;
+  const prompt = lastUser >= 0 ? messageText(records[lastUser]) : "";
 
-  // Scan back from the end (after the most recent real user prompt). `latest` is
-  // the most recent assistant text of any kind; `final` is the most recent one
-  // that ended the turn (terminal stop_reason, not a tool_use pause).
-  let latest = "";
+  // Scan back from the end (after the most recent real user prompt) for the assistant
+  // message that ended the turn: a terminal stop_reason, not a tool_use pause.
   for (let i = records.length - 1; i > lastUser; i--) {
     const message = records[i].message || records[i];
     const role = message.role || records[i].type;
     if (role !== "assistant") continue;
-    const text = extractText(message.content);
-    if (!text) continue;
-    if (!latest) latest = text;
     const stop = message.stop_reason;
-    if (stop && stop !== "tool_use") return { final: text, latest };
+    if (stop && stop !== "tool_use") return { final: true, prompt, text: extractText(message.content) };
   }
-  return { final: "", latest };
+  return { final: false, prompt, text: "" };
 }
 
 // A real user turn (the injected prompt) — not a tool_result, which also has role "user".
@@ -135,8 +142,9 @@ function isUserPrompt(record) {
   return false;
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function messageText(record) {
+  const message = record.message || record;
+  return extractText(message.content);
 }
 
 function extractText(content) {
@@ -153,7 +161,13 @@ function post(port, body) {
   return new Promise((resolve, reject) => {
     const data = Buffer.from(JSON.stringify(body));
     const req = request(
-      { host: "127.0.0.1", port, path: "/reply", method: "POST", headers: { "content-type": "application/json", "content-length": data.length } },
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/reply",
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": data.length }
+      },
       (res) => {
         res.resume();
         res.on("end", resolve);

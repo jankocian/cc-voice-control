@@ -2,7 +2,8 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, stateDir } from "./config.js";
-import { VoiceDaemon, createDaemonInit } from "./voice-daemon.js";
+import { reconcile } from "./reconcile.js";
+import { createDaemonInit, VoiceDaemon } from "./voice-daemon.js";
 
 /**
  * Plugin MCP server that hosts the voice-remote daemon.
@@ -11,8 +12,8 @@ import { VoiceDaemon, createDaemonInit } from "./voice-daemon.js";
  * it stays inside cmux's process tree and keeps the socket trust needed to type
  * into the pane. (A `nohup &` daemon is reparented to launchd and cmux rejects
  * it.) Claude never calls any tool here — the server is purely a lineage-
- * preserving background host. `/voice-command:start` activates it by creating a
- * flag file; `/voice-command:stop` removes it.
+ * preserving background host. `/voice-control:start` activates it by creating a
+ * flag file; `/voice-control:stop` removes it.
  *
  * stdout is the MCP JSON-RPC channel and MUST stay clean — route every log to
  * stderr (including any stray console.log from dependencies).
@@ -49,9 +50,13 @@ function deactivate(): void {
 
 async function pollFlag(): Promise<void> {
   try {
-    const active = existsSync(ACTIVE_FLAG);
-    if (active && !daemon) await activate();
-    else if (!active && daemon) deactivate();
+    await reconcile({
+      flagPresent: existsSync(ACTIVE_FLAG),
+      hasDaemon: daemon !== undefined,
+      activate,
+      ensureRuntime: () => daemon?.ensureRuntimePublished(),
+      deactivate
+    });
   } catch (error) {
     console.error(`[mcp] flag poll error: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -61,7 +66,7 @@ async function pollFlag(): Promise<void> {
 
 function reply(id: unknown, result: unknown): void {
   if (id === undefined || id === null) return;
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
 }
 
 function handle(msg: { id?: unknown; method?: string; params?: { protocolVersion?: string } }): void {
@@ -70,7 +75,7 @@ function handle(msg: { id?: unknown; method?: string; params?: { protocolVersion
       reply(msg.id, {
         protocolVersion: msg.params?.protocolVersion || "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "voice-command", version: "2.0.0" }
+        serverInfo: { name: "voice-control", version: "1.0.0" }
       });
       return;
     case "tools/list":
@@ -88,10 +93,11 @@ function handle(msg: { id?: unknown; method?: string; params?: { protocolVersion
 let buffer = "";
 process.stdin.on("data", (chunk) => {
   buffer += chunk.toString();
-  let nl: number;
-  while ((nl = buffer.indexOf("\n")) >= 0) {
+  let nl = buffer.indexOf("\n");
+  while (nl >= 0) {
     const line = buffer.slice(0, nl);
     buffer = buffer.slice(nl + 1);
+    nl = buffer.indexOf("\n");
     if (!line.trim()) continue;
     try {
       handle(JSON.parse(line));
@@ -112,4 +118,4 @@ process.on("SIGTERM", shutdown);
 mkdirSync(stateDir(), { recursive: true });
 setInterval(() => void pollFlag(), 1000);
 void pollFlag();
-console.error("[mcp] voice-command server up; waiting for /voice-command:start");
+console.error("[mcp] voice-control server up; waiting for /voice-control:start");
