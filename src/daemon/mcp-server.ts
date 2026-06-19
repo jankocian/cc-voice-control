@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, stateDir } from "./config.js";
+import { resolveConfig, stateDir, writeSetupNeededRuntime } from "./config.js";
 import { reconcile } from "./reconcile.js";
 import { createDaemonInit, VoiceDaemon } from "./voice-daemon.js";
 
@@ -29,8 +29,15 @@ async function activate(): Promise<void> {
   if (daemon || activating) return;
   activating = true;
   try {
-    const config = await loadConfig();
-    const next = new VoiceDaemon(createDaemonInit(config));
+    const result = await resolveConfig();
+    if (!result.ok) {
+      // No OpenAI key yet — publish friendly onboarding for the start skill and don't
+      // start a session. The start skill polls runtime.json and branches on needsSetup.
+      writeSetupNeededRuntime(result);
+      console.error(`[mcp] setup needed: ${result.missing} not set (${result.configPath})`);
+      return;
+    }
+    const next = new VoiceDaemon(createDaemonInit(result.config));
     await next.start();
     daemon = next;
     console.error("[mcp] voice remote activated");

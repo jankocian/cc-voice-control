@@ -1,11 +1,11 @@
 # Configuration
 
-The daemon needs one config file with your ElevenLabs credentials:
+The daemon needs one config file with your OpenAI credentials:
 
 ```json
 {
-  "elevenlabsApiKey": "sk_...",
-  "voiceId": "21m00Tcm4TlvDq8ikWAM"
+  "openaiApiKey": "sk-...",
+  "openaiVoice": "marin"
 }
 ```
 
@@ -23,12 +23,19 @@ Lock it down (it holds a secret):
 chmod 600 <your-config>.json
 ```
 
-- `elevenlabsApiKey` (required) — read **only** by the local daemon. It is never sent
-  to Cloudflare or the browser.
-- `voiceId` (recommended) — the ElevenLabs voice used to read Claude's replies aloud.
-  Without it, replies are shown as text but not spoken.
-- `ttsModelId` / `sttModelId` (optional) — override the default ElevenLabs models
-  (`eleven_turbo_v2_5` / `scribe_v1`).
+- `openaiApiKey` (required) — read **only** by the local daemon. It is never sent
+  to Cloudflare or the browser. If it's missing, `/voice-control:start` shows a friendly
+  setup prompt (with the exact file to edit) instead of starting.
+- `openaiVoice` (optional, default `marin`) — the `gpt-4o-mini-tts` voice used to read
+  Claude's replies aloud. OpenAI recommends `marin` or `cedar` for best quality; other
+  options include `alloy`, `ash`, `coral`, `nova`, `onyx`, `sage`.
+- `ttsModel` / `sttModel` (optional) — override the default OpenAI models
+  (`gpt-4o-mini-tts` / `gpt-4o-mini-transcribe`).
+- `ttsInstructions` (optional) — a short steering string for `gpt-4o-mini-tts` that
+  controls delivery (tone, pace, accent), e.g.
+  `"Speak in a calm, clear, friendly tone like a concise pair-programming partner."`
+- `language` (optional) — an ISO-639-1 hint for transcription (e.g. `"en"`). Short clips
+  can mis-detect language; pinning it is faster and steadier.
 - `bridgeUrl` (optional) — defaults to the public bridge (`https://voice-control.nee.rs`).
   Override it only to self-host the Worker or for local testing (`http://localhost:8787`).
 
