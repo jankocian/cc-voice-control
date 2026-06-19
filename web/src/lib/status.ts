@@ -72,7 +72,10 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
     key = "speaking";
     dataState = "speaking";
     title = "Speaking";
-    detail = "Tap a message to pause or replay";
+    // No detail and (in the hero) no title: that the agent is speaking is already
+    // obvious from the playing audio + the violet visual. The compact bar still
+    // uses `title` as its label.
+    detail = "";
   } else if (runtimeState === "working") {
     key = "working";
     dataState = "working";

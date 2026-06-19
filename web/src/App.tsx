@@ -225,6 +225,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           <Hero
             status={status}
             elapsed={elapsed}
+            flash={flash}
             recording={recorder.recording}
             visualizerActive={recorder.visualizerActive}
             canvasRef={canvasRef}

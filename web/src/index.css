@@ -58,6 +58,7 @@
   --animate-pulse-ring: pulse-ring 2.6s ease-in-out infinite;
   --animate-dot-bounce: dot-bounce 1.2s ease-in-out infinite;
   --animate-bar: bar-pulse 1s ease-in-out infinite;
+  --animate-bar-soft: bar-soft 2.8s ease-in-out infinite;
   --animate-rise: rise 0.32s var(--ease-soft) both;
 
   @keyframes pulse-ring {
@@ -90,6 +91,16 @@
     }
     50% {
       transform: scaleY(1);
+    }
+  }
+  /* The calm "ready / waiting for you" breathe — deliberately gentle + low amplitude. */
+  @keyframes bar-soft {
+    0%,
+    100% {
+      transform: scaleY(0.42);
+    }
+    50% {
+      transform: scaleY(0.62);
     }
   }
   @keyframes rise {

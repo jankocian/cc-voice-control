@@ -40,24 +40,27 @@ export function StatusVisual({
   const dots = !recording && (key === "connecting" || key === "waiting");
   const speaking = dataState === "speaking";
   const working = dataState === "working" || dataState === "sending";
-  const live = working || speaking; // equalizer animates
-  const tone = speaking ? "bg-violet" : "bg-coral";
+  const ready = dataState === "ready";
+  const active = working || speaking; // strong equalizer animation
+  // Colour by state: violet = speaking, green = connected/ready (waiting for you),
+  // coral = working/sending (and the calm fallback for any other state).
+  const tone = speaking ? "bg-violet" : ready ? "bg-success" : "bg-coral";
 
   return (
-    <div className="relative grid h-28 w-full place-items-center *:col-start-1 *:row-start-1" aria-hidden="true">
+    <div className="relative grid h-20 w-full place-items-center *:col-start-1 *:row-start-1" aria-hidden="true">
       {/* Soft aura that warms up as things get busier. */}
       <div
         className={cn(
-          "size-32 rounded-full blur-2xl transition-opacity duration-500",
-          speaking ? "bg-violet/15" : "bg-coral/15",
-          recording || live ? "opacity-100" : "opacity-40"
+          "size-24 rounded-full blur-2xl transition-opacity duration-500",
+          speaking ? "bg-violet/15" : ready ? "bg-success/12" : "bg-coral/15",
+          recording || active ? "opacity-100" : ready ? "opacity-70" : "opacity-40"
         )}
       />
 
       {/* Recording → the real mic waveform. */}
       <canvas
         ref={canvasRef}
-        className={cn("h-16 w-60 transition-opacity duration-200", visualizerActive ? "opacity-100" : "opacity-0")}
+        className={cn("h-14 w-60 transition-opacity duration-200", visualizerActive ? "opacity-100" : "opacity-0")}
       />
 
       {/* Connecting / waiting → three travelling dots. */}
@@ -69,7 +72,8 @@ export function StatusVisual({
         </div>
       )}
 
-      {/* Otherwise → the equalizer (animated while working/speaking, calm at rest). */}
+      {/* Otherwise → the equalizer: strong while working/speaking, a gentle green
+          breathe while ready (waiting for you to speak), calm/dim at rest. */}
       {!recording && !dots && (
         <div className="flex items-end gap-2">
           {BARS.map((bar) => (
@@ -79,7 +83,11 @@ export function StatusVisual({
                 "w-2 origin-center rounded-full",
                 bar.h,
                 tone,
-                live ? cn("animate-bar", bar.delay) : "scale-y-[0.35] opacity-50"
+                active
+                  ? cn("animate-bar", bar.delay)
+                  : ready
+                    ? cn("animate-bar-soft opacity-80", bar.delay)
+                    : "scale-y-[0.35] opacity-50"
               )}
             />
           ))}

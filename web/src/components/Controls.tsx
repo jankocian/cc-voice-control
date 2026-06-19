@@ -41,7 +41,7 @@ export function Controls({
   const caption = recording ? "Tap to send · ✕ to cancel" : working ? "Tap to steer" : "Tap to speak";
 
   return (
-    <div className="flex flex-col items-center gap-3">
+    <div className="flex flex-col items-center gap-4">
       <div className="grid w-full max-w-xs grid-cols-[1fr_auto_1fr] items-center">
         {/* Left: speed pill — same slot in every state, so it never jumps. */}
         <div className="flex justify-start">
@@ -93,7 +93,7 @@ export function Controls({
         </div>
       </div>
 
-      <p className="text-sm font-medium text-ink-soft">{caption}</p>
+      <p className="text-xs font-medium tracking-wide text-ink-faint">{caption}</p>
     </div>
   );
 }
