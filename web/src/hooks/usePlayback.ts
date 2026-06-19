@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { blobFromBase64 } from "../lib/audio";
+import { setAudioSessionType } from "../lib/audioSession";
 
 const SPEEDS = [1, 1.25, 1.5, 1.75, 2];
 const RATE_KEY = "voiceRemote.playbackRate";
@@ -87,17 +88,24 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
   // client toggled the .playing class on play and cleared it on pause/ended/error.
   useEffect(() => {
     const onPlay = () => setPlayingId(currentPlayingIdRef.current);
-    const onPause = () => setPlayingId(null);
+    const onPause = () => {
+      setPlayingId(null);
+      // Hand the audio session back so iOS resumes any background music we ducked. A
+      // follow-on clip re-claims "transient-solo" in startPlayback before it plays.
+      setAudioSessionType("auto");
+    };
     const onEnded = () => {
       // Keep the row loaded (scrubber stays visible) but reset the playhead so a
       // tap on play restarts; only the "playing" pause-icon state clears.
       setPlayingId(null);
       setPosition(0);
+      setAudioSessionType("auto");
     };
     const onError = () => {
       currentPlayingIdRef.current = null;
       setPlayingId(null);
       setLoadedId(null);
+      setAudioSessionType("auto");
     };
     const onTime = () => setPosition(player.currentTime || 0);
     const onMeta = () => setDuration(Number.isFinite(player.duration) ? player.duration : 0);
@@ -154,20 +162,28 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
     [player, playbackRate]
   );
 
+  // Start (or resume) the loaded clip. Claims the iOS "transient-solo" audio session
+  // first, so background music (Spotify) pauses for the reply and auto-resumes when the
+  // clip ends/pauses (the pause/ended/error listeners reset the session to "auto").
+  const startPlayback = useCallback((): void => {
+    setAudioSessionType("transient-solo");
+    player.play().catch(() => {});
+  }, [player]);
+
   const playEntry = useCallback(
     (requestId: string): void => {
       if (currentPlayingIdRef.current === requestId) {
         if (player.paused) {
           if (player.ended) player.currentTime = 0;
-          player.play().catch(() => {});
+          startPlayback();
         } else {
           player.pause();
         }
         return;
       }
-      if (loadEntry(requestId)) player.play().catch(() => {});
+      if (loadEntry(requestId)) startPlayback();
     },
-    [player, loadEntry]
+    [player, loadEntry, startPlayback]
   );
 
   const replayEntry = useCallback(
@@ -175,9 +191,9 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
       if (!loadEntry(requestId)) return;
       player.currentTime = 0;
       player.playbackRate = playbackRate;
-      player.play().catch(() => {});
+      startPlayback();
     },
-    [player, loadEntry, playbackRate]
+    [player, loadEntry, playbackRate, startPlayback]
   );
 
   const seekEntry = useCallback(
