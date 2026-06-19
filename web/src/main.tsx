@@ -1,33 +1,30 @@
-import { render } from "preact";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { InvalidSession } from "./components/InvalidSession";
 import { readSessionCredentials } from "./lib/session";
 import "./index.css";
 
 const root = document.getElementById("app");
 
 if (root) {
-  const credentials = readSessionCredentials();
-  if (credentials) {
-    render(<App credentials={credentials} />, root);
+  // `?style-guide` (or pathname /style-guide) renders the living style guide — the
+  // single bundled SPA owns the route since the Worker only serves /s/<id> shells.
+  const isStyleGuide =
+    window.location.pathname.endsWith("/style-guide") || new URLSearchParams(window.location.search).has("style-guide");
+
+  if (isStyleGuide) {
+    void import("./StyleGuide").then(({ StyleGuide }) => {
+      createRoot(root).render(
+        <StrictMode>
+          <StyleGuide />
+        </StrictMode>
+      );
+    });
   } else {
-    // No valid /s/<id>?token=… — render a minimal, honest message instead of a
-    // broken UI. (The Worker also refuses to serve the shell without a token.)
-    render(
-      <main>
-        <header class="app-header">
-          <h1 class="app-title">voice control</h1>
-        </header>
-        <section class="panel status" data-state="offline">
-          <div class="status-main">
-            <span class="lamp" aria-hidden="true" />
-            <div class="status-text">
-              <strong>Invalid session link</strong>
-              <span>Open the URL from /voice-control:start</span>
-            </div>
-          </div>
-        </section>
-      </main>,
-      root
+    const credentials = readSessionCredentials();
+    createRoot(root).render(
+      <StrictMode>{credentials ? <App credentials={credentials} /> : <InvalidSession />}</StrictMode>
     );
   }
 }

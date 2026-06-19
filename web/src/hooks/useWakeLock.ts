@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef } from "react";
 
 // Screen Wake Lock — keeps the phone screen on for the whole session (the main
 // use case is a phone left open on the page). Degrades gracefully where the API

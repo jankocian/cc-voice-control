@@ -267,7 +267,7 @@ async function renderSessionPage(env: Env, sessionId: string, token: string): Pr
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
-  <meta name="theme-color" content="#0a0a0b" />
+  <meta name="theme-color" content="#faf6f1" />
   <title>voice-control</title>
 ${styleLinks}
 </head>

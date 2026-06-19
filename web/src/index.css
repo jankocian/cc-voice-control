@@ -1,63 +1,194 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/*
- * Faithful port of the original server-rendered <style> block. Clean, minimal,
- * monochrome. One hairline border token (--border) is used for every surface,
- * divider and control so the whole UI shares the same edge.
- *
- * The UI is composed from shadcn/ui components (Button, Card, Badge, ScrollArea).
- * The shadcn semantic theme tokens below are mapped onto this app's existing
- * monochrome palette so the shadcn components inherit the exact same look —
- * no separate light/dark theme, the whole app is the original dark surface.
- */
-@custom-variant dark (&:is(.dark *));
+/* ============================================================================
+   VOICE-CONTROL DESIGN SYSTEM
+   Warm, light, premium voice-assistant aesthetic. Cream canvas, soft diffuse
+   shadows, very rounded geometry, two accents: coral/orange + lavender/violet.
+
+   Everything below is a TOKEN. Components only use utilities that resolve to
+   these tokens (bg-coral, text-ink, rounded-bubble, shadow-card, …). No magic
+   numbers and no inline styles in components — if a value is needed, add a token.
+   ========================================================================= */
 
 @theme {
-  --color-bg: #0a0a0b;
-  --color-panel: #141416;
-  --color-panel-2: #1c1c1f;
-  --color-border: #26262a;
-  --color-text: #ededed;
-  --color-text-2: #9a9aa2;
-  --color-text-3: #66666e;
-  --color-green: #3fb950;
-  --color-blue: #4493f8;
-  --color-violet: #a371f7;
-  --color-red: #e5484d;
-  --radius-app: 10px;
+  /* ---- Surfaces ---------------------------------------------------------- */
+  --color-canvas: #faf6f1; /* app background (cream) */
+  --color-canvas-deep: #f3ece3; /* recessed wells / scroll bg */
+  --color-surface: #ffffff; /* cards, bars, buttons */
+  --color-hairline: #efe9e1; /* 1px separators / borders */
+
+  /* ---- Ink (text) -------------------------------------------------------- */
+  --color-ink: #211f33; /* primary text */
+  --color-ink-soft: #6e6b7e; /* secondary text */
+  --color-ink-faint: #a6a2b4; /* tertiary / placeholder */
+
+  /* ---- Accents ----------------------------------------------------------- */
+  --color-coral: #fb7a45; /* primary accent (orange) */
+  --color-coral-ink: #c64f1f; /* coral text on coral-soft */
+  --color-coral-soft: #ffe9dc; /* user bubble fill */
+  --color-violet: #8e7df0; /* secondary accent (lavender) */
+  --color-violet-ink: #5b4cb8; /* violet text on violet-soft */
+  --color-violet-soft: #ece7fb; /* agent bubble fill */
+
+  /* ---- Status ------------------------------------------------------------ */
+  --color-success: #2fbf6c;
+  --color-danger: #ff4438;
+  --color-warning: #f5a623;
+
+  /* ---- Orb gradient stops ------------------------------------------------ */
+  --color-orb-warm: #ff9e6b; /* warm pole (orange) */
+  --color-orb-mid: #ffb38a; /* mid wash */
+  --color-orb-cool: #8e7df0; /* cool pole (violet) */
+  --color-orb-glow: #ffd9c2; /* outer aura */
+
+  /* ---- Radii ------------------------------------------------------------- */
+  --radius-control: 16px; /* mic / pill controls (square-ish) */
+  --radius-bubble: 20px; /* chat bubbles */
+  --radius-card: 28px; /* hero card / large panels */
+  --radius-full: 9999px;
+
+  /* ---- Shadows ----------------------------------------------------------- */
+  --shadow-card: 0 12px 32px -16px rgba(45, 33, 22, 0.18);
+  --shadow-soft: 0 2px 12px -6px rgba(45, 33, 22, 0.1);
+  --shadow-lift: 0 18px 44px -20px rgba(45, 33, 22, 0.26);
+  --shadow-orb: 0 24px 60px -18px rgba(255, 138, 84, 0.45);
+  --shadow-mic: 0 14px 30px -12px rgba(251, 122, 69, 0.5);
+
+  /* ---- Typography -------------------------------------------------------- */
+  --font-sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ---- Keyframes (orb + visualizer + status) ----------------------------- */
+  --animate-orb-morph: orb-morph 9s ease-in-out infinite;
+  --animate-orb-drift: orb-drift 14s ease-in-out infinite;
+  --animate-orb-pulse: orb-pulse 2.6s ease-in-out infinite;
+  --animate-ring-spin: ring-spin 6s linear infinite;
+  --animate-dot-bounce: dot-bounce 1.2s ease-in-out infinite;
+  --animate-float-slow: float-slow 7s ease-in-out infinite;
+  --animate-bar: bar-pulse 1s ease-in-out infinite;
+  --animate-rise: rise 0.32s var(--ease-soft) both;
+
+  @keyframes orb-morph {
+    0%,
+    100% {
+      border-radius: 58% 42% 47% 53% / 54% 49% 51% 46%;
+    }
+    33% {
+      border-radius: 46% 54% 62% 38% / 43% 60% 40% 57%;
+    }
+    66% {
+      border-radius: 53% 47% 38% 62% / 59% 41% 59% 41%;
+    }
+  }
+  @keyframes orb-drift {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0) rotate(0deg);
+    }
+    50% {
+      transform: translate3d(0, -2%, 0) rotate(8deg);
+    }
+  }
+  @keyframes orb-pulse {
+    0%,
+    100% {
+      transform: scale(1);
+      opacity: 0.9;
+    }
+    50% {
+      transform: scale(1.06);
+      opacity: 1;
+    }
+  }
+  @keyframes ring-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes dot-bounce {
+    0%,
+    80%,
+    100% {
+      transform: translateY(0);
+      opacity: 0.45;
+    }
+    40% {
+      transform: translateY(-30%);
+      opacity: 1;
+    }
+  }
+  @keyframes float-slow {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0);
+    }
+    50% {
+      transform: translate3d(0, -22%, 0);
+    }
+  }
+  @keyframes bar-pulse {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }
 
-/*
- * shadcn semantic tokens. Mapped onto the app palette above so <Button>, <Card>,
- * <Badge> and <ScrollArea> render in the app's own colours. `--radius` feeds
- * shadcn's rounded-* scale; we keep the app's 10px corner.
- */
+/* ============================================================================
+   shadcn / Base UI semantic token bridge.
+   Maps shadcn's contract onto our palette so any shadcn/Base-UI component
+   (Button, Slider, etc.) inherits the warm light look automatically.
+   ========================================================================= */
 :root {
-  --radius: 10px;
+  --radius: 1rem; /* shadcn --radius (16px control) */
 
-  --background: var(--color-bg);
-  --foreground: var(--color-text);
-  --card: var(--color-panel);
-  --card-foreground: var(--color-text);
-  --popover: var(--color-panel);
-  --popover-foreground: var(--color-text);
-  /* Primary = the one deliberate emphasis: inverted (light fill, dark text). */
-  --primary: var(--color-text);
-  --primary-foreground: #0a0a0b;
-  --secondary: var(--color-panel-2);
-  --secondary-foreground: var(--color-text);
-  --muted: var(--color-panel-2);
-  --muted-foreground: var(--color-text-2);
-  --accent: var(--color-panel-2);
-  --accent-foreground: var(--color-text);
-  --destructive: var(--color-red);
-  --destructive-foreground: #fff;
-  --border: var(--color-border);
-  --input: var(--color-border);
-  --ring: var(--color-text-2);
+  --background: var(--color-canvas);
+  --foreground: var(--color-ink);
+
+  --card: var(--color-surface);
+  --card-foreground: var(--color-ink);
+
+  --popover: var(--color-surface);
+  --popover-foreground: var(--color-ink);
+
+  --primary: var(--color-coral);
+  --primary-foreground: #ffffff;
+
+  --secondary: var(--color-violet-soft);
+  --secondary-foreground: var(--color-violet-ink);
+
+  --muted: var(--color-canvas-deep);
+  --muted-foreground: var(--color-ink-soft);
+
+  --accent: var(--color-coral-soft);
+  --accent-foreground: var(--color-coral-ink);
+
+  --destructive: var(--color-danger);
+  --destructive-foreground: #ffffff;
+
+  --border: var(--color-hairline);
+  --input: var(--color-hairline);
+  --ring: var(--color-coral);
 }
 
+/* Expose the shadcn semantic vars to Tailwind utilities (bg-background, etc.). */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -79,362 +210,50 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 12px);
 }
 
-:root {
-  color-scheme: dark;
-  /* Aliases so the ported CSS can keep its original var() names. */
-  --bg: var(--color-bg);
-  --panel: var(--color-panel);
-  --panel-2: var(--color-panel-2);
-  --text: var(--color-text);
-  --text-2: var(--color-text-2);
-  --text-3: var(--color-text-3);
-  --green: var(--color-green);
-  --blue: var(--color-blue);
-  --violet: var(--color-violet);
-  --red: var(--color-red);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-html,
-body {
-  height: 100%;
-}
-
-body {
-  margin: 0;
-  min-height: 100dvh;
-  color: var(--text);
-  background: var(--bg);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-}
-
-::selection {
-  background: rgba(255, 255, 255, 0.16);
-}
-
-main {
-  width: min(100%, 440px);
-  min-height: 100dvh;
-  margin: 0 auto;
-  padding: max(22px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right))
-    max(22px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* Header */
-.app-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 2px 2px 6px;
-}
-
-.app-title {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.session-id {
-  font-size: 12px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 55%;
-  text-align: right;
-}
-
-/* Status — the primary feedback surface: a solid color fill per state. Applied
- * to the shadcn <Card> via data-state so the Card inherits each state's tint. */
-.status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 16px;
-  position: relative;
-  overflow: hidden;
-  transition:
-    background 0.35s ease,
-    border-color 0.35s ease;
-}
-
-.status[data-state="ready"] {
-  background: color-mix(in srgb, var(--green) 14%, var(--panel));
-  border-color: color-mix(in srgb, var(--green) 42%, var(--border));
-}
-.status[data-state="recording"] {
-  background: color-mix(in srgb, var(--red) 17%, var(--panel));
-  border-color: color-mix(in srgb, var(--red) 48%, var(--border));
-}
-.status[data-state="sending"] {
-  background: color-mix(in srgb, var(--blue) 15%, var(--panel));
-  border-color: color-mix(in srgb, var(--blue) 42%, var(--border));
-}
-.status[data-state="working"] {
-  background: color-mix(in srgb, var(--blue) 17%, var(--panel));
-  border-color: color-mix(in srgb, var(--blue) 48%, var(--border));
-}
-.status[data-state="speaking"] {
-  background: color-mix(in srgb, var(--violet) 17%, var(--panel));
-  border-color: color-mix(in srgb, var(--violet) 48%, var(--border));
-}
-
-/* Subtle sweep while Claude is working */
-.status[data-state="working"]::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    100deg,
-    transparent 28%,
-    color-mix(in srgb, var(--blue) 26%, transparent) 50%,
-    transparent 72%
-  );
-  transform: translateX(-100%);
-  animation: status-sweep 1.8s ease-in-out infinite;
-}
-
-@keyframes status-sweep {
-  0% {
-    transform: translateX(-100%);
+/* ============================================================================
+   Base layer
+   ========================================================================= */
+@layer base {
+  * {
+    border-color: var(--color-hairline);
   }
-  65%,
-  100% {
-    transform: translateX(100%);
+
+  html,
+  body,
+  #app {
+    height: 100%;
   }
-}
 
-.status-main {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 0;
-  position: relative;
-  z-index: 1;
-}
-
-.lamp {
-  --c: var(--text-3);
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-  background: var(--c);
-}
-
-.lamp.connected {
-  --c: var(--green);
-}
-.lamp.working {
-  --c: var(--blue);
-}
-.lamp.speaking {
-  --c: var(--violet);
-}
-.lamp.recording {
-  --c: var(--red);
-  animation: dot-pulse 1.3s ease-in-out infinite;
-}
-
-@keyframes dot-pulse {
-  0%,
-  100% {
-    opacity: 1;
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* iOS safe areas via env(); only place env() is allowed (a token can't hold it). */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
-  50% {
-    opacity: 0.3;
+
+  button {
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
   }
-}
 
-.status-text {
-  min-width: 0;
-}
-.status-text strong {
-  display: block;
-  font-size: 14px;
-  font-weight: 560;
-  letter-spacing: -0.005em;
-  line-height: 1.3;
-}
-.status-text span {
-  display: block;
-  margin-top: 1px;
-  font-size: 12.5px;
-  color: var(--text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Controls layout (the buttons themselves are shadcn <Button>). */
-.controls {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.controls-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-.controls-row.two {
-  grid-template-columns: repeat(2, 1fr);
-}
-[hidden] {
-  display: none !important;
-}
-
-/* Listening visualizer — audio-reactive bars driven by the mic AnalyserNode.
- * The wrapper is a shadcn <Card>; only the show/hide + sizing live here. */
-.visualizer {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  height: 78px;
-  padding: 8px 16px;
-}
-.visualizer.active {
-  display: flex;
-}
-#waveform {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-/* Activity log rows (inside the shadcn <Card> + <ScrollArea>). */
-.panel-head {
-  padding: 12px 16px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--text-3);
-  border-bottom: 1px solid var(--border);
-}
-
-.log:empty::after {
-  content: "No activity yet";
-  display: block;
-  padding: 18px 16px;
-  color: var(--text-3);
-  font-size: 13px;
-}
-
-.entry {
-  padding: 11px 16px;
-  border-top: 1px solid var(--border);
-}
-.entry:first-child {
-  border-top: 0;
-}
-.entry time {
-  display: block;
-  font-size: 11px;
-  color: var(--text-3);
-  letter-spacing: 0.01em;
-  font-variant-numeric: tabular-nums;
-  margin-bottom: 3px;
-}
-.entry p {
-  margin: 0;
-  font-size: 13.5px;
-  line-height: 1.45;
-  color: var(--text-2);
-  overflow-wrap: anywhere;
-}
-.entry[data-kind="you"] p {
-  color: var(--text);
-}
-.entry[data-kind="claude"] p {
-  color: var(--text);
-}
-.entry[data-kind="error"] p {
-  color: var(--red);
-}
-.entry[data-kind="error"] time {
-  color: var(--red);
-  opacity: 0.75;
-}
-.entry[data-kind="you"] time::after {
-  content: " · ✓ sent";
-  color: var(--green);
-  font-weight: 600;
-}
-
-/* Tappable message playback — tap a reply to play/pause, or use the replay button */
-.entry.playable {
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-@media (hover: hover) {
-  .entry.playable:hover {
-    background: var(--panel-2);
-  }
-}
-.entry .entry-controls {
-  float: right;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin: -1px 0 6px 12px;
-}
-.entry .entry-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  color: var(--text-3);
-}
-.entry .entry-icon svg {
-  width: 16px;
-  height: 16px;
-  display: block;
-}
-.entry .entry-icon .ic-pause {
-  display: none;
-}
-.entry.playing {
-  background: var(--panel-2);
-  box-shadow: inset 2px 0 0 var(--violet);
-}
-.entry.playing p {
-  color: var(--text);
-}
-.entry.playing .entry-icon {
-  color: var(--violet);
-}
-.entry.playing .entry-icon .ic-play {
-  display: none;
-}
-.entry.playing .entry-icon .ic-pause {
-  display: block;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    transition-duration: 0.001ms !important;
+  /* Honour reduced-motion: kill the decorative orb/visualizer animations. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 }

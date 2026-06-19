@@ -1,5 +1,4 @@
-import type { RefObject } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { blobToBase64, pickMimeType } from "../lib/audio";
 
 export type RecordedClip = { audioBase64: string; mimeType: string };
@@ -11,7 +10,7 @@ export type RecorderError =
   | "read-failed"; // could not read the blob
 
 export type UseRecorderOptions = {
-  canvasRef: RefObject<HTMLCanvasElement>;
+  canvasRef: RefObject<HTMLCanvasElement | null>;
   // Called with the finished clip once recording stops and is read.
   onClip: (clip: RecordedClip) => void;
   // Called for the error states the vanilla client flashed.
@@ -86,9 +85,14 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     const gap = Math.max(2, w / bars / 3);
     const barW = (w - gap * (bars - 1)) / bars;
     const mid = h / 2;
+    // Read the accent tokens off the canvas so the visualizer stays on-palette
+    // without hard-coded hex (canvas fillStyle needs literal color strings).
+    const styles = getComputedStyle(canvas);
+    const warm = styles.getPropertyValue("--color-coral").trim() || "#fb7a45";
+    const cool = styles.getPropertyValue("--color-violet").trim() || "#8e7df0";
     const grad = ctx.createLinearGradient(0, 0, w, 0);
-    grad.addColorStop(0, "#4493f8");
-    grad.addColorStop(1, "#a371f7");
+    grad.addColorStop(0, warm);
+    grad.addColorStop(1, cool);
     ctx.fillStyle = grad;
     const step = Math.max(1, Math.floor(freqData.length / bars));
     for (let i = 0; i < bars; i++) {

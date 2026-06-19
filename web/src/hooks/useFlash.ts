@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // Transient status-line message. The vanilla client showed a flash for ~2.6s
 // (and cleared it ~2.7s after the last flash). Re-flashing resets the timer.

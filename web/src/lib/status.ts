@@ -53,16 +53,16 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
   if (!connected) {
     key = "connecting";
     title = "Connecting…";
-    detail = "Reaching the bridge";
+    detail = "Establishing secure connection";
   } else if (!ready) {
     key = "waiting";
     title = "Waiting for Claude Code";
-    detail = "The daemon is offline";
+    detail = "Start the daemon in your terminal";
   } else if (recording) {
     key = "recording";
     dataState = "recording";
     title = "Listening…";
-    detail = "Tap again to send";
+    detail = "Tap to stop";
   } else if (transcribing) {
     key = "sending";
     dataState = "sending";
@@ -76,18 +76,18 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
   } else if (runtimeState === "working") {
     key = "working";
     dataState = "working";
-    title = "Claude is working";
-    detail = currentTask || "Working on your request…";
+    title = "Agent is working…";
+    detail = currentTask || "Working on your request";
   } else if (!listening) {
     key = "not-listening";
     dataState = "offline";
     title = "Claude isn't listening";
-    detail = "Restart with /voice-control:start in the terminal";
+    detail = "Restart with /voice-control:start";
   } else {
     key = "ready";
     dataState = "ready";
-    title = "Ready";
-    detail = "Tap the mic and speak";
+    title = "Connected";
+    detail = "Ready to help";
   }
 
   if (flash) detail = flash;

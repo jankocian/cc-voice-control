@@ -13,7 +13,7 @@ export type Message = {
   requestId?: string;
   title: string;
   body: string;
-  // Captured once, when the row is created (the vanilla client did the same).
+  // Wall-clock time the row was created, e.g. "12:34 AM" (captured once).
   time: string;
 };
 
@@ -27,7 +27,7 @@ const TITLE_TO_KIND: Record<string, MessageKind> = {
 let counter = 0;
 
 export function makeMessage(title: string, body: string, requestId?: string): Message {
-  const time = `${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${title}`;
+  const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   counter += 1;
   return {
     id: requestId ?? `m${counter}`,

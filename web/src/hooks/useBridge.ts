@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BridgeEnvelope, BrowserToDaemonEvent, DaemonToBrowserEvent, SessionRuntimeState } from "../lib/protocol";
 import { buildWebSocketUrl } from "../lib/session";
 
