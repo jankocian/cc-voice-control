@@ -5,23 +5,33 @@ import { spawn } from "node:child_process";
  * Code pane). We type the transcript into the pane and submit Enter, so it lands
  * as a real user message in the live session.
  *
- * Robustness, learned from the cmux CLI contract:
+ * Hard-won contract (verified against the live cmux CLI):
  *  - Pass the socket path explicitly (`--socket`) and drop the deprecated
  *    `CMUX_SOCKET` alias so a stale/empty value can't break the connection.
- *  - Target by BOTH `--workspace` and `--surface`; `send` resolves a surface
- *    within its workspace, and the defaults ($CMUX_WORKSPACE_ID/$CMUX_SURFACE_ID)
- *    are the daemon's own (the Claude pane it was launched from).
- *  - No focus needed: `send` delivers to background surfaces just fine.
+ *  - **Clear `CMUX_WORKSPACE_ID`** for every call. cmux scopes a `--surface`
+ *    lookup to the caller's workspace when that var is set; with it cleared, a bare
+ *    `--surface` resolves GLOBALLY. This is the whole ballgame for robustness: the
+ *    surface ref is stable for the life of the pane, so a globally-resolved surface
+ *    keeps working even after the user drags the pane into a different workspace
+ *    (which makes `CMUX_WORKSPACE_ID` stale). Pinning the workspace — or letting the
+ *    env scope the lookup — is what made injection (and the "listening" lamp) break
+ *    on a moved pane.
+ *  - Target by `--surface` ONLY (never `--workspace`).
+ *  - Liveness uses `read-screen --surface` (which resolves the same global way
+ *    `send` does), so "reachable for read" predicts "reachable for inject". A plain
+ *    `ping` only proves the control socket is up, not that the pane exists.
  */
-const CMUX_BIN = process.env.CMUX_BIN || "cmux";
+const CMUX_BIN = process.env.CMUX_BIN || process.env.CMUX_BUNDLED_CLI_PATH || "cmux";
 const SOCKET_PATH = process.env.CMUX_SOCKET_PATH;
-const WORKSPACE_ID = process.env.CMUX_WORKSPACE_ID;
 
 function cmuxEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   // Deprecated alias; if it's set (even empty) alongside CMUX_SOCKET_PATH the CLI
   // can refuse to run. We always pass --socket, so drop it.
   delete env.CMUX_SOCKET;
+  // Force GLOBAL surface resolution (see the module note): without this, cmux scopes
+  // `--surface` to this (possibly stale) workspace and a moved pane becomes invisible.
+  delete env.CMUX_WORKSPACE_ID;
   return env;
 }
 
@@ -63,17 +73,39 @@ function runCmux(args: string[]): Promise<{ ok: boolean; stdout: string; stderr:
   });
 }
 
-function target(surface?: string): string[] {
-  const args: string[] = [];
-  if (WORKSPACE_ID) args.push("--workspace", WORKSPACE_ID);
-  if (surface) args.push("--surface", surface);
-  return args;
+// Target a surface by its ref/UUID ONLY — never the workspace (which we also clear
+// from the env), so the lookup resolves globally and survives a workspace move.
+export function cmuxTarget(surface?: string): string[] {
+  return surface ? ["--surface", surface] : [];
 }
 
-/** True if the cmux control socket is reachable. */
+/** True if the cmux control socket is reachable (socket-level only — not the pane). */
 export async function cmuxPing(): Promise<boolean> {
   const r = await runCmux(["ping"]);
   return r.ok && /PONG/.test(r.stdout);
+}
+
+export type CmuxHealth = {
+  // cmux control socket reachable (ping).
+  socketUp: boolean;
+  // true  = the pane is reachable (globally resolved)
+  // false = cmux is up but the pane is positively gone (closed)
+  // null  = unknown (no surface to probe, or cmux socket down)
+  surfaceAlive: boolean | null;
+};
+
+/**
+ * Probe the daemon's pane the same way injection reaches it: a global `read-screen
+ * --surface` (workspace env is cleared in cmuxEnv). Exit 0 ⇒ reachable. Only when
+ * that fails do we ping, to tell "pane closed" (socket up, surface gone) apart from
+ * "cmux down" (socket unreachable) — the caller stays optimistic on the latter.
+ */
+export async function cmuxHealth(surface?: string): Promise<CmuxHealth> {
+  if (!surface) return { socketUp: await cmuxPing(), surfaceAlive: null };
+  const reach = await runCmux(["read-screen", "--surface", surface, "--lines", "1"]);
+  if (reach.ok) return { socketUp: true, surfaceAlive: true };
+  const socketUp = await cmuxPing();
+  return { socketUp, surfaceAlive: socketUp ? false : null };
 }
 
 /** Type text into the surface and submit it (as a real user message). */
@@ -81,14 +113,14 @@ export async function cmuxSubmit(text: string, surface?: string): Promise<boolea
   // Two ordered writes to the same surface socket: cmux delivers them in order, so the
   // text is fully typed before Enter submits it. The daemon serializes injection (one
   // in-flight turn at a time), so no other message can interleave between the two.
-  const typed = await runCmux(["send", ...target(surface), "--", text]);
+  const typed = await runCmux(["send", ...cmuxTarget(surface), "--", text]);
   if (!typed.ok) return false;
-  const submitted = await runCmux(["send-key", ...target(surface), "enter"]);
+  const submitted = await runCmux(["send-key", ...cmuxTarget(surface), "enter"]);
   return submitted.ok;
 }
 
 /** Interrupt the running turn (Esc is Claude Code's stop). */
 export async function cmuxInterrupt(surface?: string): Promise<boolean> {
-  const r = await runCmux(["send-key", ...target(surface), "escape"]);
+  const r = await runCmux(["send-key", ...cmuxTarget(surface), "escape"]);
   return r.ok;
 }
