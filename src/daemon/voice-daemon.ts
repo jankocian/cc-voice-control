@@ -10,8 +10,9 @@ import type {
   SessionState
 } from "../shared/protocol.js";
 import { cmuxInterrupt, cmuxPing, cmuxSubmit } from "./cmux.js";
-import { runtimePath, stateDir, toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
+import { qrPath, runtimePath, stateDir, toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
 import { synthesizeSpeech, transcribeAudio } from "./elevenlabs.js";
+import { renderQr } from "./qr.js";
 
 // Reconnect backoff for transient bridge drops (network blips, worker redeploys).
 // A terminal close (1008) is handled separately and does not reconnect.
@@ -155,6 +156,14 @@ export class VoiceDaemon {
 
   private writeRuntime(): void {
     mkdirSync(stateDir(), { recursive: true });
+    // Render the QR before runtime.json so it's guaranteed present once the start
+    // skill (which waits on runtime.json) reads it. A render failure must never
+    // block the URL, so it's best-effort — the plain URL is the fallback.
+    try {
+      writeFileSync(qrPath(), `${renderQr(this.init.browserUrl)}\n`);
+    } catch (error) {
+      console.error(`[qr] render failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     writeFileSync(
       runtimePath(),
       JSON.stringify(
@@ -372,6 +381,7 @@ export class VoiceDaemon {
     this.httpServer?.close();
     try {
       rmSync(runtimePath(), { force: true });
+      rmSync(qrPath(), { force: true });
     } catch {
       // ignore
     }

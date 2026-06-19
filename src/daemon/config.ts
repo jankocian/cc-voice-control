@@ -32,6 +32,12 @@ export function runtimePath(): string {
   return join(stateDir(), "runtime.json");
 }
 
+/** Pre-rendered Unicode QR of the phone URL, written next to runtime.json so the
+ *  start skill can print it straight to the Claude Code chat. */
+export function qrPath(): string {
+  return join(stateDir(), "qr.txt");
+}
+
 const LEGACY_CONFIG_PATH = join(homedir(), ".config", "voice-remote", "config.json");
 
 // Config is looked up in order: explicit $VOICE_REMOTE_CONFIG, then the plugin
