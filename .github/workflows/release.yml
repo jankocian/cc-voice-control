@@ -1,9 +1,14 @@
 name: release
 
-# Keeps the committed plugin bundle (dist/daemon/mcp-server.js) canonical and fresh.
-# Marketplace installs copy the repo as-is — no install, no build — so the self-contained
-# bundle must always be present and current on the installable branch. CI is the single
-# source of truth for it (pinned Bun → reproducible output), so nobody builds by hand.
+# Single, consistent release pipeline. On every push to main:
+#   1. Run the full gate (lint, typecheck, test, build).
+#   2. Rebuild and commit the canonical plugin bundle (dist/daemon/mcp-server.js) if it
+#      changed — marketplace installs copy the repo as-is, so the bundle must stay current.
+#   3. If package.json's `version` has no matching git tag yet, cut that release:
+#      create the vX.Y.Z tag + a GitHub Release, then deploy the Cloudflare bridge.
+#
+# package.json `version` is the SINGLE SOURCE OF TRUTH — bump it to ship a release; leave it
+# to refresh only the bundle. Nothing is tagged or versioned by hand. See RELEASING.md.
 on:
   push:
     branches: [main, master]
@@ -16,12 +21,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bundle:
+  release:
     runs-on: ubuntu-latest
     # Skip the bot's own bundle commit to avoid an infinite loop.
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    outputs:
+      released: ${{ steps.ver.outputs.released }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -30,6 +39,7 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: bun run build
+
       - name: Commit rebuilt bundle if it changed
         run: |
           if [ -n "$(git status --porcelain dist)" ]; then
@@ -39,3 +49,36 @@ jobs:
             git commit -m "chore: rebuild plugin bundle [skip ci]"
             git push
           fi
+
+      - name: Decide whether this version is a new release
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(jq -r .version package.json)"
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG already released — refreshing bundle only, no tag/deploy."
+          else
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is new — tagging, releasing, and deploying."
+          fi
+
+      - name: Tag and create the GitHub Release
+        if: steps.ver.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --target main points the tag at the current tip (incl. any just-committed bundle).
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --target main \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --generate-notes
+
+  deploy:
+    needs: release
+    if: ${{ needs.release.outputs.released == 'true' }}
+    uses: ./.github/workflows/deploy-worker.yml
+    secrets: inherit

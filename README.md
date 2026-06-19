@@ -117,7 +117,8 @@ bun run dev:worker  # run the bridge locally on http://localhost:8787
 The committed `dist/daemon/mcp-server.js` is the artifact Claude Code runs — there is no
 install-time build. **CI is the source of truth for it**: `release.yml` rebuilds and commits
 the bundle (with a pinned Bun, so output is reproducible) on every push to `main`, so you never
-build it by hand. `ci.yml` runs the same gate on every PR.
+build it by hand. `ci.yml` runs the same gate on every PR. Versioning and tagging are
+automated from `package.json` — see [RELEASING.md](RELEASING.md).
 
 ## Deploy the bridge
 
@@ -128,6 +129,8 @@ bundles it from source at deploy time:
 bun run deploy:worker   # needs a Cloudflare login or CLOUDFLARE_API_TOKEN
 ```
 
-`deploy-worker.yml` deploys it automatically on a `v*` tag (set `CLOUDFLARE_API_TOKEN` and
-`CLOUDFLARE_ACCOUNT_ID` as repo secrets). Once it's live, point each user's config `bridgeUrl`
-at the deployed URL.
+It deploys automatically as part of a release: when a version bump lands on `main`,
+`release.yml` calls `deploy-worker.yml` (set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
+as repo secrets). You can also redeploy out-of-band any time from the Actions tab
+(`deploy-worker` → Run workflow). See [RELEASING.md](RELEASING.md). Once it's live, point each
+user's config `bridgeUrl` at the deployed URL.

@@ -1,11 +1,12 @@
 name: deploy-worker
 
-# Deploys the Cloudflare bridge (worker/) on a version tag, or on demand.
+# Deploys the Cloudflare bridge (worker/). Invoked two ways:
+#  - automatically by release.yml when a new version is cut (reusable workflow_call), and
+#  - manually via the Actions tab (workflow_dispatch) to redeploy the bridge out-of-band.
 # Requires repo secrets: CLOUDFLARE_API_TOKEN (Workers + Durable Objects edit) and
 # CLOUDFLARE_ACCOUNT_ID. Wrangler bundles the worker from source at deploy time.
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
 
 jobs:
