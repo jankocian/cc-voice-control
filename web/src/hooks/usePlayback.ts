@@ -9,7 +9,7 @@ function clampRate(rate: number): number {
 }
 
 export function formatRate(rate: number): string {
-  return `${rate}×`;
+  return `${rate}x`;
 }
 
 type CachedAudio = { audioBase64: string; mimeType: string };

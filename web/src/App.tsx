@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { Controls } from "./components/Controls";
-import { Header } from "./components/Header";
-import { MessageList } from "./components/MessageList";
-import { StatusPanel } from "./components/StatusPanel";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BottomTabBar } from "./components/BottomTabBar";
+import { Hero } from "./components/Hero";
+import { MessageThread } from "./components/MessageThread";
+import { TopBar } from "./components/TopBar";
 import { type BridgeContentEvent, useBridge } from "./hooks/useBridge";
+import { useElapsed } from "./hooks/useElapsed";
 import { useFlash } from "./hooks/useFlash";
 import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
@@ -24,7 +25,11 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [transcribing, setTranscribing] = useState(false);
-  const [pending, setPending] = useState<RecordedClip | null>(null);
+
+  // The mode the *next* finished clip should submit with. "queue" for a normal
+  // push-to-talk turn; "interrupt" when the user tapped Interrupt while the agent
+  // works (also reused for Steer — see the working-state handlers below).
+  const nextModeRef = useRef<"queue" | "interrupt">("queue");
 
   // The requestId of the most recent reply rendered; sent on sync so the daemon
   // can replay one the phone missed. Held in a ref so useBridge reads it lazily.
@@ -39,7 +44,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const getRecording = useCallback(() => recordingRef.current, []);
 
   const playback = usePlayback({ getRecording });
-  const { dropAudio, attachAudio, stopPlayback, playEntry, replayEntry } = playback;
+  const { dropAudio, attachAudio, stopPlayback, playEntry, replayEntry, seekEntry } = playback;
 
   // ---- bridge ----------------------------------------------------------------
   const handleContentEvent = useCallback(
@@ -78,13 +83,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   });
   const { connected, daemonConnected, runtime, bridgeReady, sendDaemon } = bridge;
 
-  // A dropped socket loses any in-flight send — re-enable the mic and drop the
-  // pending clip (mirrors the vanilla `close` handler).
+  // A dropped socket loses any in-flight send — re-enable the mic.
   useEffect(() => {
-    if (!connected) {
-      setTranscribing(false);
-      setPending(null);
-    }
+    if (!connected) setTranscribing(false);
   }, [connected]);
 
   // ---- recorder --------------------------------------------------------------
@@ -100,16 +101,14 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [sendDaemon, showFlash]
   );
 
+  // Submit with the mode chosen when recording started (queue by default; interrupt
+  // when Interrupt/Steer kicked off the recording during a working turn).
   const onClip = useCallback(
     (clip: RecordedClip) => {
-      // While Claude is working, let the user choose: queue behind the turn, or interrupt.
-      if (runtime.state === "working") {
-        setPending(clip);
-        return;
-      }
-      sendAudio(clip, "queue");
+      sendAudio(clip, nextModeRef.current);
+      nextModeRef.current = "queue";
     },
-    [runtime.state, sendAudio]
+    [sendAudio]
   );
 
   const onRecorderError = useCallback((error: RecorderError) => showFlash(RECORDER_ERROR_TEXT[error]), [showFlash]);
@@ -122,37 +121,65 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   });
   recordingRef.current = recorder.recording;
 
+  // Start a recording with a target submit mode. Returns false if not ready.
+  const startRecording = useCallback(
+    (mode: "queue" | "interrupt") => {
+      if (transcribing) return;
+      if (!bridgeReady()) {
+        showFlash("Not connected to Claude Code yet");
+        return;
+      }
+      nextModeRef.current = mode;
+      void recorder.start();
+    },
+    [transcribing, bridgeReady, recorder, showFlash]
+  );
+
+  // Push-to-talk: tap to start (queue mode), tap to stop+send.
   const toggleRecording = useCallback(() => {
     if (transcribing) return;
     if (recorder.recording) {
       recorder.stop();
       return;
     }
-    if (!bridgeReady()) {
-      showFlash("Not connected to Claude Code yet");
-      return;
-    }
-    setPending(null); // re-recording discards a clip awaiting a send choice
-    void recorder.start();
-  }, [transcribing, recorder, bridgeReady, showFlash]);
+    startRecording("queue");
+  }, [transcribing, recorder, startRecording]);
 
-  const sendPending = useCallback(
-    (mode: "queue" | "interrupt") => {
-      if (!pending) return;
-      const clip = pending;
-      setPending(null);
-      sendAudio(clip, mode);
-    },
-    [pending, sendAudio]
-  );
-
-  // ---- control buttons -------------------------------------------------------
+  // ---- working-state controls ------------------------------------------------
   const sendControl = useCallback(
     (command: { type: "summary_request" } | { type: "status_request" } | { type: "stop_task" }) => {
       if (!sendDaemon(command)) showFlash(bridgeReady() ? "Couldn't reach Claude Code" : "Not connected yet");
     },
     [sendDaemon, bridgeReady, showFlash]
   );
+
+  // Interrupt: record a message that interrupts the running turn (Esc + run now).
+  // Tap again while recording to send it.
+  const onInterrupt = useCallback(() => {
+    if (recorder.recording) {
+      recorder.stop();
+      return;
+    }
+    startRecording("interrupt");
+  }, [recorder, startRecording]);
+
+  // Steer: record a guiding message queued behind the running turn.
+  // TODO: there is no dedicated "steer" event in the bridge protocol
+  // (src/shared/protocol.ts). Queue-mode submit is the closest existing behaviour;
+  // wire a real steering event here if/when the daemon gains one.
+  const onSteer = useCallback(() => {
+    if (recorder.recording) {
+      recorder.stop();
+      return;
+    }
+    startRecording("queue");
+  }, [recorder, startRecording]);
+
+  // Stop: the existing stop_task event.
+  const onStop = useCallback(() => {
+    if (recorder.recording) recorder.stop();
+    sendControl({ type: "stop_task" });
+  }, [recorder, sendControl]);
 
   // ---- teardown (pagehide) ---------------------------------------------------
   useEffect(() => {
@@ -174,32 +201,44 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     flash
   });
 
+  const elapsed = useElapsed(status.dataState === "working");
+
   return (
-    <main>
-      <Header rateLabel={playback.formattedRate} onCycleSpeed={playback.cycleSpeed} />
-      <StatusPanel status={status} />
-      <Controls
-        canAct={status.canAct}
-        recording={recorder.recording}
-        transcribing={transcribing}
-        visualizerActive={recorder.visualizerActive}
-        pending={pending !== null}
-        canvasRef={canvasRef}
-        onToggleRecord={toggleRecording}
-        onQueue={() => sendPending("queue")}
-        onInterrupt={() => sendPending("interrupt")}
-        onSummary={() => sendControl({ type: "summary_request" })}
-        onStatus={() => sendControl({ type: "status_request" })}
-        onStop={() => sendControl({ type: "stop_task" })}
-      />
-      <MessageList
-        messages={messages}
-        playableIds={playback.playableIds}
-        playingId={playback.playingId}
-        onPlay={playEntry}
-        onReplay={replayEntry}
-      />
-    </main>
+    <div className="flex h-full flex-col bg-canvas">
+      <TopBar online={status.dataState !== "offline"} />
+
+      <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <Hero
+          status={status}
+          elapsed={elapsed}
+          recording={recorder.recording}
+          visualizerActive={recorder.visualizerActive}
+          canvasRef={canvasRef}
+          speedLabel={playback.formattedRate}
+          onToggleRecord={toggleRecording}
+          onCycleSpeed={playback.cycleSpeed}
+          onInterrupt={onInterrupt}
+          onSteer={onSteer}
+          onStop={onStop}
+        />
+
+        <MessageThread
+          messages={messages}
+          playback={{
+            playingId: playback.playingId,
+            loadedId: playback.loadedId,
+            position: playback.position,
+            duration: playback.duration,
+            playableIds: playback.playableIds,
+            onPlay: playEntry,
+            onReplay: replayEntry,
+            onSeek: seekEntry
+          }}
+        />
+      </main>
+
+      <BottomTabBar />
+    </div>
   );
 }
 
