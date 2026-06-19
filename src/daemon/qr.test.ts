@@ -2,9 +2,9 @@ import jsQR from "jsqr";
 import { describe, expect, it } from "vitest";
 import { encodeQr, type QrMatrix, renderQr, renderQrUnicode } from "./qr.js";
 
-// A realistic phone URL: bridge + UUID session id + 43-char token + expiry.
+// A realistic phone URL, matching what the daemon builds: bridge + UUID session id + 43-char token.
 const SAMPLE_URL =
-  "https://voice-remote-bridge.example.workers.dev/s/123e4567-e89b-12d3-a456-426614174000?token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG&expiresAt=1750000000000";
+  "https://voice-control.nee.rs/s/123e4567-e89b-12d3-a456-426614174000?token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 
 /** Paint a boolean module grid into an RGBA bitmap jsQR can decode (black ink on white). */
 function rasterize(bits: boolean[][], scale = 4, quiet = 4) {
