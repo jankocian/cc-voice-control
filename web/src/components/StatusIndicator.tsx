@@ -1,27 +1,52 @@
 import { formatClock } from "@/hooks/useElapsed";
 import type { StatusView } from "@/lib/status";
+import { cn } from "@/lib/utils";
 
-// The status block under the visual: a large title (or the elapsed mm:ss timer
-// while working) plus an optional one-line detail. The animated state indicator
-// lives in <StatusVisual>; this block is text only.
-export function StatusIndicator({ status, elapsed }: { status: StatusView; elapsed: number }) {
-  const { dataState, title, detail } = status;
+// The hero readout. The animated <StatusVisual> now carries the state by itself, so
+// this is intentionally quiet:
+//   • working                 → the elapsed mm:ss timer (the one bit of real data)
+//   • a transient flash, or a state that needs the user (connecting / waiting for
+//     the daemon / not listening) → a small toast-style message
+//   • idle / recording / speaking with nothing to flag → renders nothing
+export function StatusIndicator({
+  status,
+  elapsed,
+  flash
+}: {
+  status: StatusView;
+  elapsed: number;
+  flash: string | null;
+}) {
+  const { dataState, key, title } = status;
   const showTimer = dataState === "working";
+  // "offline" groups connecting / waiting-for-daemon / not-listening — i.e. states
+  // where the user can't talk yet and should be told why.
+  const attention = dataState === "offline";
+  const message = flash ?? (attention ? title : null);
+  // Amber when there's an action for the user (daemon down / not listening); neutral
+  // for transient flashes and the brief connecting handshake.
+  const alert = key === "waiting" || key === "not-listening";
+
+  if (!showTimer && !message) return null;
 
   return (
-    <div className="flex animate-rise flex-col items-center gap-1.5 text-center">
-      {showTimer ? (
+    <div className="flex animate-rise flex-col items-center gap-2 text-center">
+      {message && (
+        <span
+          className={cn(
+            "max-w-[20rem] truncate rounded-full px-3.5 py-1.5 text-xs font-medium shadow-soft backdrop-blur-md",
+            alert ? "bg-warning/12 text-warning" : "bg-surface/90 text-ink-soft"
+          )}
+        >
+          {message}
+        </span>
+      )}
+
+      {showTimer && (
         <span className="font-mono text-3xl font-semibold tabular-nums tracking-tight text-ink">
           {formatClock(elapsed)}
         </span>
-      ) : (
-        <h1 className="text-2xl font-semibold tracking-tight text-ink">{title}</h1>
       )}
-
-      <div className="flex min-h-[1.25rem] items-center gap-2 text-[15px] text-ink-soft">
-        {showTimer && <span className="font-semibold text-ink">{title}</span>}
-        {detail && <span className="max-w-[18rem] truncate">{detail}</span>}
-      </div>
     </div>
   );
 }

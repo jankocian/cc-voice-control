@@ -75,6 +75,14 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     // through idFromName(sha256(secret)), so arriving at this object already proves the
     // caller knows the session secret. The secret is the whole capability; the session
     // lives until the daemon terminates it (no wall-clock expiry).
+
+    // A session has exactly one daemon. If a previous daemon socket is still attached
+    // (a zombie from a killed/moved pane, or a reconnect that raced the old close),
+    // evict it now so the freshly-connecting daemon is authoritative and the browser's
+    // presence lamp can never reflect a dead daemon. Browsers are not unique (phone +
+    // desktop tab may both watch), so only the daemon role is deduplicated.
+    if (role === "daemon") this.evictRole("daemon");
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.serializeAttachment({ role } satisfies SocketAttachment);
@@ -127,6 +135,21 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       socket.close(1008, "session ended");
     }
     await this.ctx.storage.deleteAll();
+  }
+
+  // Close every currently-attached socket of a role (used to evict a stale daemon
+  // when a new one connects). 1012 ("service restart") is non-terminal, so a still-
+  // live peer would simply reconnect; a zombie is just dropped.
+  private evictRole(role: BridgeClientRole): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
+      if (attachment?.role !== role) continue;
+      try {
+        socket.close(1012, "replaced by a newer connection");
+      } catch {
+        // already closing; ignore
+      }
+    }
   }
 
   private liveRoles(exclude?: WebSocket): { daemon: boolean; browser: boolean } {

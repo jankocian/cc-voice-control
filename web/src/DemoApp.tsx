@@ -117,6 +117,7 @@ export function DemoApp({ state }: { state: string }) {
           <Hero
             status={status}
             elapsed={elapsed}
+            flash={null}
             recording={state === "recording"}
             visualizerActive={state === "recording"}
             canvasRef={canvasRef}

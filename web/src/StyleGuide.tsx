@@ -191,7 +191,7 @@ export function StyleGuide() {
                 className="flex flex-col items-center gap-1 border-b border-hairline pb-4 last:border-0 last:pb-0"
               >
                 <span className="text-[10px] uppercase tracking-widest text-ink-faint">{c.label}</span>
-                <StatusIndicator status={c.status} elapsed={c.elapsed} />
+                <StatusIndicator status={c.status} elapsed={c.elapsed} flash={null} />
               </div>
             ))}
           </div>

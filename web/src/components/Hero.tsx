@@ -10,6 +10,7 @@ import type { StatusView } from "@/lib/status";
 export function Hero({
   status,
   elapsed,
+  flash,
   recording,
   visualizerActive,
   canvasRef,
@@ -24,6 +25,7 @@ export function Hero({
 }: {
   status: StatusView;
   elapsed: number;
+  flash: string | null;
   recording: boolean;
   visualizerActive: boolean;
   canvasRef: RefObject<HTMLCanvasElement | null>;
@@ -41,10 +43,10 @@ export function Hero({
   const working = status.dataState === "working";
 
   return (
-    <section className="relative flex shrink-0 flex-col items-center gap-6 rounded-b-card bg-gradient-to-b from-canvas-deep/70 to-canvas px-5 pb-7 pt-3">
+    <section className="relative flex shrink-0 flex-col items-center gap-5 rounded-b-card bg-gradient-to-b from-canvas-deep/70 to-canvas px-5 pb-7 pt-3">
       <StatusVisual status={status} recording={recording} visualizerActive={visualizerActive} canvasRef={canvasRef} />
 
-      <StatusIndicator status={status} elapsed={elapsed} />
+      <StatusIndicator status={status} elapsed={elapsed} flash={flash} />
 
       <div className="w-full max-w-sm pt-1">
         <Controls

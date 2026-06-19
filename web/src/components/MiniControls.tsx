@@ -50,6 +50,11 @@ export function MiniControls({
             ? "bg-success"
             : "bg-ink-faint";
 
+  // Like the hero, stay quiet: show the elapsed timer while working, the reason
+  // while a state needs the user (offline / waiting / not listening), else just the
+  // coloured dot — the dot + the action buttons already say what's going on.
+  const attention = dataState === "offline";
+
   return (
     <div
       className={cn(
@@ -64,9 +69,12 @@ export function MiniControls({
             className={cn("size-2.5 shrink-0 rounded-full", dotTone, busy && "animate-pulse-ring")}
             aria-hidden="true"
           />
-          <span className="truncate text-sm font-semibold text-ink">{title}</span>
-          {working && (
-            <span className="shrink-0 font-mono text-sm tabular-nums text-ink-soft">{formatClock(elapsed)}</span>
+          {working ? (
+            <span className="shrink-0 font-mono text-sm font-semibold tabular-nums text-ink">
+              {formatClock(elapsed)}
+            </span>
+          ) : (
+            attention && <span className="truncate text-sm font-semibold text-ink">{title}</span>
           )}
         </div>
 
