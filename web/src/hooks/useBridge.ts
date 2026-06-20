@@ -32,7 +32,7 @@ export type DaemonCommand =
   | { type: "stop_task" }
   | { type: "sync" }
   | { type: "get_audio"; requestId: string }
-  | { type: "spawn_thread"; cwd?: string; direction?: "right" | "down" };
+  | { type: "spawn_thread"; cwd?: string };
 
 export type BridgeRuntime = {
   state: SessionRuntimeState;

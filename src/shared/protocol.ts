@@ -10,9 +10,9 @@ export type SessionRuntimeState = "idle" | "working";
 
 export type SessionState = {
   sessionId: string;
-  // True when the daemon can reach the Claude pane (cmux is healthy). Connection
-  // lamps come from `bridge_presence`, not from here — the daemon can't observe the
-  // phone's socket, so it never reports connection state it doesn't know.
+  // True when the daemon can reach the Claude pane (cmux is healthy). Per-thread connection
+  // presence comes from the DO roster (`connected`/`lastSeenAt`), not from here — the daemon
+  // can't observe the phone's socket, so it never reports connection state it doesn't know.
   listening: boolean;
   state: SessionRuntimeState;
 };
@@ -51,7 +51,7 @@ export type BrowserToDaemonEvent =
   // Open a NEW cmux workspace running Claude + /voice-control:start, so it joins this same
   // session as a new thread (same QR). Routed to the ACTIVE thread's daemon, which has the
   // cmux trust to spawn for its machine. `cwd` defaults to the spawning daemon's cwd.
-  | { type: "spawn_thread"; cwd?: string; direction?: "right" | "down" };
+  | { type: "spawn_thread"; cwd?: string };
 
 export type DaemonToBrowserEvent =
   | { type: "session_status"; state: SessionState; memory: { currentTask?: string } }
@@ -64,13 +64,6 @@ export type DaemonToBrowserEvent =
   // phone reconciles these (text-only) turns to restore history after a refresh / on a
   // 2nd browser, then fetches audio per row on demand.
   | { type: "history"; turns: HistoryTurn[] }
-  // `daemonLastSeenAt` is the epoch-ms time a daemon socket last closed for this
-  // session (null = a daemon was never seen). It lets the phone distinguish a brief
-  // reconnect from a session that ended hours ago: `daemonConnected` is a pure boolean
-  // with no time dimension, so the browser grades the "no daemon" state by elapsed time.
-  // A clean `/stop` wipes the DO storage, so a terminated session reports null — only an
-  // ungraceful drop (laptop sleep/off) leaves a timestamp behind.
-  | { type: "bridge_presence"; daemonConnected: boolean; browserConnected: boolean; daemonLastSeenAt: number | null }
   | { type: "error"; requestId?: string; message: string };
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.

@@ -32,6 +32,24 @@ export function storedFromInfo(info: ThreadInfo): StoredThread {
   return { label: info.label, state: info.state, listening: info.listening, lastSeenAt: null };
 }
 
+// Revoke-on-exit decision: is the given socket the LAST daemon attached? A closing/terminating
+// socket is still listed by the DO's getWebSockets() while its own handler runs, so it MUST be
+// excluded from the "any daemon left?" check — otherwise running /stop in the only pane would
+// never revoke the session. Pure (socket list + role accessor + the excluded socket in, boolean
+// out) so the revoke decision — including that exclusion edge — is unit-tested without a Workers
+// runtime. `excluded` is omitted by the alarm path (no socket is closing there).
+export function isLastDaemon<S>(
+  sockets: Iterable<S>,
+  roleOf: (socket: S) => "daemon" | "browser" | undefined,
+  excluded?: S
+): boolean {
+  for (const socket of sockets) {
+    if (socket === excluded) continue;
+    if (roleOf(socket) === "daemon") return false;
+  }
+  return true;
+}
+
 // Assemble the roster a browser receives from the stored thread entries, stamping each with
 // live `connected` (is a daemon socket attached for it right now?). Pure (storage map +
 // presence predicate in, RosterThread[] out) so the join/lastSeenAt shaping is testable

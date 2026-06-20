@@ -8,6 +8,7 @@ import type { BridgeEnvelope, RosterThread, ThreadId, ThreadInfo } from "../../s
 import {
   buildRoster,
   EMPTY_SESSION_GRACE_MS,
+  isLastDaemon,
   ROSTER_KEY_PREFIX,
   rosterKey,
   type StoredThread,
@@ -22,13 +23,8 @@ export interface Env {
   // Cloudflare native Rate Limiting binding (wrangler.toml [[ratelimits]]). Caps WS-connect
   // attempts per client IP — abuse/DoS insurance, NOT the capability gate (a wrong secret
   // already lands on a different, empty DO). Best-effort / per-edge / eventually-consistent.
+  // `RateLimit` is a global type from @cloudflare/workers-types.
   WS_CONNECT: RateLimit;
-}
-
-// Minimal shape of the rate-limit binding (workers-types may not ship it yet). `limit({ key })`
-// returns `{ success }`: false once the per-key budget for the configured window is exhausted.
-interface RateLimit {
-  limit(options: { key: string }): Promise<{ success: boolean }>;
 }
 
 // Daemon sockets carry their threadId (the routing key); browser sockets carry only the role.
@@ -58,8 +54,9 @@ export default {
       // /ws/<random> can't burn DO instantiations / requests. Best-effort abuse-bounding only
       // (the secret hash is the real gate); we never rely on it for correctness.
       const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-      const { success } = await env.WS_CONNECT.limit({ key: ip });
-      if (!success) return new Response("Too Many Requests", { status: 429 });
+      if (!(await rateLimitAllows(env.WS_CONNECT, ip))) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
 
       // Route by the secret's hash, never the raw secret: the Durable Object name is a
       // non-secret, one-way derivative, so reaching a session's DO already proves knowledge
@@ -193,24 +190,29 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     const attachment = ws.deserializeAttachment() as SocketAttachment | undefined;
     if (attachment?.role !== "daemon") return;
 
-    const lastSeenAt = Date.now();
     const stored = await this.getThread(attachment.threadId);
-    if (stored) await this.putThread(attachment.threadId, { ...stored, lastSeenAt });
+    // Already gone — a clean terminate removed it (possibly expiring the whole session). Nothing
+    // to do; without this guard the trailing close after expireSession() would re-arm a spurious
+    // alarm on an already-empty DO.
+    if (!stored) return;
+
+    const lastSeenAt = Date.now();
+    await this.putThread(attachment.threadId, { ...stored, lastSeenAt });
     this.broadcastToBrowsers({
       channel: "roster",
       event: { type: "thread_left", threadId: attachment.threadId, lastSeenAt }
     });
 
-    // If no daemon socket remains, start the revoke-on-exit grace timer. A reconnecting daemon
+    // If this was the last daemon, start the revoke-on-exit grace timer. A reconnecting daemon
     // cancels it (deleteAlarm in fetch); if none does, alarm() expires the session.
-    if (!this.hasAnyDaemon(ws)) await this.ctx.storage.setAlarm(Date.now() + EMPTY_SESSION_GRACE_MS);
+    if (this.noDaemonRemains(ws)) await this.ctx.storage.setAlarm(Date.now() + EMPTY_SESSION_GRACE_MS);
   }
 
   // Revoke-on-exit: fires EMPTY_SESSION_GRACE_MS after the roster went empty. Only expire if it
   // is STILL empty (a daemon may have reconnected and cancelled — belt-and-braces re-check), so
   // a flapping daemon never loses a live session.
   async alarm(): Promise<void> {
-    if (this.hasAnyDaemon()) return;
+    if (!this.noDaemonRemains()) return;
     await this.expireSession();
   }
 
@@ -238,7 +240,7 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       channel: "roster",
       event: { type: "thread_left", threadId, lastSeenAt: Date.now() }
     });
-    if (!this.hasAnyDaemon(terminatingSocket)) await this.expireSession();
+    if (this.noDaemonRemains(terminatingSocket)) await this.expireSession();
   }
 
   // ---- presence / routing helpers --------------------------------------------
@@ -266,15 +268,10 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     }
   }
 
-  // True if any daemon socket is still attached (optionally excluding one that is closing — its
-  // close handler runs while it is still listed by getWebSockets()).
-  private hasAnyDaemon(exclude?: WebSocket): boolean {
-    for (const socket of this.ctx.getWebSockets()) {
-      if (socket === exclude) continue;
-      const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
-      if (attachment?.role === "daemon") return true;
-    }
-    return false;
+  // Is no daemon left, so revoke-on-exit should fire? Excludes a closing/terminating socket that
+  // getWebSockets() still lists during its own handler. The decision lives in registry.isLastDaemon.
+  private noDaemonRemains(exclude?: WebSocket): boolean {
+    return isLastDaemon(this.ctx.getWebSockets(), roleOf, exclude);
   }
 
   // Send the full roster to one browser: every stored thread, with `connected` computed live
@@ -316,6 +313,23 @@ function send(socket: WebSocket, envelope: BridgeEnvelope): void {
     socket.send(JSON.stringify(envelope));
   } catch {
     // socket is closing; ignore
+  }
+}
+
+// The role on a socket's attachment (undefined if unattached). Used by the revoke-on-exit
+// decision (registry.isLastDaemon); the per-thread routing helpers read the full attachment.
+function roleOf(socket: WebSocket): "daemon" | "browser" | undefined {
+  return (socket.deserializeAttachment() as SocketAttachment | undefined)?.role;
+}
+
+// Ask the rate-limiter, failing OPEN: it's abuse-bounding, not the capability gate, so a limiter
+// fault (or a binding that throws) must never block legitimate traffic. Any error → allow.
+async function rateLimitAllows(limiter: RateLimit, key: string): Promise<boolean> {
+  try {
+    const { success } = await limiter.limit({ key });
+    return success;
+  } catch {
+    return true;
   }
 }
 

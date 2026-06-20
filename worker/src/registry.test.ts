@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadInfo } from "../../src/shared/protocol";
-import { buildRoster, rosterKey, type StoredThread, storedFromInfo, threadIdFromKey } from "./registry";
+import { buildRoster, isLastDaemon, rosterKey, type StoredThread, storedFromInfo, threadIdFromKey } from "./registry";
 
 const labelA = { title: "voice-control · main", repo: "voice-control", branch: "main", cwd: "voice-control" };
 const labelB = { title: "api · feat/x", repo: "api", branch: "feat/x", cwd: "api" };
@@ -48,5 +48,35 @@ describe("buildRoster — the snapshot a (re)connecting browser receives", () =>
 
   it("returns an empty roster when no threads are stored", () => {
     expect(buildRoster(new Map(), () => true)).toEqual([]);
+  });
+});
+
+describe("isLastDaemon — the revoke-on-exit decision (excludes the closing socket)", () => {
+  type Sock = { id: number; role: "daemon" | "browser" };
+  const roleOf = (s: Sock) => s.role;
+  const daemon = (id: number): Sock => ({ id, role: "daemon" });
+  const browser = (id: number): Sock => ({ id, role: "browser" });
+
+  it("no daemon attached → true (nothing left to keep the session alive)", () => {
+    expect(isLastDaemon([], roleOf)).toBe(true);
+    expect(isLastDaemon([browser(1), browser(2)], roleOf)).toBe(true);
+  });
+
+  it("a daemon is attached (none excluded) → false", () => {
+    expect(isLastDaemon([daemon(1)], roleOf)).toBe(false);
+    expect(isLastDaemon([browser(1), daemon(2)], roleOf)).toBe(false);
+  });
+
+  it("excludes the closing socket: the ONLY daemon closing → true (it was the last)", () => {
+    // getWebSockets() still lists the socket during its own close handler; without the exclusion
+    // running /stop in the only pane would never revoke the session.
+    const closing = daemon(1);
+    expect(isLastDaemon([closing], roleOf, closing)).toBe(true);
+    expect(isLastDaemon([closing, browser(2)], roleOf, closing)).toBe(true);
+  });
+
+  it("a sibling daemon survives the exclusion → false (never revoke a still-live session)", () => {
+    const closing = daemon(1);
+    expect(isLastDaemon([closing, daemon(2)], roleOf, closing)).toBe(false);
   });
 });

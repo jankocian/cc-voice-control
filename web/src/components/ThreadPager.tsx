@@ -3,6 +3,18 @@ import { MessageThread, type ThreadPlayback } from "@/components/MessageThread";
 import type { Message } from "@/lib/messages";
 import type { ThreadId } from "@/lib/protocol";
 
+// A page must be at least this visible (centered) in the pager to become the active thread on a
+// swipe-settle — also the IntersectionObserver threshold.
+const ACTIVE_PAGE_RATIO = 0.5;
+// The pager is "already on" a page when its scrollLeft is within this many px of the page offset,
+// so a pill/dropdown pick after a swipe already landed there skips a redundant programmatic scroll.
+const SETTLE_EPSILON_PX = 1;
+// Suppress the settle→onActivate observer for this long after starting a smooth programmatic scroll
+// (a pill/dropdown pick), covering the scroll animation. If it ever under-covers on a slow device,
+// the guard clears early and the observer just re-activates the target page on settle —
+// self-correcting, never wrong.
+const PROGRAMMATIC_SCROLL_MS = 400;
+
 export type PagerThread = {
   threadId: ThreadId;
   messages: Message[];
@@ -63,12 +75,12 @@ export function ThreadPager({
       (entries) => {
         if (programmaticRef.current) return;
         for (const entry of entries) {
-          if (!entry.isIntersecting || entry.intersectionRatio < 0.5) continue;
+          if (!entry.isIntersecting || entry.intersectionRatio < ACTIVE_PAGE_RATIO) continue;
           const threadId = (entry.target as HTMLElement).dataset.threadId;
           if (threadId && threadId !== activeThreadIdRef.current) onActivate(threadId);
         }
       },
-      { root, threshold: 0.5 }
+      { root, threshold: ACTIVE_PAGE_RATIO }
     );
     for (const { threadId } of threads) {
       const node = pageRefs.current.get(threadId);
@@ -84,12 +96,12 @@ export function ThreadPager({
     const page = pageRefs.current.get(activeThreadId);
     const pager = pagerRef.current;
     if (!page || !pager) return;
-    if (Math.abs(page.offsetLeft - pager.scrollLeft) < 1) return; // already there (e.g. a swipe)
+    if (Math.abs(page.offsetLeft - pager.scrollLeft) < SETTLE_EPSILON_PX) return; // already there (a swipe)
     programmaticRef.current = true;
     pager.scrollTo({ left: page.offsetLeft, behavior: "smooth" });
     const done = window.setTimeout(() => {
       programmaticRef.current = false;
-    }, 400);
+    }, PROGRAMMATIC_SCROLL_MS);
     return () => window.clearTimeout(done);
   }, [activeThreadId]);
 

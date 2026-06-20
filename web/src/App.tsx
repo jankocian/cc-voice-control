@@ -160,6 +160,20 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const activeRuntime =
     (activeThreadId && runtimeByThread.get(activeThreadId)) || rosterRuntime(active) || DEFAULT_RUNTIME;
 
+  // Release per-thread state for threads the roster has fully dropped (a snapshot without them; a
+  // greyed/offline thread stays in the roster, so its history is kept). Mirrors useThreads' unread
+  // prune — without it `messagesByThread`/`runtimeByThread` would grow one entry per pane ever seen
+  // over a long-lived socket and never release. Also releases each dropped thread's cached audio.
+  useEffect(() => {
+    const live = new Set(threads.threads.map((t) => t.threadId));
+    setRuntimeByThread((prev) => pruneThreadMap(prev, live));
+    setMessagesByThread((prev) =>
+      pruneThreadMap(prev, live, (messages) => {
+        for (const message of messages) if (message.requestId) dropAudio(message.requestId);
+      })
+    );
+  }, [threads.threads, dropAudio]);
+
   // Tick a wall clock only while the socket is open but the active thread has no daemon — exactly
   // when the status grades reconnecting→offline by elapsed time and "Last active X ago" updates.
   const activeConnected = active?.connected === true;
@@ -456,4 +470,21 @@ function reconcileAndPrune(prev: Message[], incoming: Message[], dropAudio: (req
     if (message.requestId && !kept.has(message.requestId)) dropAudio(message.requestId);
   }
   return next;
+}
+
+// Drop entries whose threadId is no longer in `live`; returns the same map ref when nothing changed
+// (so it never forces a re-render). `onDrop` releases any resource the evicted value held.
+function pruneThreadMap<V>(
+  map: Map<ThreadId, V>,
+  live: ReadonlySet<ThreadId>,
+  onDrop?: (value: V) => void
+): Map<ThreadId, V> {
+  let next: Map<ThreadId, V> | null = null;
+  for (const [threadId, value] of map) {
+    if (live.has(threadId)) continue;
+    next ??= new Map(map);
+    next.delete(threadId);
+    onDrop?.(value);
+  }
+  return next ?? map;
 }
