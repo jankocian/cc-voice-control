@@ -61,6 +61,34 @@ cmux unknowns); slice 5 (spawn) and the pane-title half of slice 3 are **gated o
 
 ---
 
+## 0.6 Live probe results — all gates CLEARED (2026-06-20, run in a real cmux pane)
+
+Ran the §11 probes in a live cmux Claude pane. Every external gate resolved favorably; two
+corrections folded in below.
+
+- **A (labels) — PASS, better than hoped.** `cmux tree --all --json --id-format both` exposes a
+  per-surface **`title`**, and it is the **live Claude task description**
+  (e.g. `"⠂ Review to-dos and plan next implementation"`). The daemon maps its own surface via
+  `cmux identify` (→ caller `surface_ref`), then reads `title`. There is **no `cwd`** field
+  (confirmed) → cwd from the daemon's `process.cwd()`, repo·branch from `git rev-parse`. **Thread
+  chips = task-title · repo · branch.** (Strip the leading spinner glyph from the title.)
+- **B (spawn ref) — PASS-fast.** `new-workspace …` prints **`OK workspace:<N>`** on stdout —
+  deterministic, no tree-diff needed; `close-workspace --workspace <ref>` cleans up.
+- **Spawn-primitive CORRECTION:** on this cmux build `new-pane` has **no `--cwd`/`--command`** (only
+  `--type/--direction/--url/--focus`). The spawn primitive is **`new-workspace --cwd <path>
+  --command "<cmd>" --focus false`** (a workspace per spawned session is also the natural "open
+  another project" UX). §9 is corrected accordingly.
+- **C (activation) — viable.** `claude` takes a positional **`prompt`** arg, so
+  `claude "/voice-control:start"` likely auto-runs the activation; the confirmed fallback is
+  `--command "claude"` then `send`/`send-key` after polling `read-screen`. **Spawn is v1-GO** either
+  way; whether the positional prompt auto-*submits* a slash command is the one detail to confirm
+  during slice 5 (not a blocker).
+- **E (trust) — PASS.** `read-screen --surface $CMUX_SURFACE_ID` → OK.
+
+Net: **labels (slice 3, with the task-title) and spawn-by-voice (slice 5) are both unblocked.**
+
+---
+
 ## 1. Current state (confirmed in code, post-#6)
 
 1. **Standalone daemon, one per pane.** `/voice-control:start` launches `node
@@ -500,15 +528,19 @@ surfaces; `read-screen` reads a surface. [CMUX: manaflow CLI ref]
 Recommended sequence (new helper in `cmux.ts`, e.g. `spawnPane({ cwd, direction })`):
 
 ```ts
-// 1) Create a new pane with the cwd set and Claude launched in it (one shot — no cold-shell race):
-await runCmux(["new-pane", "--direction", direction ?? "right",
-               ...(cwd ? ["--cwd", cwd] : []),
-               "--command", "claude"]);
-// 2) Resolve the NEW surface id  ← the sharp edge (§11-B). Likely: diff `tree --json` before/after,
-//    or read the create command's stdout if it prints the new ref (UNCONFIRMED).
-// 3) Once Claude's prompt is ready, type the activation into the new surface:
-await runCmux(["send", "--surface", newSurface, "--", "/voice-control:start"]);
-await runCmux(["send-key", "--surface", newSurface, "enter"]);
+// 1) Create a new WORKSPACE with the cwd set and Claude launched in it. (On this cmux build
+//    `new-pane` has NO --cwd/--command; `new-workspace` does — verified live, §0.6.) The
+//    command prints "OK workspace:<N>" on stdout, so the new ref is deterministic — no tree diff.
+const out = await runCmux(["new-workspace", "--cwd", cwd, "--command", "claude /voice-control:start",
+                           "--focus", "false"]);            // out === "OK workspace:22"
+const workspaceRef = out.trim().split(/\s+/).pop();          // "workspace:22"
+// 2) If `claude "<prompt>"` does NOT auto-submit the slash command (confirm in slice 5), fall back
+//    to launching plain `claude` and typing the activation once its prompt is ready:
+//      await runCmux(["new-workspace", "--cwd", cwd, "--command", "claude", "--focus", "false"]);
+//      // resolve the workspace's surface (list-pane-surfaces --workspace <ref>), poll read-screen,
+//      await runCmux(["send", "--surface", surfaceRef, "--", "/voice-control:start"]);
+//      await runCmux(["send-key", "--surface", surfaceRef, "enter"]);
+// The new daemon reads the same session.json → same secret/URL → joins the same DO as a new thread.
 ```
 
 - **Why not `--command "claude && /voice-control:start"`?** `/voice-control:start` is a **Claude Code
