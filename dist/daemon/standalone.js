@@ -19484,6 +19484,7 @@ class VoiceDaemon {
   stopped = false;
   inFlight;
   queue = [];
+  turnActive = false;
   inheritedPermissionMode;
   history = new HistoryRing(HISTORY_REPLIES);
   label;
@@ -19524,7 +19525,7 @@ class VoiceDaemon {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/reply" && route !== "/reset" && route !== "/spawn") {
+        if (route !== "/reply" && route !== "/reset" && route !== "/working" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -19540,6 +19541,11 @@ class VoiceDaemon {
           res.end();
           if (route === "/reset") {
             this.handleReset();
+            return;
+          }
+          if (route === "/working") {
+            this.turnActive = true;
+            this.emitStatus();
             return;
           }
           try {
@@ -19751,8 +19757,9 @@ class VoiceDaemon {
     return entry.requestId;
   }
   onClaudeReply(prompt, text) {
-    if (this.inFlight !== undefined && prompt === this.inFlight) {
-      console.error(`[reply] matched in-flight turn, ${text.length} chars`);
+    this.turnActive = false;
+    if (this.inFlight !== undefined) {
+      console.error(`[reply] in-flight turn done, ${text.length} chars`);
       this.inFlight = undefined;
       if (text)
         this.speak(this.emitClaudeTurn(text), text);
@@ -19761,6 +19768,7 @@ class VoiceDaemon {
       return;
     }
     this.mirrorTerminalTurn(prompt, text);
+    this.emitStatus();
   }
   mirrorTerminalTurn(prompt, text) {
     if (!text || isSlashCommand(prompt))
@@ -19781,9 +19789,12 @@ class VoiceDaemon {
     return {
       threadId: this.init.threadId,
       label: this.label,
-      state: this.inFlight !== undefined ? "working" : "idle",
+      state: this.isWorking() ? "working" : "idle",
       listening: this.cmuxHealthy
     };
+  }
+  isWorking() {
+    return this.turnActive || this.inFlight !== undefined;
   }
   registerThread() {
     this.send({ channel: "registry", event: { type: "thread_register", info: this.buildThreadInfo() } });
@@ -19800,7 +19811,7 @@ class VoiceDaemon {
     const state = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,
-      state: this.inFlight !== undefined ? "working" : "idle"
+      state: this.isWorking() ? "working" : "idle"
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.inFlight } });
     if (this.ws?.readyState === wrapper_default.OPEN)
