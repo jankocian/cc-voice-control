@@ -26,7 +26,7 @@ Replace ElevenLabs with OpenAI for both directions — it's significantly cheape
 - [ ] Daemon-side **text-to-speech** via OpenAI (synthesize Claude's reply, stream back to the browser).
 - [ ] **Voice selection** — let the user choose which voice speaks.
   - [ ] Research the available OpenAI TTS voices + models (and any per-voice/instruction options).
-  - [ ] Add the chosen voice to config (`~/.config/voice-remote/config.json`).
+  - [ ] Add the chosen voice to config (`$CLAUDE_PLUGIN_DATA/config.json`).
   - [ ] **Surface voice choice in the web UI** (a picker), so it can change per-session.
 - [ ] Remove the now-unused ElevenLabs SDK assets, CSP origins (jsdelivr / livekit / elevenlabs), and config.
 - [ ] Update docs (`docs/`) + the local-run notes to reflect the new provider + keys.
@@ -227,9 +227,9 @@ Scope (all `voice-command` → `voice-control`, completed):
 - [x] `worker/src/browser-client.ts`, `README.md`, `docs/configuration.md` (`.mcp.json` was folded into `plugin.json`).
 - [x] Repo dir is `cc-voice-control`.
 
-**Decision on `voice-remote` (a different term) — left as-is for now:** the config dir
-`~/.config/voice-remote/config.json`, `VOICE_REMOTE_CONFIG`, and the `voice-remote-bridge`
-worker keep their names to avoid breaking existing setups / the deployed URL. Revisit only
-as a deliberate infra change.
+**Decision on `voice-remote` (a different term):** the `VOICE_REMOTE_CONFIG` env var and the
+`voice-remote-bridge` worker keep their names to avoid breaking the deployed URL. Config lives
+only in the plugin's managed data dir (`$CLAUDE_PLUGIN_DATA/config.json`) or an explicit
+`$VOICE_REMOTE_CONFIG` path — never `~/.config`.
 
 **Acceptance (met):** `grep -ri "voice-command"` returns nothing in source; skills invoke as `/voice-control:*`.
