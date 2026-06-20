@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// Transient status-line message. The vanilla client showed a flash for ~2.6s
-// (and cleared it ~2.7s after the last flash). Re-flashing resets the timer.
+// Transient status-line message: visible for ~2.6s, fully cleared ~2.7s after the last
+// flash. Re-flashing resets the timer.
 const FLASH_VISIBLE_MS = 2600;
 const FLASH_CLEAR_MS = 2700;
 

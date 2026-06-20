@@ -26,11 +26,6 @@ function audioSession(): AudioSessionLike | undefined {
   return (navigator as unknown as { audioSession?: AudioSessionLike }).audioSession;
 }
 
-/** True when the WebKit Audio Session API is available (iOS/macOS Safari 16.4+). */
-export function audioSessionSupported(): boolean {
-  return audioSession() !== undefined;
-}
-
 /** Set the page audio-session category. No-op (and never throws) where unsupported. */
 export function setAudioSessionType(type: AudioSessionType): void {
   const session = audioSession();

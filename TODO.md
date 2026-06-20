@@ -12,11 +12,13 @@ config; the plugin must work unmodified.
 **#8** React/Tailwind/shadcn/Vite stack, **#9** rename, **#10** session-offline UX (PR #13),
 **#11** durable replayable history (PR #14), **#12** long-reply TTS chunking (PR #12),
 **#6** visible/killable background daemon — dropped the MCP host (`7bcc4c6`, PR #15).
+**#7** multi-session threads — **shipped** (`1df30a5`, PR #16): one URL/QR multiplexes every pane as
+switchable threads; spawn-from-phone (inheriting the session's permission mode) + an always-visible
+spawn affordance followed (PR #16/#17).
 **#3** UI overhaul is ~90% done via PRs #4–#8 — remaining gaps are the **design MD (#3e)** and a
 *fully* sticky hero (#3f). (Also live-tested: iOS refresh hang + autoplay-unlock CSP fixed, `c6870eb`.)
 
 **Open — roughly in priority order:**
-- **#7** multi-session threads — **the last big one. Design written** (`docs/design/multi-session-threads.md`), NOT yet built. 6 vertical slices; the switchable-thread "wow" is slices 1–4, spawn-by-voice is slice 5 (gated on a live cmux check, like #6).
 - **#3e** design MD + **#3f** fully-sticky hero (small #3 remainders).
 - **#1** web voice picker (daemon `voiceOverride` plumbing exists; UI + a `set_voice` event remain).
 - **#5** `/btw` side questions — research suggests the answer isn't capturable (`docs/research/btw-side-questions.md`); **left open, not ruled out** (user decides).
@@ -144,7 +146,7 @@ status/summary. (Ref: Claude Code interactive-mode docs → "Side questions with
 
 - [ ] When a task is **already running**, send **Get Summary** / **Get Status** as `/btw <question>` into the live pane (via the existing send path) so it's processed **independently** and returns a **brief status** without interrupting or queuing behind the running task.
 - [ ] When **no task is running**, use the normal send path (a regular prompt).
-- [ ] **Open question to resolve:** the `/btw` answer renders in a dismissible overlay, _not_ in conversation history — confirm how the daemon captures that answer to speak it back over the voice channel (the normal reply path is an MCP tool Claude calls; `/btw` may bypass it). Verify before building.
+- [ ] **Open question to resolve:** the `/btw` answer renders in a dismissible overlay, _not_ in conversation history — confirm how the daemon captures that answer to speak it back over the voice channel (the normal reply path is the Stop hook → HTTP POST off the transcript; a `/btw` overlay may never hit the transcript). Verify before building.
 - [ ] NOTE: this is a **Claude Code native command**, not cmux — no cmux `btw` exists.
 
 ---
@@ -182,31 +184,19 @@ the session.
 
 ---
 
-## 7. Multiple Claude Code sessions per computer — one URL, multiple threads
+## 7. Multiple Claude Code sessions per computer — one URL, multiple threads ✅
 
-**Vision:** **one phone app / one URL + QR per machine** that multiplexes **multiple
-Claude Code instances** as switchable **threads**. Spin up another cmux pane (optionally
-**by voice**) → it joins the **same** session as a new thread (same QR), so you can
-interact with instance B while instance A is still working. High-value; must be flawless
-— do **deep research + a written design doc before coding**.
+**✅ Shipped** in `1df30a5` (PR #16); design of record: `docs/design/multi-session-threads.md`. One
+phone URL/QR now multiplexes **every Claude pane on the machine** as switchable **threads**:
 
-**Current state (researched in-code):**
-
-- State lives in `$CLAUDE_PLUGIN_DATA` as **single files** — one `active` flag and one `runtime.json` (`config.ts:32-38`) — shared across all Claude Code instances on the machine.
-- Each daemon activation mints a **fresh random `sessionId` + `token` → a new URL** (`voice-daemon.ts:26-34`).
-- Bridge Durable Object is keyed by `sessionId` with exactly two roles `{daemon, browser}` (worker `index.ts`).
-- ⇒ **One session per machine** in practice; two panes collide on the shared flag/runtime files and produce separate, clobbering URLs. Confirms the single-connection limitation.
-
-**Target architecture (design + deeply research each):**
-
-- [ ] **Machine-level session identity** — reuse one stable `sessionId`/`token` (one URL/QR) across all panes, stored once in `stateDir` and shared; work out token expiry/rotation/revocation.
-- [ ] **Multi-thread bridge** — one session/DO holds **N daemon connections** (one per instance) + browser(s); every envelope carries a **`threadId`**; browser→daemon routes to the selected thread; daemon→browser is tagged so the browser attributes it.
-- [ ] **Thread registry + labels** — each daemon registers as a thread with a human label (cmux surface/pane title, cwd, git branch) + per-thread status (idle/working/…); lifecycle + presence events so the UI can list and switch.
-- [ ] **Replace singleton state** — per-thread registration instead of one shared `active` / `runtime.json` (no clobbering); clean removal when a pane dies.
-- [ ] **Spawn-a-thread (incl. by voice)** — research cmux's API to open a new pane + launch Claude there running `/voice-control:start`, joining the same session (re-show same QR). Stay within "never touch system config" — cmux CLI only.
-- [ ] **Web UI** — a **thread switcher** (chat-list / tabs), per-thread status + unread badges; hero monitor + chat scoped to the active thread. Depends on **#3**.
-- [ ] **Security** — one token now reaches multiple instances; evaluate per-thread tokens vs one session token, blast radius, expiry, revoke-on-exit.
-- [ ] Cross-refs: **#2** (same URL/QR reused), **#3** (thread switcher UI), **#6** (each thread = a visible background process).
+- **One machine secret** in `session.json` → one stable URL/QR for all panes (replaced the per-start
+  random secret); `threadId = CMUX_SURFACE_ID`; per-thread `runtime/<surface>.json` (no clobbering).
+- **Bridge DO is a thread registry** — N daemon connections + browser(s), routed by `threadId`, with
+  a per-thread roster (label + presence), revoke-on-exit (DO alarm) and a rate-limit binding.
+- **Labels** = cmux task title · repo · branch; **web** has a pill→dropdown switcher, a CSS swipe
+  pager, and an always-visible spawn affordance.
+- **Spawn-from-phone** (PR #16/#17): tap **+** → a new cmux workspace joins the same session as a
+  thread, inheriting the spawning session's permission mode (via the Stop hook's `permission_mode`).
 
 ---
 

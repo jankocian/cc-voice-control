@@ -1,10 +1,9 @@
 // The activity log model. Only the user's transcript and Claude's real reply are
-// ever logged (errors surface as transient flashes, not log rows) — matching the
-// vanilla client's deliberately clean log.
+// ever logged; errors surface as transient flashes, not log rows.
 
 import type { HistoryTurn } from "./protocol";
 
-export type MessageKind = "you" | "claude" | "system" | "error";
+export type MessageKind = "you" | "claude";
 
 export type Message = {
   // Stable key for rendering. For Claude replies this is the daemon requestId so
@@ -47,7 +46,7 @@ export function makeMessage(
   counter += 1;
   return {
     id: requestId ?? `m${counter}`,
-    kind: TITLE_TO_KIND[title] ?? "system",
+    kind: TITLE_TO_KIND[title] ?? "claude",
     requestId,
     seq: meta?.seq,
     timestamp: meta?.timestamp,

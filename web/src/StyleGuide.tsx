@@ -1,5 +1,4 @@
 import { useRef, useState } from "react";
-import { BottomTabBar } from "@/components/BottomTabBar";
 import { Controls } from "@/components/Controls";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
@@ -280,11 +279,9 @@ export function StyleGuide() {
           </div>
         </Section>
 
-        <Section title="App bar / Tab bar">
+        <Section title="App bar">
           <div className="overflow-hidden rounded-card bg-canvas shadow-soft">
-            <TopBar online onMenu={noop} onSettings={noop} />
-            <div className="h-6" />
-            <BottomTabBar />
+            <TopBar />
           </div>
         </Section>
       </div>

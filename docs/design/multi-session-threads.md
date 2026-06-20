@@ -1,7 +1,7 @@
 # Design: Multiple Claude Code sessions per machine — one URL, N switchable threads
 
-**Status:** Authoritative architecture — research + design only, **no implementation**, no app-code
-changes in this pass. (TODO.md #7.)
+**Status:** **Implemented in #7** (commit `1df30a5`); spawn-from-phone + the always-visible spawn
+affordance followed in #16/#17. This doc is the architecture of record. (TODO.md #7.)
 **Supersedes:** the prior first-pass design of the same name. Git keeps the old revision; this is the
 decision-grade rewrite. The world changed since the first pass: **#6 shipped** — the daemon is now a
 standalone `dist/daemon/standalone.js` background task (one per pane, **no MCP host**, orphan
@@ -248,8 +248,8 @@ export type BridgeEnvelope =
   `claude_reply` / `tts_audio` / `history` / `error` / `session_status` are unchanged — the browser
   just files them under `threadId`. **History/get_audio are per-thread automatically** (they ride the
   daemon channel under one `threadId`; the per-daemon ring already exists).
-- **Reserve `threadToken?` on the daemon channel** now (unused in v1) so per-thread sub-tokens (§6
-  Option 2) can be added later without a wire break.
+- **No per-thread `threadToken`** in v1 (YAGNI). Per-thread sub-tokens (§6 Option 2), if ever needed,
+  are an additive envelope field — add it then, no wire break.
 
 Back-compat note: this is pre-release (project memory: "no back-compat code pre-release"), so we
 **require** `threadId` once multi-thread ships rather than supporting a missing-threadId broadcast.
@@ -402,15 +402,15 @@ defense-in-depth option. We **defer** it because:
   remote** whose real risk (leaked URL) is already closed by revoke-on-exit.
 - It buys "kick one thread without rotating the session" — a niche need we don't have evidence for
   yet.
-- We **don't burn the bridge to it**: `threadToken?` is reserved on the daemon-channel envelope (§3),
-  so v2 can add per-thread sub-tokens with no wire break.
+- We **don't burn the bridge to it**: per-thread sub-tokens are an additive envelope change, so v2
+  can add them with no wire break — we just don't carry an unused field until then (YAGNI).
 
 ### 6.4 Rotation — DROPPED (revoke-on-exit + `/stop` is enough)
 Earlier drafts shipped a `/voice-control:rotate` skill to mint a new secret on demand. **Dropped per
 user feedback** — nobody hand-rotates a hash, and it's redundant: revoke-on-exit already kills a
 leaked URL the moment the last pane disconnects, and `/voice-control:stop` triggers that on demand.
-So "kill a leak" = stop your panes; there is no dedicated rotate command. (`threadToken?` stays
-reserved on the wire — §6.3 — for a future per-thread sub-token if one is ever needed.)
+So "kill a leak" = stop your panes; there is no dedicated rotate command. (A future per-thread
+sub-token — §6.3 — would be an additive envelope field, added if/when it's ever needed.)
 
 ### 6.5 Keep today's hard protections (unchanged)
 - Hash-routed DO (`idFromName(sha256(secret))`) — a leaked/guessed URL only ever reaches *this*
@@ -587,7 +587,7 @@ required (cmux won't start an unfocused workspace's command). No keystroke injec
 | **3. Roster + labels + per-thread presence** | Phone has data to list/switch threads; per-thread offline grading. Daemon computes label (repo·branch·cwd; paneTitle if available). | DO roster + `thread_left`/`thread_roster`, `src/daemon/labels.ts`, `protocol.ts`. | **Half** — repo·branch·cwd: no. **paneTitle: gated on §11-A.** Ship label without paneTitle if A fails. |
 | **4. Web thread switcher** | Full multi-thread UX: white-pill dropdown + CSS swipe, per-thread state, unread badges, per-thread #10 grading. | `App.tsx` (`messagesByThread`), `useBridge`/`usePlayback` keyed by thread, `TopBar` pill (`FEATURES.threadTitle`), new `ThreadSwitcher`/pager, reuse `BottomTabBar`. | **No** (arch) — buildable now; swipe CSS tuning verified live (§11-F). |
 | **5. Spawn-a-thread (incl. voice)** | Hands-free "open another session." `spawn_thread` event + `cmux.ts` `spawnWorkspace`, `+` affordance, voice grammar. | `cmux.ts`, `protocol.ts`, `voice-daemon.ts`, `web`. | **Shipped** — §11-B/§11-C resolved (no surface-id resolution needed; positional slash command auto-runs). |
-| **6. Security hardening** | Revoke-on-exit (DO alarm grace), worker rate-limit binding, reserve `threadToken?`, docs of the one-URL trade-off. (Manual rotate dropped — revoke-on-exit + `/stop` covers it.) | `worker/index.ts` (alarm, ratelimit), `wrangler.toml`, `config.ts`, `docs/configuration.md`. | **No** — buildable now (rate-limit binding is a config + 3-line check). |
+| **6. Security hardening** | Revoke-on-exit (DO alarm grace), worker rate-limit binding, docs of the one-URL trade-off. (Manual rotate dropped — revoke-on-exit + `/stop` covers it.) | `worker/index.ts` (alarm, ratelimit), `wrangler.toml`, `config.ts`, `docs/configuration.md`. | **No** — buildable now (rate-limit binding is a config + 3-line check). |
 
 Slices 1–4 deliver the full visible product without any cmux unknown. 5 is the power-user layer (its
 two probes are the only true external gates). 6 is the safety layer and can land in parallel.

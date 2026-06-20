@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BottomTabBar } from "./components/BottomTabBar";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
 import { type PagerThread, ThreadPager } from "./components/ThreadPager";
@@ -12,7 +11,6 @@ import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
 import { useThreads } from "./hooks/useThreads";
 import { useWakeLock } from "./hooks/useWakeLock";
-import { FEATURES } from "./lib/features";
 import { type Message, makeMessage, messageFromHistory, reconcileMessages } from "./lib/messages";
 import type { RosterThread, ThreadId } from "./lib/protocol";
 import type { SessionCredentials } from "./lib/session";
@@ -371,15 +369,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
-      <TopBar online={status.dataState !== "offline"}>
-        {FEATURES.threadTitle && (
-          <ThreadSwitcher
-            rows={switcherRows}
-            activeThreadId={activeThreadId}
-            onSelect={switchThread}
-            onSpawn={onSpawn}
-          />
-        )}
+      <TopBar>
+        <ThreadSwitcher rows={switcherRows} activeThreadId={activeThreadId} onSelect={switchThread} onSpawn={onSpawn} />
       </TopBar>
 
       <div className="relative min-h-0 flex-1">
@@ -431,9 +422,6 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           onStopTask={onStopTask}
         />
       </div>
-
-      {/* The bottom "New" tab is a second spawn affordance (off until FEATURES.threadNav). */}
-      {FEATURES.threadNav && <BottomTabBar onNewThread={onSpawn} />}
     </div>
   );
 }

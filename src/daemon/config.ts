@@ -180,17 +180,6 @@ export async function resolveConfig(explicitPath?: string): Promise<ConfigLoadRe
 }
 
 /**
- * Strict loader that throws on any problem, including a missing key. Kept for callers
- * (and tests) that want the hard failure; daemon activation uses `resolveConfig` instead
- * so a missing key becomes friendly onboarding rather than a thrown error.
- */
-export async function loadConfig(explicitPath?: string): Promise<VoiceRemoteConfig> {
-  const result = await resolveConfig(explicitPath);
-  if (!result.ok) throw new Error(result.message);
-  return result.config;
-}
-
-/**
  * Publish a "setup needed" runtime.json so the start skill (which polls runtime.json)
  * can show friendly onboarding instead of NOT_RUNNING. Shaped so the skill can branch on
  * `needsSetup` and surface the exact `configPath` + `message`. No session is started.

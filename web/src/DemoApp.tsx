@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { BottomTabBar } from "@/components/BottomTabBar";
 import { Hero } from "@/components/Hero";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
@@ -121,7 +120,7 @@ export function DemoApp({ state }: { state: string }) {
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
-      <TopBar online={status.dataState !== "offline"} />
+      <TopBar />
       <div className="relative min-h-0 flex-1">
         <main ref={scrollRef} className="flex h-full flex-col overflow-y-auto pb-safe">
           <Hero
@@ -180,7 +179,6 @@ export function DemoApp({ state }: { state: string }) {
           onStopTask={noop}
         />
       </div>
-      <BottomTabBar />
     </div>
   );
 }

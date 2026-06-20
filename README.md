@@ -92,11 +92,11 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
 
 ## Layout
 
-- `.claude-plugin/plugin.json` — plugin manifest (skills + the `Stop` hook).
+- `.claude-plugin/plugin.json` — plugin manifest; skills and hooks are auto-discovered from `skills/` and `hooks/hooks.json`.
 - `src/daemon/standalone.ts` — the daemon entry point: starts the session, traps SIGTERM/SIGINT for clean shutdown, and self-reaps if orphaned.
 - `src/daemon/voice-daemon.ts` — the session: bridge client, STT/TTS, cmux injection.
 - `src/daemon/{cmux,openai,config}.ts` — cmux CLI, OpenAI calls, config loading.
-- `hooks/` — the `Stop` hook that returns each turn's final reply.
+- `hooks/` — the `Stop` hook (returns each turn's final reply) and the `SessionStart` hook (resets thread history on `/clear` · `/compact`).
 - `skills/` — `start` / `stop` / `status`.
 - `src/shared/` — the wire protocol and bridge URL contract (shared by daemon + worker).
 - `worker/` — the Cloudflare bridge and the phone page.
