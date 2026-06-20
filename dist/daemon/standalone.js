@@ -19643,8 +19643,10 @@ class VoiceDaemon {
   async spawnThread(cwd) {
     const command = this.buildSpawnCommand();
     const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
-    if (ref)
+    if (ref) {
       console.error(`[spawn] new workspace ${ref} :: ${command}`);
+      this.sendToBrowser({ type: "spawn_pending" });
+    }
     return { ok: Boolean(ref), ref };
   }
   async handleSpawnRequest(body, res) {
