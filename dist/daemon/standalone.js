@@ -19461,6 +19461,9 @@ var PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontA
 function permissionModeArg(mode) {
   return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
 }
+function isSlashCommand(prompt) {
+  return prompt.trimStart().startsWith("/");
+}
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
   const threadId = surface ?? randomUUID();
@@ -19676,14 +19679,7 @@ class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    const entry = this.history.add("user", randomUUID(), transcript);
-    this.sendToBrowser({
-      type: "transcript",
-      requestId: entry.requestId,
-      seq: entry.seq,
-      timestamp: entry.timestamp,
-      text: transcript
-    });
+    this.emitUserTurn(transcript);
     if (mode === "interrupt")
       await this.interruptWith(transcript);
     else
@@ -19732,24 +19728,47 @@ class VoiceDaemon {
     this.queue.unshift(text);
     this.pump();
   }
+  emitUserTurn(text, mirrored = false) {
+    const entry = this.history.add("user", randomUUID(), text);
+    this.sendToBrowser({
+      type: "transcript",
+      requestId: entry.requestId,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      text,
+      mirrored
+    });
+  }
+  emitClaudeTurn(text) {
+    const entry = this.history.add("claude", randomUUID(), text);
+    this.sendToBrowser({
+      type: "claude_reply",
+      requestId: entry.requestId,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      text
+    });
+    return entry.requestId;
+  }
   onClaudeReply(prompt, text) {
-    if (this.inFlight === undefined || prompt !== this.inFlight)
+    if (this.inFlight !== undefined && prompt === this.inFlight) {
+      console.error(`[reply] matched in-flight turn, ${text.length} chars`);
+      this.inFlight = undefined;
+      if (text)
+        this.speak(this.emitClaudeTurn(text), text);
+      this.emitStatus();
+      this.pump();
       return;
-    console.error(`[reply] matched in-flight turn, ${text.length} chars`);
-    this.inFlight = undefined;
-    if (text) {
-      const entry = this.history.add("claude", randomUUID(), text);
-      this.sendToBrowser({
-        type: "claude_reply",
-        requestId: entry.requestId,
-        seq: entry.seq,
-        timestamp: entry.timestamp,
-        text
-      });
-      this.speak(entry.requestId, text);
     }
-    this.emitStatus();
-    this.pump();
+    this.mirrorTerminalTurn(prompt, text);
+  }
+  mirrorTerminalTurn(prompt, text) {
+    if (!text || isSlashCommand(prompt))
+      return;
+    console.error(`[reply] mirrored terminal turn, ${text.length} chars`);
+    if (prompt)
+      this.emitUserTurn(prompt, true);
+    this.emitClaudeTurn(text);
   }
   async speak(requestId, text) {
     try {
