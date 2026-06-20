@@ -19,7 +19,7 @@ Release, or a deploy by hand — you bump one number and merge.
 2. Get it green and merge to `main`.
 3. That's it. On the push to `main`, `release.yml` automatically:
    - runs the full gate (lint, typecheck, test, build),
-   - rebuilds and commits the canonical bundle (`dist/daemon/mcp-server.js`) if it changed,
+   - rebuilds and commits the canonical bundle (`dist/daemon/standalone.js`) if it changed,
    - sees the new `version` has no `v<version>` tag yet, so it **creates the tag + a GitHub
      Release** (notes auto-generated from merged PRs/commits), and
    - **deploys the Cloudflare bridge** by calling the `deploy-worker` workflow.

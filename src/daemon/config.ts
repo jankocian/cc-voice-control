@@ -25,7 +25,7 @@ const ConfigSchema = z.object({
 export type VoiceRemoteConfig = z.infer<typeof ConfigSchema>;
 
 /**
- * Where the plugin keeps runtime state (phone-session URL, the active flag,
+ * Where the plugin keeps runtime state (phone-session URL/QR, the config file,
  * logs). This is Claude Code's managed per-plugin data dir ($CLAUDE_PLUGIN_DATA),
  * NOT the user's ~/.config — a plugin must not create folders there. Falls back
  * to a temp dir if the variable is somehow unset.

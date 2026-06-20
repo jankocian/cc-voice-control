@@ -2,7 +2,7 @@ name: release
 
 # Single, consistent release pipeline. On every push to main:
 #   1. Run the full gate (lint, typecheck, test, build).
-#   2. Rebuild and commit the canonical plugin bundle (dist/daemon/mcp-server.js) if it
+#   2. Rebuild and commit the canonical plugin bundle (dist/daemon/standalone.js) if it
 #      changed — marketplace installs copy the repo as-is, so the bundle must stay current.
 #   3. If package.json's `version` has no matching git tag yet, cut that release:
 #      create the vX.Y.Z tag + a GitHub Release, then deploy the Cloudflare bridge.

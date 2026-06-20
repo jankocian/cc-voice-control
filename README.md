@@ -9,10 +9,10 @@ so it lands as a genuine user message and composes with skills, subagents, and
 hooks. When Claude finishes a turn, a plugin **`Stop` hook** sends the final reply
 back to the daemon, which reads it aloud (OpenAI text-to-speech) on your phone.
 
-The daemon runs **inside Claude Code's own process tree** (it's the plugin's MCP
-server), which is what lets it drive the cmux pane — a detached background process
-loses cmux's trust. Your OpenAI key never leaves your machine, and the browser
-loads no third-party SDK.
+The daemon runs **inside Claude Code's own process tree** — `/voice-control:start`
+launches it as a **visible, killable background task** (the kind shown in `/tasks`),
+which is what lets it drive the cmux pane: a detached background process loses cmux's
+trust. Your OpenAI key never leaves your machine, and the browser loads no third-party SDK.
 
 ## Requirements
 
@@ -28,7 +28,7 @@ loads no third-party SDK.
 /plugin install voice-control@cc-voice-control
 ```
 
-The MCP server ships pre-built as a single self-contained `dist/daemon/mcp-server.js`
+The daemon ships pre-built as a single self-contained `dist/daemon/standalone.js`
 (dependencies inlined), so there's no build step on install. Add your OpenAI config
 (see [docs/configuration.md](docs/configuration.md)), then run `/voice-control:start`.
 
@@ -42,8 +42,9 @@ In your cmux Claude Code pane (the plugin must be loaded, e.g. `claude --plugin-
 /voice-control:stop
 ```
 
-`/voice-control:start` just flips the remote on and returns — your session stays
-fully interactive. Scan the printed QR code with your phone (or open the URL beneath it),
+`/voice-control:start` launches the voice daemon as a background task, prints the QR
+code, and returns — your session stays fully interactive, and the task is visible and
+killable in `/tasks`. Scan the printed QR code with your phone (or open the URL beneath it),
 tap to speak, and your words appear as messages in this session with replies spoken back.
 
 ## How it works
@@ -55,7 +56,7 @@ phone (push-to-talk)                                   ← single self-contained
 Cloudflare Worker + Durable Object  ── "bridge": a token-authed relay, sees no secrets
   │  relayed WebSocket message
   ▼
-MCP server daemon (a child of Claude Code → keeps cmux trust)
+background-task daemon (a child of Claude Code → keeps cmux trust)
   │  ① OpenAI STT → transcript
   │  ② cmux send + send-key → types it into your live pane
   ▼
@@ -65,8 +66,9 @@ Claude Code runs the turn normally (your subscription)
 daemon  ── ③ OpenAI TTS ──►  bridge ──►  phone speaks the reply
 ```
 
-- **Activation** is a flag file in the plugin's data dir (`$CLAUDE_PLUGIN_DATA`);
-  the MCP server watches it. No tool calls, so Claude never shows "Generating".
+- **Activation** launches the daemon as a Claude Code background task (`run_in_background`),
+  which keeps it inside cmux's process tree. It's visible and killable in `/tasks`, and
+  `/voice-control:stop` (or stopping the task) tears it down.
 - **Billing**: the daemon never spawns a model — Claude runs in your interactive
   session, so usage counts against your Claude plan, not the API.
 
@@ -90,8 +92,8 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
 
 ## Layout
 
-- `.claude-plugin/plugin.json` — plugin manifest; declares the daemon as the plugin's MCP server (the single entry point).
-- `src/daemon/mcp-server.ts` — MCP host + flag-file activation.
+- `.claude-plugin/plugin.json` — plugin manifest (skills + the `Stop` hook).
+- `src/daemon/standalone.ts` — the daemon entry point: starts the session, traps SIGTERM/SIGINT for clean shutdown, and self-reaps if orphaned.
 - `src/daemon/voice-daemon.ts` — the session: bridge client, STT/TTS, cmux injection.
 - `src/daemon/{cmux,openai,config}.ts` — cmux CLI, OpenAI calls, config loading.
 - `hooks/` — the `Stop` hook that returns each turn's final reply.
@@ -106,7 +108,7 @@ Tooling is [Bun](https://bun.sh) (package manager + bundler) and [Biome](https:/
 
 ```sh
 bun install
-bun run build       # bundles the MCP server → dist/daemon/mcp-server.js (deps inlined)
+bun run build       # bundles the daemon → dist/daemon/standalone.js (deps inlined)
 bun run test
 bun run typecheck
 bun run lint        # Biome — the CI gate (read-only)
@@ -114,7 +116,7 @@ bun run format      # Biome — apply fixes
 bun run dev:worker  # run the bridge locally on http://localhost:8787
 ```
 
-The committed `dist/daemon/mcp-server.js` is the artifact Claude Code runs — there is no
+The committed `dist/daemon/standalone.js` is the artifact Claude Code runs — there is no
 install-time build. **CI is the source of truth for it**: `release.yml` rebuilds and commits
 the bundle (with a pinned Bun, so output is reproducible) on every push to `main`, so you never
 build it by hand. `ci.yml` runs the same gate on every PR. Versioning and tagging are

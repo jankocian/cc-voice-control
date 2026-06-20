@@ -39,6 +39,7 @@ chmod 600 <your-config>.json
   Override it only to self-host the Worker or for local testing (`http://localhost:8787`).
 
 The session has no wall-clock timeout: it stays valid while the voice remote is running
-and ends on `/voice-control:stop` or when the Claude Code session closes. The daemon runs
-inside Claude's own process, so it can't outlive the session — closing Claude tears it down
-even if you never run stop.
+and ends on `/voice-control:stop` (or stopping its task in `/tasks`) or when the Claude Code
+session closes. The daemon runs as a background task inside Claude's own process tree, so it
+can't outlive the session — closing Claude tears it down even if you never run stop, and if
+it's ever orphaned it self-reaps.
