@@ -9,17 +9,17 @@ config; the plugin must work unmodified.
 ## Status snapshot (reconciled 2026-06-20)
 
 **Shipped in `main`:** **#1** OpenAI STT/TTS swap (`01f9ab6`), **#2** QR, **#4** wake lock,
-**#8** React/Tailwind/shadcn/Vite stack (Worker serves the built SPA via the ASSETS binding +
-`'self'` CSP), **#9** rename, **#10** session-offline UX (`29be351`, PR #13), **#11** durable
-replayable history (`a3846e1`, PR #14), **#12** long-reply TTS chunking (`05f8229`, PR #12).
-**#3** UI overhaul is ~90% done via PRs #4–#8 (hero status visual, contextual red stop, iMessage
-bubbles, inline playback + scrubber, condensed sticky bar) — the remaining gaps are the **design
-MD (#3e)** and a *fully* sticky hero (today only the condensed bar sticks).
+**#8** React/Tailwind/shadcn/Vite stack, **#9** rename, **#10** session-offline UX (PR #13),
+**#11** durable replayable history (PR #14), **#12** long-reply TTS chunking (PR #12),
+**#6** visible/killable background daemon — dropped the MCP host (`7bcc4c6`, PR #15).
+**#3** UI overhaul is ~90% done via PRs #4–#8 — remaining gaps are the **design MD (#3e)** and a
+*fully* sticky hero (#3f). (Also live-tested: iOS refresh hang + autoplay-unlock CSP fixed, `c6870eb`.)
 
 **Open — roughly in priority order:**
-- **#3e** design MD + **#3f** fully-sticky hero (the only #3 remainders).
-- **#1** web voice picker (the one sub-task of the OpenAI swap still open — daemon `voiceOverride` plumbing exists; UI + a `set_voice` event remain).
-- **#5** `/btw` side questions (small, verification-gated), **#6** visible/killable bg process (research), **#7** multi-session threads (deep research + design doc first).
+- **#7** multi-session threads — **the last big one. Design written** (`docs/design/multi-session-threads.md`), NOT yet built. 6 vertical slices; the switchable-thread "wow" is slices 1–4, spawn-by-voice is slice 5 (gated on a live cmux check, like #6).
+- **#3e** design MD + **#3f** fully-sticky hero (small #3 remainders).
+- **#1** web voice picker (daemon `voiceOverride` plumbing exists; UI + a `set_voice` event remain).
+- **#5** `/btw` side questions — research suggests the answer isn't capturable (`docs/research/btw-side-questions.md`); **left open, not ruled out** (user decides).
 
 ---
 
@@ -149,7 +149,14 @@ status/summary. (Ref: Claude Code interactive-mode docs → "Side questions with
 
 ---
 
-## 6. Make the voice session a visible, killable background process
+## 6. Make the voice session a visible, killable background process ✅
+
+**✅ Shipped** in `7bcc4c6` (PR #15). The daemon now runs as a Claude Code **background Bash task**
+(`run_in_background`) — visible + killable in `/tasks`. `/voice-control:start` launches it (env
+passed explicitly since a bg task's ambient `$CLAUDE_PLUGIN_DATA` is unreliable); `/stop` SIGTERMs
+the pid. The **MCP host, reconcile poll, and `active` flag are gone** (that also removed the `/mcp`
+zero-tools warning). Orphan self-reap guard (`ppid===1`) prevents a deaf zombie. Live-verified in a
+real cmux pane: the task keeps cmux socket trust and dies with the session. `docs/research/no-mcp-background-daemon.md`.
 
 Right now starting voice mode gives **no indication** it's active and **nothing to kill** — it just runs silently. Make it transparent.
 
