@@ -6,7 +6,9 @@
  * transcript, the user prompt that started the turn and the turn's FINAL assistant
  * reply, then POSTs both to the local voice daemon. The daemon speaks the reply only
  * if the prompt matches the turn it injected, so terminal-typed turns aren't read
- * aloud. If the daemon isn't running, this is a no-op. It never blocks the Stop event.
+ * aloud. It also forwards the session's live `permission_mode` so the daemon can spawn
+ * new sessions in the same mode. If the daemon isn't running, this is a no-op. It never
+ * blocks the Stop event.
  */
 import { readFileSync, watch } from "node:fs";
 import { request } from "node:http";
@@ -36,7 +38,14 @@ async function main() {
   const turn = await resolveTurn(hook.transcript_path);
   if (!turn) process.exit(0);
 
-  await post(runtime.port, { prompt: turn.prompt, text: turn.text, sessionId: hook.session_id || "" }).catch(() => {});
+  // Forward the session's live permission_mode so the daemon can spawn new sessions in the SAME
+  // mode (a child `claude` doesn't inherit it via env/process tree, and no env var exposes it).
+  await post(runtime.port, {
+    prompt: turn.prompt,
+    text: turn.text,
+    sessionId: hook.session_id || "",
+    permissionMode: hook.permission_mode || ""
+  }).catch(() => {});
   process.exit(0);
 }
 

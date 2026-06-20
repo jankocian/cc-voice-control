@@ -24,14 +24,15 @@ export type BridgeContentEvent = Extract<
 
 // Everything the daemon would need a requestId for, minus the requestId itself (the hook mints
 // it, exactly like the vanilla `sendDaemon`). `get_audio` already carries its own requestId (the
-// reply being fetched), so the hook leaves it untouched.
+// reply being fetched), so the hook leaves it untouched. `spawn_thread` carries no requestId.
 export type DaemonCommand =
   | { type: "submit_audio"; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
   | { type: "status_request" }
   | { type: "summary_request" }
   | { type: "stop_task" }
   | { type: "sync" }
-  | { type: "get_audio"; requestId: string };
+  | { type: "get_audio"; requestId: string }
+  | { type: "spawn_thread"; cwd?: string };
 
 export type BridgeRuntime = {
   state: SessionRuntimeState;
@@ -90,9 +91,10 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     if (!connectedThreadsRef.current.has(threadId)) return false;
-    // Mint a requestId, except `get_audio` carries its own (the reply being fetched), so its
-    // value wins via the spread order below.
-    const event = { requestId: crypto.randomUUID(), ...command } as BrowserToDaemonEvent;
+    // spawn_thread is the one daemon command without a requestId (it's an action, not a turn).
+    const event = (
+      command.type === "spawn_thread" ? command : { requestId: crypto.randomUUID(), ...command }
+    ) as BrowserToDaemonEvent;
     try {
       socket.send(JSON.stringify({ channel: "daemon", threadId, event } satisfies BridgeEnvelope));
       return true;

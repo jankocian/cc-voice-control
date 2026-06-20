@@ -176,3 +176,26 @@ function findSurfaceNode(root: unknown, surface: string): CmuxNode | undefined {
 export function stripSpinnerGlyph(title: string): string {
   return title.replace(/^[^\p{L}\p{N}]+/u, "").trim();
 }
+
+/**
+ * Spawn a NEW cmux workspace with `cwd` set and `command` launched in it, for spawn-by-voice
+ * (§9). On this cmux build `new-pane` has no `--cwd`/`--command`; `new-workspace` does, and prints
+ * `OK workspace:<N>` on stdout — deterministic, no tree diff. Returns the new workspace ref, or
+ * undefined if the spawn failed / the stdout didn't parse.
+ *
+ * `--focus true` is REQUIRED: cmux does NOT start a workspace's `--command` while it is unfocused
+ * (verified — an unfocused spawn never ran the command). Focus-at-creation is enough; the launched
+ * process keeps running after the user's focus returns to their own pane.
+ */
+export async function spawnWorkspace({ cwd, command }: { cwd: string; command: string }): Promise<string | undefined> {
+  const r = await runCmux(["new-workspace", "--cwd", cwd, "--command", command, "--focus", "true"]);
+  if (!r.ok) return undefined;
+  return parseWorkspaceRef(r.stdout);
+}
+
+// Parse `new-workspace` stdout. It prints `OK workspace:<N>` (probe §0.6-B); we take the last
+// whitespace-delimited token of the matching line so trailing log noise can't break it.
+export function parseWorkspaceRef(stdout: string): string | undefined {
+  const match = stdout.match(/\bworkspace:\d+\b/);
+  return match ? match[0] : undefined;
+}

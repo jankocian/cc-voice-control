@@ -1,9 +1,9 @@
-import { AudioLines, Layers } from "lucide-react";
+import { AudioLines, Layers, PenSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// Bottom tab bar: Threads (layers) · center waveform (active, coral). The center tab is the
-// elevated active voice tab.
-export function BottomTabBar({ onThreads }: { onThreads?: () => void }) {
+// Bottom tab bar: Threads (layers) · center waveform (active, coral) · New thread
+// (compose). The center tab is the elevated active voice tab.
+export function BottomTabBar({ onThreads, onNewThread }: { onThreads?: () => void; onNewThread?: () => void }) {
   return (
     <nav className="flex shrink-0 items-center justify-around border-t border-hairline bg-surface/80 px-6 pb-2 pt-2.5 backdrop-blur-sm">
       <Tab label="Threads" onClick={onThreads}>
@@ -18,6 +18,10 @@ export function BottomTabBar({ onThreads }: { onThreads?: () => void }) {
       >
         <AudioLines className="size-6" />
       </button>
+
+      <Tab label="New" onClick={onNewThread}>
+        <PenSquare className="size-[22px]" />
+      </Tab>
     </nav>
   );
 }

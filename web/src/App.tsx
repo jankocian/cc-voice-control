@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BottomTabBar } from "./components/BottomTabBar";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
 import { type PagerThread, ThreadPager } from "./components/ThreadPager";
@@ -261,6 +262,18 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const onSteer = useCallback(() => startRecording("queue"), [startRecording]);
   const onStopTask = useCallback(() => sendControl({ type: "stop_task" }), [sendControl]);
 
+  // ---- spawn a new thread -----------------------------------------------------
+  // The "+" affordance emits spawn_thread on the ACTIVE thread's daemon (it has the cmux trust
+  // to open another pane). v1 is minimal: no cwd input, no voice grammar (out of scope).
+  const onSpawn = useCallback(() => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId || !sendDaemon(threadId, { type: "spawn_thread" })) {
+      showFlash("Start voice in a pane first");
+      return;
+    }
+    showFlash("Opening a new session…");
+  }, [sendDaemon, showFlash]);
+
   // ---- teardown (pagehide) ---------------------------------------------------
   useEffect(() => {
     const onPageHide = () => recorder.teardown();
@@ -360,7 +373,12 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     <div className="flex h-full flex-col bg-canvas px-safe">
       <TopBar online={status.dataState !== "offline"}>
         {FEATURES.threadTitle && (
-          <ThreadSwitcher rows={switcherRows} activeThreadId={activeThreadId} onSelect={switchThread} />
+          <ThreadSwitcher
+            rows={switcherRows}
+            activeThreadId={activeThreadId}
+            onSelect={switchThread}
+            onSpawn={onSpawn}
+          />
         )}
       </TopBar>
 
@@ -413,6 +431,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           onStopTask={onStopTask}
         />
       </div>
+
+      {/* The bottom "New" tab is a second spawn affordance (off until FEATURES.threadNav). */}
+      {FEATURES.threadNav && <BottomTabBar onNewThread={onSpawn} />}
     </div>
   );
 }

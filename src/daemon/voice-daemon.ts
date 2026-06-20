@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import type {
   BridgeEnvelope,
@@ -11,11 +13,12 @@ import type {
   ThreadId,
   ThreadInfo
 } from "../shared/protocol.js";
-import { cmuxHealth, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
+import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
 import {
   loadOrCreateSession,
   qrPath,
   runtimeDir,
+  stateDir,
   threadRuntimePath,
   toBrowserUrl,
   toWebSocketUrl,
@@ -41,6 +44,30 @@ const MAX_SPEECH_CHARS = 40_000;
 // retains so a refreshed/2nd phone can restore the thread on reconnect. Tunable: bigger =
 // more scrollback survives a refresh, at the cost of holding more reply audio in memory.
 const HISTORY_REPLIES = 7;
+
+// This module's plugin-load root, derived from its own location: bundled, the daemon runs at
+// <root>/dist/daemon/standalone.js; in dev at <root>/src/daemon/voice-daemon.ts — three dirs up is
+// <root> either way. Only used to point a spawned `claude` at a `--plugin-dir`-loaded plugin (below).
+const PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+// In DEV the plugin is loaded with `--plugin-dir`, so a spawned `claude` must be pointed at it too —
+// Claude Code marks an `--plugin-dir` load with an `-inline` suffix on the plugin-data dir
+// (stateDir()). An INSTALLED plugin is global to every `claude`, so passing `--plugin-dir` would be
+// redundant/wrong: omit it. So the directory is added ONLY for an inline (dev) load.
+const PLUGIN_DIR_ARG = stateDir().endsWith("-inline") ? `--plugin-dir '${PLUGIN_ROOT}' ` : "";
+
+// The permission modes Claude Code accepts for `--permission-mode` (the same vocabulary it reports
+// in hook input as `permission_mode`). We pass the spawning session's live mode straight through so a
+// spawned thread inherits it EXACTLY. Allowlisted because the value is interpolated into the spawn
+// command — an unrecognized value is dropped (spawn falls back to the user's default) not passed on.
+const PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
+
+// Build the `--permission-mode` fragment for the spawn command (trailing space so it concatenates).
+// Allowlisted: a missing or unrecognized mode yields "" — the spawn falls back to the user's default
+// rather than interpolating an unknown value into the spawned command. Exported for tests.
+export function permissionModeArg(mode?: string): string {
+  return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
+}
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
@@ -110,6 +137,12 @@ export class VoiceDaemon {
   // so terminal-typed turns (and the activation skill's own output) are never read aloud.
   private inFlight?: string;
   private readonly queue: string[] = [];
+
+  // The spawning session's LIVE permission mode, forwarded by the Stop hook each turn. A spawned
+  // thread is launched with `--permission-mode <this>` so it inherits the user's mode EXACTLY (a
+  // child `claude` does not inherit it via env/process tree). Undefined until the first turn reports
+  // it — until then a spawn omits the flag and falls back to the user's own default mode.
+  private inheritedPermissionMode?: string;
 
   // The durable conversation thread: the last HISTORY_REPLIES Claude replies (with audio)
   // plus their parent user messages. A reconnecting phone is caught up from this via a
@@ -211,7 +244,15 @@ export class VoiceDaemon {
             return;
           }
           try {
-            const { prompt, text } = JSON.parse(body || "{}") as { prompt?: string; text?: string };
+            const { prompt, text, permissionMode } = JSON.parse(body || "{}") as {
+              prompt?: string;
+              text?: string;
+              permissionMode?: string;
+            };
+            // Remember the session's live permission mode so a spawn mirrors it (see spawnThread).
+            if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
+              this.inheritedPermissionMode = permissionMode;
+            }
             this.onClaudeReply(typeof prompt === "string" ? prompt : "", typeof text === "string" ? text : "");
           } catch {
             // ignore malformed hook payloads
@@ -334,9 +375,41 @@ export class VoiceDaemon {
         // tell the phone gracefully when it has been evicted.
         this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
+      case "spawn_thread":
+        // Open a NEW cmux workspace running Claude + /voice-control:start. It reads the same
+        // session.json → joins this same session as a new thread (same QR). Routed here
+        // because this daemon has the cmux trust to spawn for the machine.
+        await this.spawnThread(event.cwd);
+        return;
       default:
         return;
     }
+  }
+
+  // Spawn a sibling thread via a new cmux workspace. cwd defaults to THIS daemon's cwd (a new
+  // session "next to" the current one). Surfaces a phone-facing error if the spawn fails so the
+  // user isn't left wondering; the new pane's own daemon registers itself once it connects.
+  private async spawnThread(cwd?: string): Promise<void> {
+    const command = this.buildSpawnCommand();
+    const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
+    if (ref) {
+      console.error(`[spawn] new workspace ${ref} :: ${command}`);
+      return;
+    }
+    this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+  }
+
+  // The command a spawned cmux workspace runs to join this session as a new thread.
+  //   --plugin-dir <root>     dev-only (see PLUGIN_DIR_ARG); installed plugins are global → omitted.
+  //   --permission-mode <m>   mirrors the spawning session's LIVE mode (from the Stop hook) so the
+  //                           new session has the SAME permissions the user already granted — never
+  //                           silently elevated, never silently dropped. Omitted until a turn has
+  //                           reported a mode, in which case the spawn uses the user's own default.
+  //   /voice-control:start    a positional slash command — auto-submits + runs on startup (verified).
+  // cmux must focus the new workspace (spawnWorkspace passes --focus true) to start the command; the
+  // workspace uses the spawning pane's cwd (already trusted), so there's no first-run trust gate.
+  private buildSpawnCommand(): string {
+    return `claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
   }
 
   private async handleAudio(audioBase64: string, mimeType: string, mode: InjectMode): Promise<void> {
