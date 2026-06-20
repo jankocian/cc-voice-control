@@ -4565,10 +4565,11 @@ var require_qrcode = __commonJS((exports, module) => {
 });
 
 // src/daemon/mcp-server.ts
-import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, statSync, truncateSync } from "node:fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, statSync, truncateSync } from "node:fs";
 import { join as join2 } from "node:path";
 
 // src/daemon/config.ts
+import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18886,7 +18887,13 @@ function encodeSecret(secret) {
 
 // src/daemon/config.ts
 var ConfigSchema = exports_external.object({
-  elevenlabsApiKey: exports_external.string().min(1),
+  openaiApiKey: exports_external.string().min(1),
+  openaiVoice: exports_external.string().min(1).default("marin"),
+  ttsModel: exports_external.string().min(1).default("gpt-4o-mini-tts"),
+  sttModel: exports_external.string().min(1).default("gpt-4o-mini-transcribe"),
+  ttsInstructions: exports_external.string().min(1).optional(),
+  language: exports_external.string().min(1).optional(),
+  elevenlabsApiKey: exports_external.string().min(1).optional(),
   voiceId: exports_external.string().min(1).optional(),
   ttsModelId: exports_external.string().min(1).optional(),
   sttModelId: exports_external.string().min(1).optional(),
@@ -18902,6 +18909,13 @@ function qrPath() {
   return join(stateDir(), "qr.txt");
 }
 var LEGACY_CONFIG_PATH = join(homedir(), ".config", "voice-remote", "config.json");
+function recommendedConfigPath() {
+  if (process.env.VOICE_REMOTE_CONFIG)
+    return process.env.VOICE_REMOTE_CONFIG;
+  if (process.env.CLAUDE_PLUGIN_DATA)
+    return join(process.env.CLAUDE_PLUGIN_DATA, "config.json");
+  return LEGACY_CONFIG_PATH;
+}
 function configCandidates() {
   const candidates = [];
   if (process.env.VOICE_REMOTE_CONFIG)
@@ -18911,7 +18925,18 @@ function configCandidates() {
   candidates.push(LEGACY_CONFIG_PATH);
   return candidates;
 }
-async function loadConfig(explicitPath) {
+var SETUP_EXAMPLE = '{ "openaiApiKey": "sk-...", "bridgeUrl": "https://...workers.dev" }';
+function setupMessage(configPath, exists) {
+  const action = exists ? `add your OpenAI API key to ${configPath}` : `create ${configPath}`;
+  return [
+    "An OpenAI API key is required to start the voice remote.",
+    `To finish setup, ${action} with at least:`,
+    `    ${SETUP_EXAMPLE}`,
+    "Then re-run /voice-control:start."
+  ].join(`
+`);
+}
+async function resolveConfig(explicitPath) {
   const candidates = explicitPath ? [explicitPath] : configCandidates();
   let chosen;
   for (const candidate of candidates) {
@@ -18922,14 +18947,42 @@ async function loadConfig(explicitPath) {
     }
   }
   if (!chosen) {
-    throw new Error(`Missing config file. Looked in: ${candidates.join(", ")}`);
+    const configPath = explicitPath ?? recommendedConfigPath();
+    return {
+      ok: false,
+      needsSetup: true,
+      missing: "openaiApiKey",
+      reason: "no-config",
+      configPath,
+      message: setupMessage(configPath, false)
+    };
   }
   const fileStat = await stat(chosen);
   if ((fileStat.mode & 63) !== 0) {
     throw new Error(`Config file permissions must be 0600: ${chosen}`);
   }
   const raw = await readFile(chosen, "utf8");
-  return ConfigSchema.parse(JSON.parse(raw));
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || !("openaiApiKey" in parsed)) {
+    return {
+      ok: false,
+      needsSetup: true,
+      missing: "openaiApiKey",
+      reason: "missing-key",
+      configPath: chosen,
+      message: setupMessage(chosen, true)
+    };
+  }
+  return { ok: true, config: ConfigSchema.parse(parsed) };
+}
+function writeSetupNeededRuntime(setup) {
+  mkdirSync(stateDir(), { recursive: true });
+  writeFileSync(runtimePath(), JSON.stringify({
+    needsSetup: true,
+    missing: setup.missing,
+    configPath: setup.configPath,
+    message: setup.message
+  }, null, 2));
 }
 function toWebSocketUrl(bridgeUrl, secret, role) {
   return toBridgeWebSocketUrl(bridgeUrl, secret, role);
@@ -18952,7 +19005,7 @@ async function reconcile(actions) {
 
 // src/daemon/voice-daemon.ts
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync as mkdirSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { createServer } from "node:http";
 
 // node_modules/ws/wrapper.mjs
@@ -19039,48 +19092,61 @@ async function cmuxInterrupt(surface) {
   return r.ok;
 }
 
-// src/daemon/elevenlabs.ts
-var DEFAULT_STT_MODEL = "scribe_v1";
-var DEFAULT_TTS_MODEL = "eleven_turbo_v2_5";
+// src/daemon/openai.ts
+var DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
+var DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
+var DEFAULT_VOICE = "marin";
+var OPENAI_BASE = "https://api.openai.com/v1";
+function filenameForMime(mimeType) {
+  if (mimeType.includes("mp4"))
+    return "speech.mp4";
+  if (mimeType.includes("ogg"))
+    return "speech.ogg";
+  if (mimeType.includes("mpeg") || mimeType.includes("mp3"))
+    return "speech.mp3";
+  if (mimeType.includes("wav"))
+    return "speech.wav";
+  return "speech.webm";
+}
 async function transcribeAudio(config2, audio, mimeType) {
   const form = new FormData;
   const bytes = new Uint8Array(audio.byteLength);
   bytes.set(audio);
-  form.append("file", new Blob([bytes], { type: mimeType || "audio/webm" }), "speech");
-  form.append("model_id", config2.sttModelId ?? DEFAULT_STT_MODEL);
-  const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+  const type = mimeType || "audio/webm";
+  form.append("file", new Blob([bytes], { type }), filenameForMime(type));
+  form.append("model", config2.sttModel ?? DEFAULT_STT_MODEL);
+  if (config2.language)
+    form.append("language", config2.language);
+  form.append("response_format", "text");
+  const response = await fetch(`${OPENAI_BASE}/audio/transcriptions`, {
     method: "POST",
-    headers: { "xi-api-key": config2.elevenlabsApiKey },
+    headers: { authorization: `Bearer ${config2.openaiApiKey}` },
     body: form
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`ElevenLabs speech-to-text failed (${response.status}): ${body}`);
+    throw new Error(`OpenAI speech-to-text failed (${response.status}): ${body}`);
   }
-  const data = await response.json();
-  if (typeof data.text !== "string") {
-    throw new Error("ElevenLabs speech-to-text response did not include text");
-  }
-  return data.text.trim();
+  return (await response.text()).trim();
 }
-async function synthesizeSpeech(config2, text) {
-  if (!config2.voiceId) {
-    throw new Error("No voiceId configured for text-to-speech");
-  }
-  const url2 = new URL(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(config2.voiceId)}`);
-  url2.searchParams.set("output_format", "mp3_44100_128");
-  const response = await fetch(url2, {
+async function synthesizeSpeech(config2, text, voiceOverride) {
+  const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
     method: "POST",
     headers: {
-      "xi-api-key": config2.elevenlabsApiKey,
-      "content-type": "application/json",
-      accept: "audio/mpeg"
+      authorization: `Bearer ${config2.openaiApiKey}`,
+      "content-type": "application/json"
     },
-    body: JSON.stringify({ text, model_id: config2.ttsModelId ?? DEFAULT_TTS_MODEL })
+    body: JSON.stringify({
+      model: config2.ttsModel ?? DEFAULT_TTS_MODEL,
+      voice: voiceOverride ?? config2.openaiVoice ?? DEFAULT_VOICE,
+      input: text,
+      response_format: "mp3",
+      ...config2.ttsInstructions ? { instructions: config2.ttsInstructions } : {}
+    })
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`ElevenLabs text-to-speech failed (${response.status}): ${body}`);
+    throw new Error(`OpenAI text-to-speech failed (${response.status}): ${body}`);
   }
   const buffer = Buffer.from(await response.arrayBuffer());
   return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
@@ -19219,14 +19285,14 @@ class VoiceDaemon {
     });
   }
   writeRuntime() {
-    mkdirSync(stateDir(), { recursive: true });
+    mkdirSync2(stateDir(), { recursive: true });
     try {
-      writeFileSync(qrPath(), `${renderQr(this.init.browserUrl)}
+      writeFileSync2(qrPath(), `${renderQr(this.init.browserUrl)}
 `);
     } catch (error51) {
       console.error(`[qr] render failed: ${error51 instanceof Error ? error51.message : String(error51)}`);
     }
-    writeFileSync(runtimePath(), JSON.stringify({ port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl }, null, 2));
+    writeFileSync2(runtimePath(), JSON.stringify({ port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl }, null, 2));
   }
   ensureRuntimePublished() {
     if (!existsSync(runtimePath()))
@@ -19361,8 +19427,6 @@ class VoiceDaemon {
     this.pump();
   }
   async speak(requestId, text) {
-    if (!this.init.config.voiceId)
-      return;
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (this.lastReply?.requestId === requestId)
@@ -19413,7 +19477,7 @@ function capForSpeech(text) {
 }
 
 // src/daemon/mcp-server.ts
-mkdirSync2(stateDir(), { recursive: true });
+mkdirSync3(stateDir(), { recursive: true });
 var LOG_FILE = join2(stateDir(), "daemon.log");
 var LOG_MAX_BYTES = 1e6;
 var baseError = console.error.bind(console);
@@ -19435,8 +19499,13 @@ async function activate() {
     return;
   activating = true;
   try {
-    const config2 = await loadConfig();
-    const next = new VoiceDaemon(createDaemonInit(config2));
+    const result = await resolveConfig();
+    if (!result.ok) {
+      writeSetupNeededRuntime(result);
+      console.error(`[mcp] setup needed: ${result.missing} not set (${result.configPath})`);
+      return;
+    }
+    const next = new VoiceDaemon(createDaemonInit(result.config));
     await next.start();
     daemon = next;
     console.error("[mcp] voice remote activated");
