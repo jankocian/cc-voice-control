@@ -16,23 +16,45 @@ export type SessionState = {
 // the running turn (Esc) and run immediately.
 export type InjectMode = "queue" | "interrupt";
 
+// One entry of the durable conversation thread the daemon retains (a ring of the last
+// few turns). Text only — audio is fetched on demand via `get_audio`, never bundled into
+// history (iOS reconnects constantly; re-pushing audio every time would burn bandwidth).
+export type HistoryTurn = {
+  // Daemon-monotonic sequence number; the phone merges/orders the thread by this.
+  seq: number;
+  // Creation wall-clock (Date.now()).
+  timestamp: number;
+  requestId: string;
+  role: "user" | "claude";
+  text: string;
+  // True for a reply whose synthesized audio is still in the ring (fetchable). The phone
+  // renders such rows as tap-to-play even before the audio bytes have been requested.
+  hasAudio: boolean;
+};
+
 export type BrowserToDaemonEvent =
   | { type: "submit_audio"; requestId: string; audioBase64: string; mimeType: string; mode: InjectMode }
   | { type: "status_request"; requestId: string }
   | { type: "summary_request"; requestId: string }
   | { type: "stop_task"; requestId: string }
-  // Sent on (re)connect. `lastSeenReplyId` is the requestId of the most recent reply the
-  // phone already has, so the daemon can re-send the latest reply only if it was missed
-  // (e.g. it arrived while the phone was asleep and no socket was there to receive it).
-  | { type: "sync"; requestId: string; lastSeenReplyId?: string };
+  // Sent on (re)connect. The daemon answers with a `history` event (the full retained
+  // thread), so the phone restores its conversation after a refresh / on a 2nd browser.
+  | { type: "sync"; requestId: string }
+  // Fetch the audio for a specific reply on demand (tap-to-play on a history row whose
+  // bytes aren't cached locally). The daemon answers with a `tts_audio` carrying `replay`.
+  | { type: "get_audio"; requestId: string };
 
 export type DaemonToBrowserEvent =
   | { type: "session_status"; state: SessionState; memory: { currentTask?: string } }
-  | { type: "transcript"; requestId: string; text: string }
-  | { type: "claude_reply"; requestId: string; text: string }
+  | { type: "transcript"; requestId: string; seq: number; timestamp: number; text: string }
+  | { type: "claude_reply"; requestId: string; seq: number; timestamp: number; text: string }
   // `replay` marks a reply re-sent on reconnect: the phone shows it for tap-to-play
   // instead of auto-playing it (a reply the user already missed should not start talking).
   | { type: "tts_audio"; requestId: string; audioBase64: string; mimeType: string; replay?: boolean }
+  // The retained thread, sent in response to `sync`. Replaces single-reply replay: the
+  // phone reconciles these (text-only) turns to restore history after a refresh / on a
+  // 2nd browser, then fetches audio per row on demand.
+  | { type: "history"; turns: HistoryTurn[] }
   // `daemonLastSeenAt` is the epoch-ms time a daemon socket last closed for this
   // session (null = a daemon was never seen). It lets the phone distinguish a brief
   // reconnect from a session that ended hours ago: `daemonConnected` is a pure boolean

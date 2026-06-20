@@ -5,6 +5,7 @@ export type {
   BridgeEnvelope,
   BrowserToDaemonEvent,
   DaemonToBrowserEvent,
+  HistoryTurn,
   InjectMode,
   SessionRuntimeState,
   SessionState

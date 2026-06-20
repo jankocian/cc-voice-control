@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { selectMissedReply, VoiceDaemon } from "./voice-daemon.js";
+import { VoiceDaemon } from "./voice-daemon.js";
 
 const BROWSER_URL = "https://voice.example.com/s/sek";
 
@@ -62,30 +62,5 @@ describe("VoiceDaemon.ensureRuntimePublished", () => {
 
     d.ensureRuntimePublished();
     expect(existsSync(runtime)).toBe(true);
-  });
-});
-
-describe("selectMissedReply", () => {
-  const audio = { audioBase64: "AAAA", mimeType: "audio/mpeg" };
-
-  it("replays nothing when there is no reply yet", () => {
-    expect(selectMissedReply(undefined, undefined)).toEqual([]);
-  });
-
-  it("replays nothing when the phone already has the latest reply", () => {
-    expect(selectMissedReply({ requestId: "r1", text: "hi", audio }, "r1")).toEqual([]);
-  });
-
-  it("replays text and audio when the phone missed the latest reply", () => {
-    expect(selectMissedReply({ requestId: "r2", text: "hi", audio }, "r1")).toEqual([
-      { type: "claude_reply", requestId: "r2", text: "hi" },
-      { type: "tts_audio", requestId: "r2", replay: true, ...audio }
-    ]);
-  });
-
-  it("replays a fresh phone (no last-seen id) and omits audio when none was synthesized", () => {
-    expect(selectMissedReply({ requestId: "r3", text: "hi" }, undefined)).toEqual([
-      { type: "claude_reply", requestId: "r3", text: "hi" }
-    ]);
   });
 });

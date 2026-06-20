@@ -11,6 +11,7 @@ import type {
 } from "../shared/protocol.js";
 import { cmuxHealth, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
 import { qrPath, runtimePath, stateDir, toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
+import { buildHistoryEvent, HistoryRing, selectAudioReply } from "./history-ring.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 
@@ -25,6 +26,10 @@ const CMUX_HEALTH_INTERVAL_MS = 5000;
 // pure safety ceiling — far above any normal coding reply — to bound the number of TTS
 // calls (and so cost/latency) if some runaway output arrives. ~40k chars ≈ 10 chunks.
 const MAX_SPEECH_CHARS = 40_000;
+// How many of the most recent Claude replies (with their parent user messages) the daemon
+// retains so a refreshed/2nd phone can restore the thread on reconnect. Tunable: bigger =
+// more scrollback survives a refresh, at the cost of holding more reply audio in memory.
+const HISTORY_REPLIES = 7;
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
@@ -38,27 +43,6 @@ export type DaemonInit = {
   sessionId: string;
   browserUrl: string;
 };
-
-/** The latest reply, kept so a phone that missed it can be caught up on reconnect. */
-type RetainedReply = { requestId: string; text: string; audio?: { audioBase64: string; mimeType: string } };
-
-/**
- * Events to re-send so a reconnecting phone gets the latest reply it missed. Empty when
- * there is nothing to replay or the phone already has it (`lastSeenReplyId` matches). The
- * audio is flagged `replay` so the phone shows it for tap-to-play rather than auto-playing.
- */
-export function selectMissedReply(
-  lastReply: RetainedReply | undefined,
-  lastSeenReplyId: string | undefined
-): DaemonToBrowserEvent[] {
-  if (!lastReply || lastReply.requestId === lastSeenReplyId) return [];
-  const events: DaemonToBrowserEvent[] = [
-    { type: "claude_reply", requestId: lastReply.requestId, text: lastReply.text }
-  ];
-  if (lastReply.audio)
-    events.push({ type: "tts_audio", requestId: lastReply.requestId, replay: true, ...lastReply.audio });
-  return events;
-}
 
 /** Build a fresh session (secret + phone URL) from config and the current cmux pane. */
 export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
@@ -110,9 +94,11 @@ export class VoiceDaemon {
   private inFlight?: string;
   private readonly queue: string[] = [];
 
-  // The most recent reply, retained so a phone that missed it (e.g. it finished while the
-  // phone was asleep) can be caught up when it reconnects and sends `sync`.
-  private lastReply?: RetainedReply;
+  // The durable conversation thread: the last HISTORY_REPLIES Claude replies (with audio)
+  // plus their parent user messages. A reconnecting phone is caught up from this via a
+  // `history` event, and reply audio is served from it on demand (`get_audio`). Replaces
+  // the single-reply retention that lost the whole thread on a refresh.
+  private readonly history = new HistoryRing(HISTORY_REPLIES);
 
   constructor(init: DaemonInit) {
     this.init = init;
@@ -294,9 +280,16 @@ export class VoiceDaemon {
       case "sync":
         // The phone (re)connected and wants the current state. Replaces a heartbeat:
         // the daemon otherwise emits status only on change, which a fresh phone misses.
-        // Also re-send the latest reply if the phone missed it while disconnected.
+        // Then send the retained thread so a refresh / 2nd browser restores history. Text
+        // only — no audio is pushed here (iOS reconnects constantly; the phone fetches each
+        // reply's audio on demand via `get_audio`, which it treats as tap-to-play).
         this.emitStatus();
-        for (const missed of selectMissedReply(this.lastReply, event.lastSeenReplyId)) this.sendToBrowser(missed);
+        this.sendToBrowser(buildHistoryEvent(this.history));
+        return;
+      case "get_audio":
+        // Tap-to-play on a row whose audio isn't cached locally: serve it from the ring, or
+        // tell the phone gracefully when it has been evicted.
+        this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
       default:
         return;
@@ -315,7 +308,16 @@ export class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    this.sendToBrowser({ type: "transcript", requestId: randomUUID(), text: transcript });
+    // Record the user turn in the ring (seq + timestamp assigned there) and echo the live
+    // transcript carrying those same fields so the phone can reconcile it against history.
+    const entry = this.history.add("user", randomUUID(), transcript);
+    this.sendToBrowser({
+      type: "transcript",
+      requestId: entry.requestId,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      text: transcript
+    });
     if (mode === "interrupt") await this.interruptWith(transcript);
     else this.enqueue(transcript);
   }
@@ -383,10 +385,17 @@ export class VoiceDaemon {
     console.error(`[reply] matched in-flight turn, ${text.length} chars`);
     this.inFlight = undefined;
     if (text) {
-      const requestId = randomUUID();
-      this.lastReply = { requestId, text };
-      this.sendToBrowser({ type: "claude_reply", requestId, text });
-      void this.speak(requestId, text);
+      // Record the reply in the ring (seq + timestamp assigned there) and emit the live
+      // event carrying them so the phone reconciles it against history.
+      const entry = this.history.add("claude", randomUUID(), text);
+      this.sendToBrowser({
+        type: "claude_reply",
+        requestId: entry.requestId,
+        seq: entry.seq,
+        timestamp: entry.timestamp,
+        text
+      });
+      void this.speak(entry.requestId, text);
     }
     this.emitStatus();
     void this.pump();
@@ -395,7 +404,9 @@ export class VoiceDaemon {
   private async speak(requestId: string, text: string): Promise<void> {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
-      if (this.lastReply?.requestId === requestId) this.lastReply.audio = { audioBase64, mimeType };
+      // Stash the audio on the matching reply entry so a reconnecting phone can fetch it on
+      // demand (no-op if the entry has since been evicted from the ring).
+      this.history.attachAudio(requestId, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
     } catch {
       // best-effort speech; the text reply already went through

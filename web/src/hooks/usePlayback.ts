@@ -30,13 +30,18 @@ export type Playback = {
   // Live playhead + clip length (seconds) of the loaded entry. 0 when none.
   position: number;
   duration: number;
-  // requestIds that have audio attached → render play/replay controls + .playable.
+  // requestIds renderable as playable → render play/replay controls + .playable. Includes
+  // both locally-cached audio AND history rows the daemon flags fetchable (tap-to-play
+  // before the bytes arrive). See markPlayable.
   playableIds: ReadonlySet<string>;
   speaking: boolean;
   playbackRate: number;
   formattedRate: string;
   hasAudio: (requestId: string) => boolean;
   attachAudio: (requestId: string, audioBase64: string, mimeType: string, replay: boolean) => void;
+  // Mark replies the daemon still has audio for (from a `history` event) as playable, even
+  // though their bytes aren't cached yet — tapping play fetches them on demand.
+  markPlayable: (requestIds: readonly string[]) => void;
   playEntry: (requestId: string) => void;
   replayEntry: (requestId: string) => void;
   // Seek the loaded entry to an absolute time (seconds). No-op if not loaded.
@@ -53,9 +58,13 @@ export type Playback = {
 export type UsePlaybackOptions = {
   // Mirrors the vanilla guard: a fresh reply auto-plays only when not recording.
   getRecording: () => boolean;
+  // Fetch a reply's audio on demand (tap-to-play on a history row whose bytes aren't
+  // cached). App wires this to `sendDaemon({ type: "get_audio", requestId })`; the daemon
+  // answers with a `tts_audio` (replay), which lands in attachAudio and plays immediately.
+  onRequestAudio?: (requestId: string) => void;
 };
 
-export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
+export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions): Playback {
   const playerRef = useRef<HTMLAudioElement | null>(null);
   if (!playerRef.current) playerRef.current = new Audio();
   const player = playerRef.current;
@@ -81,6 +90,14 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
 
   const getRecordingRef = useRef(getRecording);
   getRecordingRef.current = getRecording;
+
+  const onRequestAudioRef = useRef(onRequestAudio);
+  onRequestAudioRef.current = onRequestAudio;
+
+  // The requestId of a tap-to-play whose audio we've requested but don't have yet. When
+  // that audio lands in attachAudio we play it immediately and clear this. A ref (not
+  // state) so attachAudio reads the latest value without re-subscribing.
+  const pendingPlayIdRef = useRef<string | null>(null);
 
   player.playbackRate = playbackRate;
 
@@ -202,14 +219,30 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
         }
         return;
       }
-      if (loadEntry(requestId)) startPlayback();
+      if (loadEntry(requestId)) {
+        startPlayback();
+        return;
+      }
+      // No cached bytes. If this is a history reply the daemon still has, fetch it on
+      // demand: mark it pending so attachAudio plays it the moment it lands. (We're inside
+      // the tap gesture, so unlocking the element earlier keeps autoplay allowed.) The
+      // unlock already happened on first tap; pending playback resumes the iOS session in
+      // attachAudio → playEntry.
+      pendingPlayIdRef.current = requestId;
+      onRequestAudioRef.current?.(requestId);
     },
     [player, loadEntry, startPlayback]
   );
 
   const replayEntry = useCallback(
     (requestId: string): void => {
-      if (!loadEntry(requestId)) return;
+      if (!loadEntry(requestId)) {
+        // No cached bytes yet (a history row). Fetch on demand; attachAudio plays it from
+        // the start since a freshly-loaded clip begins at 0.
+        pendingPlayIdRef.current = requestId;
+        onRequestAudioRef.current?.(requestId);
+        return;
+      }
       player.currentTime = 0;
       player.playbackRate = playbackRate;
       startPlayback();
@@ -246,11 +279,33 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
         next.add(requestId);
         return next;
       });
-      // Auto-play a fresh reply; a missed (replayed) one waits for a tap.
+      // A tap-to-play we fetched on demand: play it now (this is the user's intent), even
+      // though it arrives flagged `replay`. Clearing pending first so a later attach for the
+      // same id doesn't re-trigger.
+      if (pendingPlayIdRef.current === requestId) {
+        pendingPlayIdRef.current = null;
+        playEntry(requestId);
+        return;
+      }
+      // Otherwise: auto-play a fresh reply; a missed (replayed) one waits for a tap.
       if (!getRecordingRef.current() && !replay) playEntry(requestId);
     },
     [playEntry]
   );
+
+  // History rows (hasAudio) become playable before their bytes are fetched, so the inline
+  // player renders as tap-to-play. Tapping triggers the on-demand fetch above.
+  const markPlayable = useCallback((requestIds: readonly string[]): void => {
+    setPlayableIds((prev) => {
+      let next: Set<string> | null = null;
+      for (const id of requestIds) {
+        if (!id || prev.has(id)) continue;
+        next ??= new Set(prev);
+        next.add(id);
+      }
+      return next ?? prev;
+    });
+  }, []);
 
   const cycleSpeed = useCallback((): void => {
     setPlaybackRate((prev) => {
@@ -305,6 +360,7 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
         setPosition(0);
         setDuration(0);
       }
+      if (pendingPlayIdRef.current === requestId) pendingPlayIdRef.current = null;
       audioByRequest.current.delete(requestId);
       setPlayableIds((prev) => {
         if (!prev.has(requestId)) return prev;
@@ -331,6 +387,7 @@ export function usePlayback({ getRecording }: UsePlaybackOptions): Playback {
     formattedRate,
     hasAudio,
     attachAudio,
+    markPlayable,
     playEntry,
     replayEntry,
     seekEntry,
