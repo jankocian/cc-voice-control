@@ -76,6 +76,18 @@ describe("HistoryRing", () => {
     expect(ring.get("c1")).toBeUndefined();
     expect(ring.get("c2")?.audio).toEqual(audio);
   });
+
+  it("clear() drops the whole thread but keeps seq advancing (so a fresh reply sorts newest)", () => {
+    const ring = new HistoryRing(3, clock());
+    ring.add("user", "u1", "old topic");
+    ring.add("claude", "c1", "old answer");
+    ring.clear();
+    expect(ring.snapshot()).toEqual([]);
+    // A reply after /clear still gets a strictly-newer seq than the cleared turns (1,2 → 3).
+    const next = ring.add("claude", "c2", "new topic answer");
+    expect(next.seq).toBe(3);
+    expect(ring.snapshot().map((e) => e.requestId)).toEqual(["c2"]);
+  });
 });
 
 describe("buildHistoryEvent", () => {

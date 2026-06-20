@@ -1,489 +1,715 @@
-# Design: Multiple Claude Code sessions per computer — one URL, multiple threads
+# Design: Multiple Claude Code sessions per machine — one URL, N switchable threads
 
-**Status:** Research + design only — no implementation. (TODO.md item #7.)
+**Status:** Authoritative architecture — research + design only, **no implementation**, no app-code
+changes in this pass. (TODO.md #7.)
+**Supersedes:** the prior first-pass design of the same name. Git keeps the old revision; this is the
+decision-grade rewrite. The world changed since the first pass: **#6 shipped** — the daemon is now a
+standalone `dist/daemon/standalone.js` background task (one per pane, **no MCP host**, orphan
+self-reap on `ppid === 1`). That removes the biggest blocker the first pass hedged on, so several of
+its open questions are now closed.
 **Date:** 2026-06-20.
-**Vision:** **One phone app / one URL + QR per machine** that multiplexes **multiple Claude Code
-instances** (one per cmux pane) as switchable **threads**. Spin up another pane — optionally **by
-voice** — and it joins the **same** session as a new thread (same QR), so you can talk to instance B
-while instance A is still working.
+**Author env (for the live-probe list, §11):** Claude Code 2.1.183, cmux.app, `socketControlMode:
+cmuxOnly` (per `no-mcp-background-daemon.md`).
 
-This is the big architectural bet. It touches every layer: the shared state files, the per-activation
-secret, the Durable Object's 2-role model, the wire protocol, and the web UI. Below, current-state
-claims are grounded in this repo's code; Claude Code / cmux internals are flagged **[DOC]/[GH]/[INFER]**;
-everything depends on **#6** (a thread should ideally be a visible/killable process — see
-`docs/research/visible-background-process.md`).
+Evidence tags: **[REPO]** this codebase (authoritative on current state), **[DOC]** official docs
+(Cloudflare / Claude Code), **[CMUX]** cmux docs (note: two cmux doc sites disagree — see §11),
+**[INFER]** reasoned but unconfirmed → has a probe in §11.
 
 ---
 
-## 0. TL;DR — recommended architecture
+## 0. TL;DR — the recommended architecture
 
-- **One machine-level session identity.** Mint **one** stable `secret` (→ one URL/QR) **once per
-  machine**, persisted in `stateDir()` (`session.json`), shared by every pane. Replaces the
-  per-activation random secret in `createDaemonInit()`.
-- **N daemons, one DO, one browser-set.** Drop the DO's "exactly one daemon" rule. The DO holds a
-  **map of threads** (one daemon socket each) + browser(s). Every envelope gains a **`threadId`**;
-  browser→daemon routes to one thread, daemon→browser is tagged with its `threadId`.
-- **Per-thread registry.** Each daemon **registers** on connect with a human **label** (pane title /
-  cwd / git branch) and streams **per-thread status**. The DO keeps a thread table; presence/lifecycle
-  events let the UI list, switch, and badge threads. This **replaces the singleton `active`/
-  `runtime.json`** model with per-thread registration (no more clobbering).
-- **Spawn-a-thread by voice.** A pane can ask cmux (CLI only) to **`new-split`** a pane and launch
-  `claude … /voice-control:start` there; it reads the same `session.json` secret → joins the same DO
-  → appears as a new thread → the QR is unchanged.
-- **Security:** one **session token** with **per-thread revocation** + rotation; blast radius and
-  mitigations in §8.
-- **Web UI:** a **thread switcher** (chat-list, à la iMessage conversations) on top of the existing
-  hero+thread; per-thread status + unread badges; the hero and message thread scope to the active
-  thread.
+**Identity.** `threadId = CMUX_SURFACE_ID`. It is stable for the life of a pane, already used as the
+`--surface` target everywhere in `cmux.ts`, and makes every edge case in §7 "just work" (a re-quit pane
+re-registers to the *same* slot). One **machine-level secret** (one URL/QR) lives in
+`stateDir()/session.json`, minted once and shared by every pane's daemon — replacing the
+per-activation `randomBytes(16)` in `createDaemonInit()`.
 
-Build it as **5 vertical slices** (§10), each shippable. The riskiest unknowns are the cmux
-spawn-a-pane ergonomics and the security model for one token reaching many instances (§11).
+**Bridge.** Drop the DO's "exactly one daemon" rule (`evictRole("daemon")`). The DO becomes a small
+**thread registry**: a map of `threadId → {socket, label, lastSeenAt}` plus the browser set. Every
+envelope grows a `threadId`. Browser→daemon routes to the one matching daemon socket; daemon→browser
+is tagged with its `threadId`. The worker stays a **dumb relay** apart from the registry + the two
+security bits (§6).
 
----
+**Labels.** Each daemon, on register, computes a human label from **git repo + branch** (`git -C
+<cwd> rev-parse`), the **cwd basename**, and — if the live CLI exposes it — the **cmux pane title**
+(via `cmux tree --json`, matched on its own `CMUX_SURFACE_ID`). The pane-title field is the one
+genuinely unconfirmed cmux fact (§11-A); the label degrades gracefully to `repo · branch` without it.
 
-## 1. Current single-session limitation (confirmed in code)
+**Switcher UX.** Reuse the existing header **white pill** as the switcher anchor: tap → **dropdown**
+of threads (label + per-thread status dot + unread badge) → jump. Also **swipe left/right** between
+threads using **CSS scroll-snap** (no ponytail / no swipe lib). Per-`threadId` state in `App.tsx`
+(`Map<ThreadId, …>`); hero + thread scope to the active thread; reuse #10's offline grading
+per-thread.
 
-1. **Singleton state files.** `config.ts`: `stateDir()` → one dir; `runtimePath()` → **one**
-   `runtime.json`; `qrPath()` → **one** `qr.txt`; `ACTIVE_FLAG` → **one** `active` file
-   (`mcp-server.ts:41`). Every Claude Code instance on the machine shares the *same* paths
-   (`$CLAUDE_PLUGIN_DATA` is per-plugin, not per-pane). Two panes both write `runtime.json` → they
-   **clobber** each other.
-2. **Fresh secret per activation.** `createDaemonInit()` (`voice-daemon.ts:48-58`):
-   `randomBytes(16)` → a **new** `secret` → a **new** `sessionId` → a **new** URL every time
-   `/voice-control:start` runs. Two panes ⇒ two different URLs, neither stable.
-3. **DO is a strict 2-role bridge.** `worker/src/index.ts`: keyed by `idFromName(sha256(secret))`;
-   roles are exactly `{daemon, browser}` (`SocketAttachment`); on a 2nd daemon it **evicts** the
-   first (`evictRole("daemon")`, lines 90, 165-175). Browsers aren't deduped, but there is **no
-   notion of multiple daemons** — the model is one daemon ↔ one phone.
-4. **Protocol has no thread dimension.** `src/shared/protocol.ts`: envelopes are
-   `{channel, event}` with no `threadId`; `SessionState` has a single `sessionId`; the daemon's
-   `emitStatus()` reports one machine's state.
+**Spawn by voice — IMPLEMENTED + verified (§0.6-C).** A `spawn_thread { cwd? }` event → the receiving
+daemon runs `cmux new-workspace --cwd <cwd> --command 'claude [--plugin-dir <root>] [--permission-mode
+<live mode>] /voice-control:start' --focus true`. The new pane loads voice-control, the positional
+slash command auto-runs, and the fresh daemon reads the same `session.json` → joins the same DO as a
+new thread → **same QR**. Verified end-to-end (a spawned daemon launched + joined). `--focus true` is
+required; `--plugin-dir <root>` is added only for a dev (`-inline`) load; `<live mode>` mirrors the
+spawning session's permission mode (forwarded by the Stop hook) so the new session inherits the user's
+permissions exactly — never silently elevated (see §0.6-C).
 
-⇒ **In practice: one session per machine.** A second pane mints a clobbering URL and (if it reused
-the same secret) would get evicted from the DO. #7 lifts every one of these.
+**Security (decided — §6).** Ship **one stable machine secret + revoke-on-exit + a worker
+rate-limit**, *not* rotating sub-tokens. Rationale: a wrong secret already lands on an empty DO
+(sha256 preimage-resistance is the real gate), so the only real risk is a **leaked URL that never
+dies** — which revoke-on-exit kills directly. The native Cloudflare **Rate Limiting binding** caps
+guessing cheaply. Rotation happens **only when the session is empty** (zero daemons), so an active
+user **never re-scans**. Sub-tokens are designed-for (a reserved field) but deferred.
+
+Build as **6 vertical slices** (§10), each shippable. Slices 1–4 are buildable **immediately** (no
+cmux unknowns); slice 5 (spawn) and the pane-title half of slice 3 are **gated on live probes** (§11).
 
 ---
 
-## 2. Machine-level session identity (one URL/QR for all panes)
+## 0.6 Live probe results — all gates CLEARED (2026-06-20, run in a real cmux pane)
 
-### Persist one secret, once
-Replace the per-activation secret with a **machine session record** written once to
-`stateDir()/session.json`:
+Ran the §11 probes in a live cmux Claude pane. Every external gate resolved favorably; two
+corrections folded in below.
+
+- **A (labels) — PASS, better than hoped.** `cmux tree --all --json --id-format both` exposes a
+  per-surface **`title`**, and it is the **live Claude task description**
+  (e.g. `"⠂ Review to-dos and plan next implementation"`). The daemon maps its own surface via
+  `cmux identify` (→ caller `surface_ref`), then reads `title`. There is **no `cwd`** field
+  (confirmed) → cwd from the daemon's `process.cwd()`, repo·branch from `git rev-parse`. **Thread
+  chips = task-title · repo · branch.** (Strip the leading spinner glyph from the title.)
+- **B (spawn ref) — PASS-fast.** `new-workspace …` prints **`OK workspace:<N>`** on stdout —
+  deterministic, no tree-diff needed; `close-workspace --workspace <ref>` cleans up.
+- **Spawn-primitive CORRECTION:** on this cmux build `new-pane` has **no `--cwd`/`--command`** (only
+  `--type/--direction/--url/--focus`). The spawn primitive is **`new-workspace --cwd <path>
+  --command "<cmd>" --focus true`** (a workspace per spawned session is also the natural "open
+  another project" UX). `--focus true` is required (see C below). §9 is corrected accordingly.
+- **C (activation) — CONFIRMED + IMPLEMENTED.** A positional slash command **auto-submits and runs**
+  in interactive `claude` (verified end-to-end: a spawned `claude … /voice-control:start` launched a
+  working daemon). Three things the first probe missed, all now handled:
+  1. cmux won't start a workspace's `--command` while it is **unfocused** → spawn uses `--focus true`
+     (focus-at-creation suffices; the process keeps running after focus returns to the user's pane).
+  2. in **dev** the plugin is `--plugin-dir`-loaded, so the spawned `claude` needs `--plugin-dir
+     <root>` (derived from the daemon's own module path) — added **only** for an inline/dev load
+     (`stateDir()` ends `-inline`); an installed plugin is global, so the flag is omitted.
+  3. a fresh session would hit a **trust gate** → avoided by spawning in the spawning pane's **cwd**,
+     a dir the user already trusts (a phone can't approve a trust prompt). Permission mode is **not
+     hardcoded**: the spawn passes `--permission-mode <live mode>` (forwarded each turn by the Stop
+     hook) so the new session inherits the user's mode EXACTLY — never silently elevated/dropped.
+  Full evidence in `docs/research/spawn-thread.md`.
+- **E (trust) — PASS.** `read-screen --surface $CMUX_SURFACE_ID` → OK.
+
+Net: **labels (slice 3) AND spawn-by-voice (slice 5) are implemented + verified.**
+
+---
+
+## 1. Current state (confirmed in code, post-#6)
+
+1. **Standalone daemon, one per pane.** `/voice-control:start` launches `node
+   dist/daemon/standalone.js` as a `run_in_background` Bash task. `standalone.ts` IS the daemon: it
+   `resolveConfig()` → `createDaemonInit()` → `new VoiceDaemon(...)` → `daemon.start()`, traps
+   SIGTERM/SIGINT → `stop()`, and self-reaps when `shouldReap(process.ppid)` (i.e. `ppid === 1`).
+   **There is no MCP host and no `active` flag.** [REPO: `standalone.ts`, `skills/start/SKILL.md`]
+   ⇒ **N panes already = N independent daemon processes.** The hard part the first pass worried about
+   (running N daemons under one host) is *already true*. #7 is now "make the bridge and UI plural,"
+   not "make the process model plural."
+
+2. **Fresh secret per activation.** `createDaemonInit()` (`voice-daemon.ts:48-58`): `randomBytes(16)`
+   → new `secret` → new `sessionId` → new URL **every** start. Two panes ⇒ two URLs. [REPO]
+
+3. **Singleton state files.** `config.ts`: one `runtime.json` (`runtimePath()`) and one `qr.txt`
+   (`qrPath()`) under `stateDir()` (`$CLAUDE_PLUGIN_DATA`, per-plugin not per-pane). Two daemons both
+   write `runtime.json` → they **clobber**. `/voice-control:stop` reads `pid` from `runtime.json` and
+   kills *that* pid — so today it can only target one daemon. [REPO: `config.ts`, `voice-daemon.ts`,
+   `skills/stop/SKILL.md`]
+
+4. **DO is a strict 2-role bridge.** `worker/src/index.ts`: keyed by `idFromName(sha256(secret))`;
+   roles are exactly `{daemon, browser}`; a 2nd daemon **evicts** the first (`evictRole("daemon")`).
+   One `daemonLastSeenAt` for the whole session. Presence is `bridge_presence{daemonConnected,
+   browserConnected, daemonLastSeenAt}`. [REPO]
+
+5. **Protocol has no thread dimension.** `BridgeEnvelope` is `{channel, event}` (+ `control`); no
+   `threadId`. `SessionState` carries one `sessionId`. The history ring (`history-ring.ts`) is already
+   **per-daemon** (per process), so it is *already* per-thread — no change needed inside a thread.
+   [REPO: `protocol.ts`, `history-ring.ts`]
+
+⇒ In practice **one session per machine**. The process model is plural; **identity, bridge, and UI are
+singular**. #7 makes those three plural.
+
+---
+
+## 2. Identity: `threadId = CMUX_SURFACE_ID`, one machine secret
+
+### 2.1 Why `CMUX_SURFACE_ID` is the thread identity (and why it makes edge cases trivial)
+- **Stable for the pane's life**, and stable across a workspace move (the whole reason `cmux.ts`
+  clears `CMUX_WORKSPACE_ID` to resolve `--surface` globally). [REPO]
+- **Already the injection target** — `cmuxTarget(surface)` passes `["--surface", CMUX_SURFACE_ID]`
+  and it works for `send`/`send-key`/`read-screen`. So the daemon already *has* a stable per-pane id
+  in hand at `start()` (`init.surface`). No new lookup needed for identity. [REPO]
+- **Dedup-on-reconnect for free** (§7): a mis-quit-then-restart in the SAME pane gets the SAME
+  `CMUX_SURFACE_ID` → re-registers to the SAME thread slot.
+- **Fallback:** if `CMUX_SURFACE_ID` is unset (daemon launched outside cmux), fall back to a
+  per-process `randomUUID()`. It loses dedup-on-reconnect (a restart makes a *new* thread) but never
+  collides. This is a rare degraded path, not the norm.
+
+`ThreadId` is a non-secret string. It is **safe to put on the wire and in the DO** (it is the cmux
+surface UUID, not the session secret).
+
+### 2.2 One machine secret in `session.json` (replaces the per-activation secret)
+Write **once**, shared by every pane:
 
 ```jsonc
-// $CLAUDE_PLUGIN_DATA/session.json  (mode 0600)
-{
-  "secret":    "<base64url, 128-bit>",   // the one capability → one URL/QR
-  "sessionId": "<sha256(secret)[:12]>",  // non-secret label
-  "createdAt": 1750000000000,
-  "rotatedAt": 1750000000000
-}
+// $CLAUDE_PLUGIN_DATA/session.json   (mode 0600, like config.json)
+{ "secret": "<base64url 128-bit>", "sessionId": "<sha256(secret)[:12]>", "createdAt": <ms> }
 ```
 
-- **`createDaemonInit()` becomes `loadOrCreateSession()`:** read `session.json`; if absent, mint and
-  write it (atomic: write temp + rename, like `runtime.json`); return its `secret`/`sessionId`.
-  Every pane's daemon now derives the **same** URL → **same** QR. The `/voice-control:start` skill
-  shows that one stable QR regardless of which pane runs it.
-- **The QR is now per-machine, not per-activation.** Re-running start in a new pane re-shows the
-  *same* code (satisfies #2's "same URL/QR reused" cross-ref).
+- New `config.ts` helper `loadOrCreateSession(): { secret; sessionId }`:
+  - read `session.json`; if present and well-formed, return it;
+  - else mint (`randomBytes(16)`), write atomically (temp + `rename`, like other state writes), 0600,
+    return it.
+  - Mint-on-absence is **idempotent under a race** (two panes starting at once): both attempt a
+    write; `rename` makes the last writer win, and the secret is unguessable either way — but to be
+    safe, after writing, **re-read** and return the file's contents so both panes converge on the
+    *same* secret. (A lost-update here would only mean two panes briefly on two URLs until one
+    restarts; the re-read closes even that.)
+- `createDaemonInit(config)` changes: instead of `randomBytes(16)`, call `loadOrCreateSession()` and
+  use its `secret`/`sessionId`. `surface = process.env.CMUX_SURFACE_ID` is **also** captured as the
+  daemon's `threadId` (it already captures `surface`). `browserUrl` is derived from the shared secret
+  → **every pane derives the same URL → same QR**. [REPO: `createDaemonInit`]
 
-### Token expiry / rotation / revocation
-Today there is **no wall-clock expiry** (the session lives while the daemon runs; a single secret is
-the whole capability — `bridge-contract.ts`). With one long-lived machine secret reaching multiple
-instances, we want explicit controls:
+This alone delivers TODO #2 ("same URL/QR reused") — it is **Slice 1**, shippable with no multi-thread.
 
-- **Rotation:** a `/voice-control:rotate` action mints a new `secret`, rewrites `session.json`,
-  pushes a `session_rotated` control event so the DO `expireSession()`s the old key, and re-renders
-  the QR. Old phone tabs go offline; rescan the new QR. (Cheap: reuse the existing terminate path.)
-- **Expiry (optional):** add `expiresAt` to `session.json`; daemons refuse to start past it and the
-  skill prompts a rotate. Default: **no expiry** (matches today), opt-in for shared machines.
-- **Revocation = rotation** for the *whole* session; **per-thread revoke** (kick one instance) is a
-  separate, finer control covered in §8.
-
-**Trade-off acknowledged:** a stable secret is a bigger blast radius than today's ephemeral one
-(§8). Mitigated by rotation, the unguessable 128-bit secret, and the DO's hash-routing (a leaked URL
-only reaches *this* machine's threads, never another user's).
+### 2.3 `qr.txt` / `runtime.json` stop clobbering meaningfully
+Once the URL is a pure function of the shared secret, every pane writes the **same** `qr.txt` bytes —
+clobbering is a no-op. `runtime.json` still carries per-pane `port`/`pid`/`surface`, so it **does**
+clobber between panes. Fix minimally:
+- Keep a single shared `qr.txt` (machine-level; identical bytes).
+- Make `runtime.json` **per-thread**: write `runtime/<surfaceId>.json` (a directory of small files),
+  so the start skill in pane B doesn't overwrite pane A's port/pid. The start skill reads back the
+  file it just caused to be written (it already polls by the daemon it launched). `/voice-control:stop`
+  becomes "kill the daemon in THIS pane" — read `runtime/<CMUX_SURFACE_ID>.json` for the pid. (A
+  global "stop all" variant can iterate the dir.)
+- The **DO roster is the live truth** for who's connected; files are only the local launch handshake.
 
 ---
 
-## 3. Multi-thread bridge (the protocol + DO changes)
+## 3. Protocol changes (`src/shared/protocol.ts`)
 
-### 3.1 Add `threadId` to the wire (extend `src/shared/protocol.ts`)
-Introduce a thread dimension without breaking the existing event shapes:
+Add a thread dimension **without breaking any existing event shape**. The single source of truth is
+`src/shared/protocol.ts`; `web/src/lib/protocol.ts` re-exports it, so the web side picks all of this
+up for free. [REPO]
 
 ```ts
-// New: every daemon is a "thread". threadId is stable for the life of that pane's daemon.
-export type ThreadId = string; // e.g. the cmux CMUX_SURFACE_ID (stable per pane) or a uuid
+// Non-secret, stable per pane. The cmux surface UUID (CMUX_SURFACE_ID), or a per-process uuid.
+export type ThreadId = string;
 
-// Thread descriptor the daemon registers with and the DO relays to browsers.
-export type ThreadInfo = {
-  threadId: ThreadId;
-  label: string;          // human label: pane title / cwd basename / git branch (see §4)
-  cwd?: string;
-  gitBranch?: string;
-  surface?: string;       // CMUX_SURFACE_ID, for spawn/targeting + dedup
-  state: SessionRuntimeState;  // idle | working
-  listening: boolean;          // cmux pane reachable
+// What a daemon registers with; what the DO relays to browsers.
+export type ThreadLabel = {
+  // Best human name, precomputed by the daemon (see §4). e.g. "voice-control · main".
+  title: string;
+  repo?: string;       // git repo dir basename
+  branch?: string;     // git rev-parse --abbrev-ref HEAD
+  cwd?: string;        // process.cwd()
+  paneTitle?: string;  // cmux pane title IF the live CLI exposes it (§11-A); else omitted
 };
 
-// Daemon → DO, on connect / when its metadata changes.
+export type ThreadInfo = {
+  threadId: ThreadId;
+  label: ThreadLabel;
+  state: SessionRuntimeState;   // "idle" | "working"  (already exists)
+  listening: boolean;           // cmux pane reachable (already computed by the daemon)
+};
+
+// Daemon → DO (registry channel)
 export type ThreadRegister = { type: "thread_register"; info: ThreadInfo };
 export type ThreadUpdate   = { type: "thread_update"; threadId: ThreadId; patch: Partial<ThreadInfo> };
 
-// DO → browser: the current roster + lifecycle deltas.
-export type ThreadRoster   = { type: "thread_roster"; threads: ThreadInfo[] };
-export type ThreadJoined   = { type: "thread_joined"; info: ThreadInfo };
-export type ThreadLeft      = { type: "thread_left"; threadId: ThreadId; lastSeenAt: number };
+// DO → browser (registry channel)
+export type ThreadRoster = { type: "thread_roster"; threads: RosterThread[] };
+export type ThreadJoined = { type: "thread_joined"; thread: RosterThread };
+export type ThreadLeft   = { type: "thread_left"; threadId: ThreadId; lastSeenAt: number };
+
+// A roster entry the DO sends includes per-thread presence (so the phone grades offline per thread,
+// reusing #10). `connected` = a live daemon socket for this threadId right now.
+export type RosterThread = ThreadInfo & { connected: boolean; lastSeenAt: number | null };
 ```
 
-**Envelope change (the core routing move):** add an optional `threadId` to every envelope so the DO
-can route per-thread:
+**Envelope — the core routing change.** Add `threadId` and two new channels:
 
 ```ts
 export type BridgeEnvelope =
-  | { channel: "daemon";  threadId?: ThreadId; event: BrowserToDaemonEvent }   // browser → one thread
-  | { channel: "browser"; threadId: ThreadId;  event: DaemonToBrowserEvent }   // a thread → browser(s)
-  | { channel: "control"; event: BridgeControlEvent }
-  | { channel: "registry"; event: ThreadRegister | ThreadUpdate | ThreadRoster | ThreadJoined | ThreadLeft };
+  | { channel: "daemon";  threadId: ThreadId; event: BrowserToDaemonEvent }   // browser → ONE thread
+  | { channel: "browser"; threadId: ThreadId; event: DaemonToBrowserEvent }   // a thread → browser(s)
+  | { channel: "control"; event: BridgeControlEvent }                          // unchanged (terminate)
+  | { channel: "registry"; threadId?: ThreadId; event: ThreadRegister | ThreadUpdate }   // daemon → DO
+  | { channel: "roster"; event: ThreadRoster | ThreadJoined | ThreadLeft };               // DO → browser
 ```
 
-- **Browser → daemon:** the browser sets `threadId` to the **selected** thread; the DO forwards only
-  to that daemon's socket. (Back-compat: a missing `threadId` could broadcast to all — but we should
-  require it once multi-thread ships, to avoid fan-out surprises.)
-- **Daemon → browser:** each daemon **tags every outbound event with its own `threadId`**, so the
-  browser attributes transcripts/replies/status/audio to the right thread. This is the minimal,
-  surgical change — every existing `DaemonToBrowserEvent` keeps its shape; only the envelope grows a
-  tag.
-- **History/get_audio stay per-thread automatically** — they ride the daemon channel and inherit the
-  `threadId` tag, so the existing ring + reconciliation (`history-ring.ts`, `messages.ts`) work
-  unchanged *within* a thread. The browser just keeps **N message lists keyed by `threadId`**.
+- **Browser → daemon** sets `threadId` = the selected thread; the DO forwards to the one matching
+  daemon socket (never broadcast).
+- **Daemon → browser** tags **every** outbound event with its own `threadId`. Every existing
+  `DaemonToBrowserEvent` keeps its exact shape; only the envelope grows a tag. So `transcript` /
+  `claude_reply` / `tts_audio` / `history` / `error` / `session_status` are unchanged — the browser
+  just files them under `threadId`. **History/get_audio are per-thread automatically** (they ride the
+  daemon channel under one `threadId`; the per-daemon ring already exists).
+- **Reserve `threadToken?` on the daemon channel** now (unused in v1) so per-thread sub-tokens (§6
+  Option 2) can be added later without a wire break.
 
-`web/src/lib/protocol.ts` re-exports `src/shared/protocol.ts` (single source of truth — TODO #8
-note), so the web side picks these up for free.
-
-### 3.2 Durable Object changes (`worker/src/index.ts`)
-Today the DO is a near-stateless relay with a single `daemonLastSeenAt`. Extend it to a small thread
-registry:
-
-- **Attachment gains a `threadId`** for daemon sockets:
-  `serializeAttachment({ role, threadId })`. Browser sockets stay role-only.
-- **Drop `evictRole("daemon")`.** Replace with **per-thread dedup**: if a daemon reconnects with a
-  `threadId` already present (a zombie from a moved/killed pane), evict *that thread's* old socket
-  only — never sibling threads. (Keeps the existing "newer connection wins" safety, scoped to one
-  thread.)
-- **Routing:**
-  - `channel: "daemon"` from a browser with `threadId` → `send` to the **one** daemon socket whose
-    attachment `threadId` matches (not broadcast).
-  - `channel: "browser"` from a daemon → broadcast to all browser sockets (tagged with the daemon's
-    `threadId`).
-  - `channel: "registry"` (`thread_register`/`thread_update`) from a daemon → update the DO's thread
-    table in `ctx.storage`, then broadcast a `thread_roster` (or a `thread_joined`/`thread_left`
-    delta) to browsers.
-- **Presence per thread.** Replace the single `daemonLastSeenAt` with a **per-thread** `lastSeenAt`
-  map in storage (stamped on a daemon socket close, keyed by `threadId`). On a browser connect, send
-  the full roster *with* each thread's `lastSeenAt`, so the phone can render "Thread A — last active
-  3h ago" exactly like today's session-offline UX (#10), but per thread.
-- **`thread_left`** on a daemon socket close: broadcast it so the UI can grey out / remove that
-  thread (or grade it offline by `lastSeenAt`).
-
-**The DO stays content-agnostic** — it relays envelopes and keeps a tiny roster (labels + per-thread
-last-seen). It never stores conversation content (that remains the daemon ring per thread). This
-preserves the "dumb relay, privacy-light worker" posture of the current design.
+Back-compat note: this is pre-release (project memory: "no back-compat code pre-release"), so we
+**require** `threadId` once multi-thread ships rather than supporting a missing-threadId broadcast.
 
 ---
 
-## 4. Thread registry + labels (per-thread identity & status)
+## 4. Thread labels (§2's `ThreadLabel`, computed by the daemon)
 
-Each daemon, on `start()`, builds its `ThreadInfo` and sends `thread_register`:
+The user wants threads distinguishable by **git repo + branch**, **cwd**, and the **cmux pane title**.
+The daemon computes its label once at `start()` (and on change) and sends it in `thread_register` /
+`thread_update`.
 
-- **`threadId`** = `CMUX_SURFACE_ID` (stable per pane for the pane's life — the repo already relies
-  on this stability in `cmux.ts`). Fall back to a per-process uuid if unset.
-- **`label`** = best human name available, in priority order:
-  1. cmux pane/surface **title** (look up via `cmux list-surfaces --json` filtered by
-     `CMUX_SURFACE_ID` — see §6 / Sources). **[INFER — confirm the title field name in the live CLI.]**
-  2. `gitBranch` (cheap: `git -C <cwd> rev-parse --abbrev-ref HEAD`).
-  3. `basename(cwd)` (the project dir). `cwd` = `process.cwd()`.
-  - e.g. `"voice-control · main"` or `"api-server · fix/login"`.
-- **`state` / `listening`** come straight from the existing daemon signals (`emitStatus()` already
-  computes `state: working|idle` and `listening` from `cmuxHealth`). We just **tag the existing
-  status event with `threadId`** and additionally fold `state`/`listening` into `thread_update`s.
-- **Lifecycle:** `thread_register` on connect; `thread_update` on label/status change (e.g. branch
-  switch, pane move); `thread_left` is emitted by the **DO** on socket close (the daemon can't always
-  send its own goodbye — a killed pane just drops).
+Priority for `title` (the single string shown on the chip), most specific first:
+1. **`paneTitle`** if the live cmux CLI exposes a per-surface title (see §11-A). cmux's pane title
+   often describes what the thread is doing — the highest-value label. **[INFER — exact field +
+   availability unconfirmed; probe §11-A.]**
+2. **`repo · branch`** — cheap and reliable: `git -C <cwd> rev-parse --abbrev-ref HEAD` for the
+   branch, `basename(git -C <cwd> rev-parse --show-toplevel)` for the repo. e.g. `"voice-control ·
+   main"`. **This is the guaranteed-available label** and the default.
+3. **`basename(cwd)`** if not a git repo. `cwd = process.cwd()`.
 
-This **replaces** the daemon's single `emitStatus()`-to-one-browser model with a **registry the DO
-owns**, so a freshly-connected phone gets the whole roster + per-thread status at once (generalizes
-the current `sync` → `history` reconnect path to the thread level).
+Implementation notes:
+- New `src/daemon/labels.ts` (pure-ish, mirrors how `history-ring.ts`/`shouldReap` isolate logic):
+  `computeLabel(cwd, surfaceId): Promise<ThreadLabel>`. Runs `git -C` (reuse the `runCmux`
+  spawn-with-timeout ethos) and, **if §11-A passes**, one `cmux tree --json` filtered to this
+  daemon's `CMUX_SURFACE_ID` to pull `paneTitle`. Each piece is best-effort; any failure just omits
+  that field and falls through the priority list. Never blocks `start()` (compute async, send a
+  `thread_update` when ready, exactly like the cmux-health monitor pattern).
+- **cwd is NOT exposed by cmux** (confirmed: no surface-cwd getter in the CLI; issue #2761). So cwd
+  comes from `process.cwd()` of the daemon, which is the pane's cwd at launch — correct and free.
+- **Refresh:** recompute on a branch change. Cheapest reliable trigger: fold a `git rev-parse` into
+  the existing 5s `cmuxHealth` tick (it already runs) and emit a `thread_update` only on change
+  (same "emit on change" discipline as `emitStatus`). Don't add a second timer.
 
----
-
-## 5. Replace singleton state (no more clobbering)
-
-Per-thread registration over the bridge **is** the new state model — but the local files still need
-rework so two panes on one machine don't fight:
-
-- **`session.json` (machine-shared, §2):** the one secret/URL. Written once; every pane reads it.
-  Safe to share (read-mostly; mint-on-absence is idempotent with temp+rename).
-- **`active` flag → per-thread.** Today one `active` file gates the singleton daemon. With #6's
-  visible-process model, the natural per-thread activation is **"the daemon is the thread"**: a pane
-  that ran `/voice-control:start` has a live daemon registered in the DO; that registration *is* the
-  presence. If we keep a flag at all, make it **`active/<surfaceId>`** (a dir of per-pane flags) so
-  panes don't clobber. **Cleaner:** drop the flag entirely and let the daemon's DO registration be
-  the source of truth (the MCP-host poll model from today is replaced by #6's per-pane process).
-- **`runtime.json` / `qr.txt` → derived, shared.** Both are now functions of `session.json` (the URL
-  + QR are machine-level), so they no longer carry per-pane data and **can't clobber meaningfully**
-  — every pane would write the *same* bytes. Keep a single shared `qr.txt`/`runtime.json` derived
-  from `session.json`; the start skill in any pane shows the same QR. (Optionally add a
-  `threads.json` snapshot for the status skill, but the DO roster is the live truth.)
-- **Clean removal when a pane dies.** The DO emits `thread_left` on the daemon socket close; the
-  phone removes/greys the thread. No file cleanup is needed for a dead pane because per-pane state no
-  longer lives in shared files — it lives in the (ephemeral) DO roster + that pane's own daemon
-  process.
-
-**Dependency call-out:** this is cleanest **if each thread is its own process (#6)**. Under today's
-single MCP host, one host can't cleanly run N daemons for N panes (the MCP server is per-Claude-
-instance, so there's actually one MCP host *per pane* already — good — but the shared `active`
-file and singleton daemon-per-host assumptions in `reconcile.ts`/`mcp-server.ts` need the per-pane
-rework above). See §9.
+`state` / `listening` already exist in `emitStatus()`; the daemon now **also** folds them into
+`thread_update`s (or the DO derives `state`/`listening` for the roster from the last `session_status`
+it relayed for that thread — simpler: let the daemon include them in `thread_update`, keep the DO
+dumb).
 
 ---
 
-## 6. Spawn a thread (including by voice)
+## 5. Durable Object: 2-role bridge → N-daemon thread registry (`worker/src/index.ts`)
 
-Goal: from pane A (or from the phone, by voice), open a **new** cmux pane, launch Claude there
+Today the DO is a near-stateless relay with one `daemonLastSeenAt`. Extend it to a small registry.
+**Keep it content-agnostic** — it never stores conversation content (that stays in each daemon's
+ring); it stores only a tiny roster (labels + per-thread last-seen).
+
+Changes:
+
+1. **Attachment gains `threadId`** for daemon sockets:
+   `serializeAttachment({ role: "daemon", threadId })`. Browser sockets stay `{ role: "browser" }`.
+2. **Drop `evictRole("daemon")`.** Replace with **per-thread dedup**: on a daemon connect, if a
+   socket with the **same `threadId`** is already attached (a zombie from a moved/re-quit pane, or a
+   reconnect racing the old close), evict **only that** socket (1012). Sibling threads are untouched.
+   This preserves "newer connection wins," scoped to one thread.
+3. **Routing in `webSocketMessage`:**
+   - `channel: "daemon"` from a **browser** (carries `threadId`) → `send` to the **one** daemon
+     socket whose attachment `threadId` matches. If none match → reply a `browser`-channel `error`
+     (tagged with that `threadId`): "That thread is offline." (per §7; never silently reroute).
+   - `channel: "browser"` from a **daemon** → broadcast to all browser sockets, **with the daemon's
+     `threadId`** stamped onto the envelope by the DO (the DO knows it from the attachment, so the
+     daemon doesn't even have to set it — but daemon sets it too; DO trusts the attachment).
+   - `channel: "registry"` (`thread_register` / `thread_update`) from a **daemon** → update
+     `ctx.storage` roster, then broadcast a `roster`-channel `thread_joined` (new) or `thread_update`
+     fold (existing) to browsers.
+   - `channel: "control"` `terminate` from a daemon → **per-thread** now (see §6): remove that
+     thread; only tear the whole session down when it was the **last** thread.
+4. **Per-thread presence.** Replace the single `DAEMON_LAST_SEEN_KEY` with a roster map in storage:
+   `threadId → { label, lastSeenAt }`. On a daemon socket **close/error**, stamp that thread's
+   `lastSeenAt = Date.now()` and broadcast `thread_left`. On a **browser** connect, send the full
+   `thread_roster` (every thread with `connected` computed live from `getWebSockets()` + its stored
+   `lastSeenAt`), so a fresh phone renders "Thread A · last active 3h ago" per thread (generalizes the
+   current single-session `sync`→`history` + `bridge_presence` reconnect path to N threads).
+5. **`bridge_presence` stays** for the browser's own socket health, but its `daemon*` fields are
+   superseded per-thread by the roster. Simplest: keep `bridge_presence` carrying only
+   `browserConnected` (the phone's own liveness); move all daemon presence into the roster.
+
+Storage size is trivial (a handful of small JSON entries); confirm we never write conversation
+content (we don't — the ring is daemon-side).
+
+---
+
+## 6. Security — DECIDED
+
+The user said "forget tokens for now, you research it" and asked us to **weigh stable-secret +
+revoke-on-exit + rate-limit (simpler) vs rotating sub-tokens** and **pick**. We pick the first.
+
+### 6.1 The honest threat model (what actually changes vs today)
+- **Brute-forcing the secret is a non-threat, quantified.** The URL carries a 128-bit secret; the
+  worker routes via `idFromName(sha256(secret))`. A wrong guess lands on a **different, empty DO** —
+  never the victim's session (sha256 is preimage-resistant; reaching the right DO already *is* proof
+  of knowing the secret). To hit the live session by guessing you must invert sha256 / find a 128-bit
+  preimage: ~2^127 expected tries. At even 10^6 guesses/sec that is ~10^25 years. **Guessing is not
+  the risk.** [REPO: `worker/index.ts` routing; DOC: idFromName]
+- **The real risk is a *leaked* URL that never dies.** Today's per-activation secret dies with the
+  daemon (tiny blast radius). #7's stable secret authorizes typing into **every** Claude pane on the
+  machine and, crucially, would otherwise **outlive every session** — a screenshot/QR shared once
+  could reconnect tomorrow. **This is the thing to fix**, and it is fixed by revoke-on-exit, not by
+  tokens.
+
+### 6.2 The decision: stable secret + revoke-on-exit + rate-limit (NOT rotating sub-tokens)
+1. **One stable machine secret** (§2.2) — one URL/QR, zero re-scanning for an active user.
+2. **Revoke-on-exit (the core safety property).** The session secret is only *live* while at least
+   one daemon is connected. Concretely, in the DO:
+   - When the **last** thread leaves (daemon socket closes/terminates and the roster becomes empty),
+     start a **grace timer** (e.g. 2–5 min via `ctx.storage.setAlarm()`); if no daemon reconnects
+     before it fires, **`expireSession()`** (close any sockets 1008 + `deleteAll()`). A grace window
+     covers laptop-sleep / Wi-Fi flap without nuking the session.
+   - A leaked URL opened **after** the session went empty hits a DO whose storage is wiped → it can
+     observe nothing and address no pane. The URL is **dead** until the user starts a daemon again.
+   - This makes "one URL forever" false in the dangerous sense: the URL is only useful while *you*
+     have a live pane. Exactly the user's requirement.
+   - Note the **secret string itself doesn't change** (so no re-scan), but its *session* is gone; a
+     fresh `/voice-control:start` re-creates the session under the same secret. To kill a leak while
+     panes are live, `/voice-control:stop` them — the session dies with the last daemon.
+3. **Worker rate-limit gateway (anti-guessing + anti-DoS).** Add Cloudflare's native **Rate Limiting
+   binding** in `wrangler.toml`:
+
+   ```toml
+   [[ratelimits]]
+   name = "WS_CONNECT"
+   namespace_id = "1001"
+   simple = { limit = 60, period = 60 }   # period must be 10 or 60
+   ```
+
+   In the **top-level Worker `fetch`** (not the DO — the binding is documented for the Worker fetch
+   handler, and we want to reject *before* spawning/billing a DO), before
+   `env.VOICE_SESSIONS.get(...)`:
+
+   ```ts
+   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+   const { success } = await env.WS_CONNECT.limit({ key: ip });
+   if (!success) return new Response("Too Many Requests", { status: 429 });
+   ```
+
+   **What this actually buys (framed honestly):** since a wrong secret already lands on an empty DO,
+   rate-limiting does **not** protect the session (it can't be reached by guessing anyway). It
+   protects the **worker/DO platform**: it caps an attacker spraying `/ws/<random>` to spin up DOs /
+   burn requests, and bounds connection-attempt cost. It is cheap insurance against abuse/billing,
+   not the capability gate. The binding is **best-effort / per-edge-location / eventually consistent**
+   [DOC] — fine for abuse-bounding, and we explicitly do **not** rely on it for correctness. Turnstile
+   is rejected: it needs an interactive challenge and would break the WS handshake + the daemon's
+   non-browser `ws` client. Cloudflare WAF **Rate Limiting Rules** (dashboard) are an alternative but
+   the binding keeps the limit in code/review with the rest of the worker.
+
+### 6.3 Why NOT rotating sub-tokens (in v1)
+A stable QR-secret + a rotating short-lived WS sub-token (daemon mints, browser presents) is the
+defense-in-depth option. We **defer** it because:
+- It adds a token-issuance + refresh dance (daemon→browser handoff, expiry, clock) to a **single-user
+  remote** whose real risk (leaked URL) is already closed by revoke-on-exit.
+- It buys "kick one thread without rotating the session" — a niche need we don't have evidence for
+  yet.
+- We **don't burn the bridge to it**: `threadToken?` is reserved on the daemon-channel envelope (§3),
+  so v2 can add per-thread sub-tokens with no wire break.
+
+### 6.4 Rotation — DROPPED (revoke-on-exit + `/stop` is enough)
+Earlier drafts shipped a `/voice-control:rotate` skill to mint a new secret on demand. **Dropped per
+user feedback** — nobody hand-rotates a hash, and it's redundant: revoke-on-exit already kills a
+leaked URL the moment the last pane disconnects, and `/voice-control:stop` triggers that on demand.
+So "kill a leak" = stop your panes; there is no dedicated rotate command. (`threadToken?` stays
+reserved on the wire — §6.3 — for a future per-thread sub-token if one is ever needed.)
+
+### 6.5 Keep today's hard protections (unchanged)
+- Hash-routed DO (`idFromName(sha256(secret))`) — a leaked/guessed URL only ever reaches *this*
+  machine's DO. [REPO]
+- **Origin check** on browser sockets (only the bridge origin may open a browser WS); the daemon
+  (Node `ws`) sends no Origin. [REPO]
+- Secret never on the wire as a value — URL path only; the daemon hashes it. [REPO]
+- `session.json` is **0600** like `config.json` (config.ts already enforces 0600 on config). Document
+  the trade-off plainly: "this one URL drives every Claude pane on the machine; it goes dead when no
+  pane is connected; /stop your panes to kill a live leak."
+
+---
+
+## 7. Edge cases — handled reliably but simply (via `threadId = CMUX_SURFACE_ID`)
+
+| Case | Behavior | Mechanism |
+|---|---|---|
+| **Pane closed / Claude quit** | Thread shows offline, then is removed after a grace. | Daemon socket drops → DO stamps `lastSeenAt`, broadcasts `thread_left`; orphan self-reap (`ppid===1`, #6) also stops a zombie daemon so it can't linger registered. UI greys the chip (reuse #10 grading), removes after grace. |
+| **Mis-quit then restart in the SAME pane** | Re-registers to the **same** thread slot; the chip never duplicates. | Same `CMUX_SURFACE_ID` → same `threadId` → DO per-thread dedup evicts the (already-dead) old socket and the new one takes the slot. |
+| **History after a restart** | Fresh ring (empty), reconciled cleanly. | The ring lives in the **daemon process**; a new process = a new empty ring. On reconnect the phone's `sync` for that thread returns the (empty) history; the phone's existing reconcile-by-seq keeps prior on-screen messages but no audio is fetchable (the old ring is gone). This is acceptable and matches today's single-session restart behavior. |
+| **`/clear` or `/compact` → new topic, SAME pane** | The thread's voice history resets so it doesn't show the old topic. | See §7.1. |
+
+### 7.1 `/clear` and `/compact`: reset the ring via the `SessionStart` hook
+A `/clear` (or `/compact`) starts a brand-new topic in the **same** pane (same `CMUX_SURFACE_ID`,
+same daemon process), so the daemon's ring would otherwise still show the old conversation.
+
+**Recommendation: use the Claude Code `SessionStart` hook with `source: "clear" | "compact"` to reset
+the daemon's ring.** [DOC — confirmed: `SessionStart` fires with `source` ∈ `startup | resume | clear
+| compact`; payload has `session_id`, `source`, `cwd`, `hook_event_name`.]
+
+Concretely:
+- Add a tiny `hooks/session-reset.mjs` registered for `SessionStart`. When `source` is `clear` or
+  `compact`, POST to the daemon's local hook listener (the same `127.0.0.1:<port>` the Stop hook
+  already uses, port read from this pane's `runtime/<surfaceId>.json`) at a **new** route, e.g.
+  `POST /reset`.
+- The daemon handles `/reset` by clearing its `HistoryRing` (add a `ring.clear()` method) and
+  emitting a `thread_update` / a small `history` (now empty) so the phone drops the old thread view.
+- This reuses the **exact** transport the reply path already uses (hook → HTTP POST → daemon), so it's
+  a few lines, no new infra. [REPO: `hooks/stop-notify.mjs`, `voice-daemon.ts#startHookListener`]
+
+**Weighed against doing nothing:** doing nothing leaves stale topic history on the phone after a
+`/clear`, which is confusing precisely when the user wanted a clean slate. The hook is the clean,
+documented signal and is cheap. **Don't overcomplicate it** — only `clear`/`compact` reset; `resume`
+keeps history; `startup` is a fresh process anyway. (We do **not** try to diff transcripts or detect
+topic changes heuristically — the hook is the reliable signal.)
+
+---
+
+## 8. Web UI — the thread switcher (reuse the white pill; CSS swipe)
+
+The app is `App.tsx` (one `messages: Message[]`) + `Hero` + `MessageThread` + `MiniControls` +
+`TopBar` (with the `FEATURES.threadTitle` **white pill** scaffolded). `useBridge`/`usePlayback`/
+`useRecorder` are the hooks; `deriveStatus` (#10) grades offline by elapsed time. [REPO]
+
+### 8.1 State: per-`threadId`
+- `App.tsx` holds `threads: RosterThread[]` (+ `activeThreadId`) and a per-thread store:
+  `messagesByThread: Map<ThreadId, Message[]>`, `unreadByThread: Map<ThreadId, number>`. A small
+  reducer (or a `useThreads` hook) keyed by `threadId` is cleaner than N parallel `useState`s.
+- `useBridge` becomes **thread-aware**: it routes inbound events to `onEvent(threadId, event)` (from
+  the envelope tag), exposes the **roster** (`thread_roster`/`thread_joined`/`thread_left`), and
+  `sendDaemon(threadId, command)` stamps the envelope `threadId`. It still multiplexes **one** browser
+  socket for all threads (good for iOS — see §8.4).
+- The **active thread** drives the hero (`state`/`listening`/`currentTask`) and the `MessageThread`
+  (its `messagesByThread.get(activeThreadId)`). `deriveStatus` runs **per active thread** using that
+  thread's roster `connected` + `lastSeenAt` — #10 reused verbatim, just fed per-thread inputs.
+- `usePlayback` keys playback by `threadId` (or is instantiated per active thread) so switching
+  threads doesn't bleed audio.
+
+### 8.2 The switcher (white pill → dropdown)
+- Turn on `FEATURES.threadTitle`: the **white pill** in `TopBar` shows the active thread's `label.title`
+  + a status dot (idle/working/offline, from the active thread's `deriveStatus`) + the existing
+  `ChevronDown`.
+- Tapping the pill opens a **dropdown sheet** (shadcn/ui `DropdownMenu` or a simple popover) listing
+  every roster thread: label, per-thread status dot, **unread badge** (count from `unreadByThread`).
+  Tapping a row sets `activeThreadId` and (for swipe coherence) scrolls the pager to it.
+- **Empty/one-thread state:** with a single thread, show the label in the pill but no dropdown affordance
+  (or a disabled chevron) — identical to today's single-screen UX. The switcher appears only when a
+  2nd thread joins (**progressive disclosure**; reuse the `FEATURES` gating so it's off until earned).
+
+### 8.3 Swipe left/right (CSS scroll-snap, no library)
+- Wrap the per-thread panes in a horizontal **scroll-snap** pager:
+  `overflow-x-auto snap-x snap-mandatory` with each thread pane `snap-start w-full shrink-0`. Swiping
+  pages between threads natively (momentum + snap), zero JS gesture code, zero ponytail. [Native CSS;
+  prefer over a swipe lib per the brief.]
+- Sync the active thread both ways: a scroll-snap settle updates `activeThreadId` (via an
+  `IntersectionObserver` per pane, the same primitive `App.tsx` already uses for the condensed-bar
+  sentinel); tapping a dropdown row scrolls the pager to that pane (`scrollIntoView({ inline })`).
+- **Caveat to verify in-app:** the existing vertical scroll (message thread) lives *inside* each
+  horizontal page, so we need `touch-action`/overscroll tuning so vertical reading doesn't trigger a
+  horizontal page flip and vice-versa. This is a CSS-tuning task, not an architecture risk; flagged
+  for live UI verification (§11-F).
+
+### 8.4 Unread, presence, and iOS
+- A reply on a **background** thread increments its `unreadByThread` badge (+ optional subtle flash
+  "Claude · api-server replied", reusing `useFlash`). Switching to it clears the badge.
+- **Offline threads** (roster `connected:false` / stale `lastSeenAt`) grey their chip and disable
+  their mic, reusing #10 per-thread.
+- **iOS:** still **one** browser WebSocket multiplexing all threads (no per-thread sockets), so the
+  reconnect-storm behavior is unchanged from today. On reconnect, request the **roster** first, then
+  `sync` **only the active thread's** history (lazy-load other threads' history on first view) to
+  avoid pulling N rings at once on cellular.
+
+### 8.5 Spawn affordance
+- A `+` action (in the dropdown footer, and/or the scaffolded `BottomTabBar` "New" tab) → optional cwd
+  input → `sendSpawn({ cwd })` (§9). By voice it's hands-free (§9.2). With a single connected daemon,
+  the spawn event routes to it; with several, route to the **active** thread's daemon (it's the one
+  the user is "in").
+
+---
+
+## 9. Spawn a thread by voice (v1 target)
+
+Goal: from the phone (by voice) or the `+` affordance, open a **new** cmux pane, launch Claude there
 running `/voice-control:start`, so it joins the **same** session as a new thread — **same QR**.
 
-### cmux CLI mechanism (CLI only — never touch system config)
-From cmux docs (Sources): cmux exposes **`cmux new-split <direction>`** (left|right|up|down) to
-create a split pane, and per-pane env (`CMUX_SURFACE_ID`, `CMUX_SOCKET_PATH`). The daemon already
-wraps the CLI in `cmux.ts` (with the critical `CMUX_WORKSPACE_ID`-cleared, `--socket`, global-surface
-conventions). Extend it with:
+### 9.1 The cmux mechanism — verified
+`cmux new-workspace --cwd <dir> --command "<cmd>" --focus true` opens a workspace, sets its cwd, runs
+`<cmd>`, and prints `OK workspace:<N>` on stdout (deterministic — `parseWorkspaceRef`, no tree diff).
+`--focus true` is REQUIRED: cmux does NOT start the `--command` of an unfocused workspace (verified).
+Focus-at-creation suffices; the process keeps running after the user's focus returns to their pane.
 
-```ts
-// new helper in cmux.ts — open a split and run a command in it.
-// 1) create the split (returns/locates the new surface)
-await runCmux(["new-split", direction]);             // direction: "right" | "down" | ...
-// 2) resolve the new surface id (list-surfaces --json, pick the newest / focused)
-// 3) type the launch command into it and submit
-await runCmux(["send", "--surface", newSurface, "--", `claude` /* + args */]);
-await runCmux(["send-key", "--surface", newSurface, "enter"]);
-// 4) once Claude is up, type the activation:
-await runCmux(["send", "--surface", newSurface, "--", "/voice-control:start"]);
-await runCmux(["send-key", "--surface", newSurface, "enter"]);
+`<cmd>` is built by `buildSpawnCommand()` in `voice-daemon.ts`:
+
+```sh
+claude [--plugin-dir '<root>'] [--permission-mode <live mode>] /voice-control:start
 ```
 
-- **The new daemon reads the same `session.json`** → derives the same secret/URL → connects to the
-  **same DO** → registers as a new thread. **The QR never changes** (re-show it for confirmation).
-- **By voice:** add a browser→daemon event `spawn_thread { direction?, cwd? }`. The phone sends it to
-  *any* live thread (or a dedicated "control" thread); that daemon runs the cmux spawn sequence
-  above. Add to `BrowserToDaemonEvent`. The voice phrasing ("open a new session in ~/api") maps to
-  `spawn_thread { cwd }`.
+- `--plugin-dir <root>` loads voice-control into the fresh `claude` — added **only** for a dev
+  (`--plugin-dir`/`-inline`) load, detected via `stateDir()` ending `-inline`; an installed plugin is
+  global to every `claude`, so the flag is omitted. `<root>` is derived from the daemon's own module
+  path (`<root>/dist/daemon/standalone.js`).
+- `/voice-control:start` is a **positional slash command — it auto-submits and runs on startup**
+  (verified end-to-end: a spawned daemon launched + joined). No keystroke injection, no `read-screen`
+  polling, no fallback path.
+- **`--permission-mode <live mode>`:** the spawn **mirrors the spawning session's live permission
+  mode** (forwarded each turn by the Stop hook as `permission_mode`) so the new session has the SAME
+  permissions the user already granted — never silently elevated, never silently dropped. A child
+  `claude` does NOT inherit the mode via env/process tree and no env var exposes it, so we propagate
+  it explicitly; the value is allowlisted before interpolation. Omitted until a turn has reported a
+  mode, in which case the spawn falls back to the user's own default. The workspace uses the spawning
+  pane's cwd, a dir the user already trusts, so there is no first-run trust gate (a phone can't
+  approve one anyway).
+- The new daemon reads the same `session.json` → same secret/URL → joins the same DO as a new thread.
+  **The QR never changes.**
 
-### Open questions / risks for spawn [INFER — verify live]
-- **`new-split` vs new window/workspace.** cmux docs show `new-split`; whether there's a "new window"
-  / "new workspace + surface" command, and how to **target a specific cwd** when launching, needs
-  live confirmation (`cmux --help`, `cmux new-split --help`). The launch command may need a
-  `cd <cwd> && claude` prefix typed into the new pane.
-- **Resolving the *new* surface id** deterministically (vs racing focus) — likely diff
-  `list-surfaces --json` before/after, or read the newly-focused surface. Confirm there's no
-  one-shot "create-and-return-id".
-- **Timing:** the new Claude needs to be *ready* before `/voice-control:start` is typed. Use a
-  `read-screen` poll for the prompt, or a fixed delay + retry (mirror the daemon's existing
-  optimistic/retry ethos). This is a UX-reliability detail, not a blocker.
-- **Trust:** the spawned daemon is inside the *new* pane's cmux tree, so it has cmux trust for *its*
-  pane — consistent with the per-thread model. Spawning a pane is a cmux CLI op from a trusted
-  in-tree process; it does not require touching config.
+### 9.2 The `spawn_thread` event + voice mapping
+- `BrowserToDaemonEvent` carries `{ type: "spawn_thread"; cwd? }` (no direction — a workspace has no
+  split axis, see the §9.1 correction).
+- **Which daemon executes it?** The browser sends it to the **active** thread's daemon (it's trusted
+  in-tree and can run cmux CLI for *its* pane's cmux instance). That daemon runs `spawnWorkspace(...)`.
+  If no thread is active/connected, the phone surfaces "Start voice in a pane first" (you need at least
+  one live daemon to spawn from).
+- **Voice phrasing** maps in the daemon's existing transcript path — but spawning is an *action*, not
+  a prompt to inject. Simplest reliable v1: the `+` affordance / a dedicated voice intent. If we want
+  pure-voice ("open a new session in ~/api"), the phone can detect a small command grammar
+  client-side and emit `spawn_thread { cwd }` instead of `submit_audio`. Keep the grammar tiny and
+  explicit; do **not** try to LLM-parse arbitrary speech into shell in v1.
 
----
-
-## 7. Web UI — thread switcher (depends on #3, shipped)
-
-The app already has hero + iMessage-style thread + sticky mini-controls (PRs #4–#8). Multi-thread
-adds a **conversation switcher** on top — the natural iMessage metaphor (a list of conversations →
-tap one → see its thread).
-
-Sketch (mobile-first, one-hand reach):
-
-- **Thread list / switcher.** A horizontally-scrollable **segmented pill bar** (or a tap-to-open
-  conversation sheet) just under the `TopBar`, one chip per thread:
-  - chip shows the **label** (`voice-control · main`), a **status dot** (idle = calm, working =
-    pulsing Claude-brand, offline = grey), and an **unread badge** (count of replies arrived on a
-    non-active thread).
-  - the **active** chip is highlighted; tapping a chip switches the hero + message thread to it.
-- **Hero + thread scope to the active thread.** `App.tsx` today holds one `messages: Message[]`.
-  Make it **`Map<ThreadId, Message[]>`** (or a `messagesByThread` reducer); the hero reads the active
-  thread's `state`/`listening`; the message thread renders the active thread's list. Recording/
-  submit send with the **active `threadId`**.
-- **Unread + presence.** A reply arriving on a background thread increments its badge + can fire a
-  subtle flash/toast ("Claude · api-server replied"). Offline threads (from `thread_left` /
-  stale `lastSeenAt`) grey out and disable their mic, reusing #10's session-offline grading
-  **per thread**.
-- **Spawn affordance (ties to §6).** A `+` chip at the end of the switcher → "New session" → optional
-  cwd input → sends `spawn_thread`. By voice, the same is reachable hands-free.
-- **Empty/one-thread state:** with a single thread, the switcher can hide (or show one chip), so the
-  UX is identical to today until a second thread joins — **graceful progressive disclosure**.
-
-This is the only part that hard-depends on #3 being done (it is, ~90%). It also leans on the existing
-`usePlayback`/`useRecorder`/`useBridge` hooks, which become **thread-aware** (keyed by `threadId`).
+### 9.3 v1 status — SHIPPED
+Both former gates resolved (verified end-to-end): (B) **no surface-id resolution needed** —
+`new-workspace --command "claude … /voice-control:start"` launches the daemon, which self-registers
+its own `threadId`, so the spawner never has to find the new pane; (C) **the slash command auto-runs**
+— a positional `/voice-control:start` submits on startup with no keystroke timing. `--focus true` is
+required (cmux won't start an unfocused workspace's command). No keystroke injection, no polling.
 
 ---
 
-## 8. Security — one token reaching multiple instances
+## 10. Incremental slices (each ships value; gating noted)
 
-This is the part to get right; it's the cost of the "one URL" convenience.
+| Slice | Ships | Touches | Gated on a live probe? |
+|---|---|---|---|
+| **1. Stable machine session (one URL/QR)** | Re-running start in any pane shows the **same** QR; a refreshed phone keeps the same URL. No multi-thread yet. | `config.ts` (`loadOrCreateSession`, `session.json`, per-thread `runtime/<id>.json`), `voice-daemon.ts` (`createDaemonInit`), start/stop skills. | **No** — buildable now. |
+| **2. `threadId` on the wire + DO N-daemon routing** | Phone receives from multiple panes (UI may merge at first). Drop `evictRole("daemon")`; per-thread dedup; route browser→one-thread, tag daemon→browser. | `protocol.ts`, `worker/src/index.ts`, `voice-daemon.ts` (tag events, send `thread_register`). | **No** — buildable now. |
+| **3. Roster + labels + per-thread presence** | Phone has data to list/switch threads; per-thread offline grading. Daemon computes label (repo·branch·cwd; paneTitle if available). | DO roster + `thread_left`/`thread_roster`, `src/daemon/labels.ts`, `protocol.ts`. | **Half** — repo·branch·cwd: no. **paneTitle: gated on §11-A.** Ship label without paneTitle if A fails. |
+| **4. Web thread switcher** | Full multi-thread UX: white-pill dropdown + CSS swipe, per-thread state, unread badges, per-thread #10 grading. | `App.tsx` (`messagesByThread`), `useBridge`/`usePlayback` keyed by thread, `TopBar` pill (`FEATURES.threadTitle`), new `ThreadSwitcher`/pager, reuse `BottomTabBar`. | **No** (arch) — buildable now; swipe CSS tuning verified live (§11-F). |
+| **5. Spawn-a-thread (incl. voice)** | Hands-free "open another session." `spawn_thread` event + `cmux.ts` `spawnWorkspace`, `+` affordance, voice grammar. | `cmux.ts`, `protocol.ts`, `voice-daemon.ts`, `web`. | **Shipped** — §11-B/§11-C resolved (no surface-id resolution needed; positional slash command auto-runs). |
+| **6. Security hardening** | Revoke-on-exit (DO alarm grace), worker rate-limit binding, reserve `threadToken?`, docs of the one-URL trade-off. (Manual rotate dropped — revoke-on-exit + `/stop` covers it.) | `worker/index.ts` (alarm, ratelimit), `wrangler.toml`, `config.ts`, `docs/configuration.md`. | **No** — buildable now (rate-limit binding is a config + 3-line check). |
 
-### The shift
-Today: an **ephemeral** secret, fresh per activation, dies with the daemon — tiny blast radius. #7:
-**one stable secret** that authorizes **typing into every Claude instance on the machine** (each
-daemon `cmux send`s into a real pane). A leaked URL is materially more dangerous: it can drive *all*
-your sessions, not one ephemeral one.
-
-### Options
-1. **One session token, per-thread routing (recommended for v1).** Keep one secret (one URL/QR);
-   the DO routes per `threadId`. Simpler UX, single QR. Blast radius = all threads. Mitigate with
-   rotation (§2), short-ish optional expiry on shared machines, and **revoke-on-exit** (a pane that
-   ends removes its thread; the DO refuses re-registration of a stale `threadId` until a live daemon
-   claims it).
-2. **Per-thread sub-tokens (defense-in-depth, v2).** One session secret routes/authorizes *joining*;
-   each thread additionally carries a **per-thread capability** the daemon mints and the browser must
-   present to send to that thread. Lets you **revoke a single thread** without rotating the whole
-   session (kick one instance). More moving parts; defer unless a real multi-user/shared-machine
-   need appears.
-3. **One token, read-vs-write split.** A leaked URL could be limited to *observing* threads unless it
-   also holds a write capability — overkill for a single-user remote; note as a possibility.
-
-### Recommendation
-Ship **Option 1** (one session token + per-thread routing) with **rotation + per-thread
-revoke-on-exit**, and design the protocol so **Option 2's per-thread sub-tokens can be added later**
-without a wire break (reserve a `threadToken?` field on the daemon-channel envelope now). Keep the
-existing hard protections that already make this safe-ish:
-- **Hash-routed DO** (`idFromName(sha256(secret))`) — a leaked/guessed URL only ever reaches *this*
-  machine's DO, never another user's. Preimage-resistance is the capability gate (`worker/index.ts`).
-- **Origin check** on browser sockets (only the bridge origin may open a browser WS).
-- **Secret never on the wire as a value** — it's in the URL path only; the daemon hashes it.
-
-### Concrete security to-dos
-- **Revoke-on-exit:** when a thread leaves, the DO clears its routing entry; a stale `threadId` from
-  a dropped phone can't address a dead pane.
-- **Rotation UX:** `/voice-control:rotate` → new QR; old tabs evicted (1008).
-- **Document the trade-off** plainly in `docs/configuration.md` (one URL = controls all your panes;
-  rotate if it leaks; lock `session.json` 0600 like config).
+Slices 1–4 deliver the full visible product without any cmux unknown. 5 is the power-user layer (its
+two probes are the only true external gates). 6 is the safety layer and can land in parallel.
+**Recommended order:** 1 → 2 → 3 → 4 (the payoff), then 5 and 6 in either order. The user wants spawn
+in v1 → run §11-B/§11-C **early** (alongside slice 1) so slice 5 isn't surprised.
 
 ---
 
-## 9. Dependency on #6 (visible/killable process)
+## 11. Open questions / live-verification list (each with a copy-pasteable probe)
 
-#7 is **much cleaner if each thread is its own visible/killable process** (#6). Why:
+These are facts I could **not** confirm from docs (the two cmux doc sites disagree, and titles/cwd are
+the subject of open cmux issues). Run each in the **user's real cmux Claude pane** with the
+voice-control plugin loaded. Use `env -u CMUX_WORKSPACE_ID` and `--socket "$CMUX_SOCKET_PATH"` exactly
+as `cmux.ts` does (global surface resolution).
 
-- **Per-thread lifecycle = per-process lifecycle.** If a thread is a background-Bash-hosted daemon
-  (#6 Option C) or even just an MCP-host daemon **per pane** (which already exists — one MCP host per
-  Claude instance), then "thread joined/left" maps 1:1 to "process up/down," and **killing the
-  visible task ends exactly that thread** — no shared-flag gymnastics.
-- **No singleton clobber.** #6's per-pane process model is what makes §5's "drop the shared `active`
-  flag" safe — each pane's process owns its own registration, not a shared file.
-- **Verdict from #6 feeds in:** if #6 lands as **Option B** (daemon stays on the MCP host, a
-  background-Bash chip is just the indicator), #7 still works — there's **one MCP host per Claude
-  instance already**, so N panes = N hosts = N daemons = N threads, and the per-thread registration
-  + DO roster do the rest. If #6 lands as **Option C** (standalone background-Bash daemon), #7 is
-  even cleaner (the visible task *is* the thread). **Either #6 outcome supports #7** — #7 does not
-  block on Option C specifically; it benefits from the per-pane-process clarity #6 brings.
+**A. Does the cmux CLI expose a per-surface TITLE, and what is the field? (labels — slice 3)**
+Two sources conflict: one shows `tree --json` surfaces having a `title` field; cmux issue #2761 says
+titles aren't exposed via CLI. Confirm which is true on the user's build.
+```sh
+env -u CMUX_WORKSPACE_ID cmux --socket "$CMUX_SOCKET_PATH" tree --all --json \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=JSON.parse(s);console.log(JSON.stringify(t,null,2))})' \
+  | grep -iE "\"(title|ref|cwd|tty|focused|surface)\"" | head -40
+echo "--- my surface id: $CMUX_SURFACE_ID ---"
+# Does any surface entry's ref/uuid map to $CMUX_SURFACE_ID, and does it carry a non-empty title?
+```
+PASS = a surface entry correlates to `$CMUX_SURFACE_ID` **and** has a usable `title`. If FAIL, ship
+labels as `repo · branch` only.
 
-**Net:** sequence #6 first (it's smaller and de-risks the process model), then #7. But #7's core
-(machine secret + DO roster + protocol `threadId`) can be built against today's one-MCP-host-per-pane
-reality without waiting for #6 Option C.
+**B. After creating a pane, how do we learn the NEW surface id deterministically? (spawn — slice 5)**
+```sh
+before=$(env -u CMUX_WORKSPACE_ID cmux --socket "$CMUX_SOCKET_PATH" tree --all --json)
+out=$(env -u CMUX_WORKSPACE_ID cmux --socket "$CMUX_SOCKET_PATH" new-pane --direction right --cwd "$HOME" --command "echo spawned"); echo "new-pane stdout: <<<$out>>>"
+after=$(env -u CMUX_WORKSPACE_ID cmux --socket "$CMUX_SOCKET_PATH" tree --all --json)
+echo "--- diff before/after to find the new surface ref ---"
+diff <(echo "$before") <(echo "$after")
+```
+PASS-fast = `new-pane` prints the new surface ref on stdout (use it directly). PASS-fallback = the
+`tree --json` diff yields exactly one new surface ref (use the diff). FAIL = neither is deterministic
+→ spawn needs a different primitive; keep spawn out of v1.
+
+**C. Can `claude` auto-run a slash command / initial prompt on launch? (spawn — slice 5)**
+Avoids timing the `/voice-control:start` keystroke.
+```sh
+claude --help 2>&1 | grep -iE "prompt|command|--append|initial|/|slash" | head -30
+```
+PASS = a flag launches Claude already running an initial prompt or slash command → use
+`new-pane --command "claude <that-flag> /voice-control:start"`. FAIL = type the slash command into the
+new surface after polling `read-screen` for the prompt (still works; just less clean).
+
+**D. Confirm `new-pane --cwd` actually sets the pane's working directory.** (We rely on the daemon's
+`process.cwd()` for the cwd label; verify the spawned pane lands in `--cwd`.)
+```sh
+env -u CMUX_WORKSPACE_ID cmux --socket "$CMUX_SOCKET_PATH" new-pane --direction down --cwd /tmp --command "pwd"
+# read the new surface and confirm it printed /tmp
+```
+
+**E. Confirm `CMUX_SURFACE_ID` is a valid global `--surface` ref for `send`/`read-screen`.** (We
+already rely on this in `cmux.ts`; reconfirm under the multi-pane scenario that two panes' surface ids
+both resolve globally with `CMUX_WORKSPACE_ID` cleared.)
+```sh
+env -u CMUX_WORKSPACE_ID cmux --socket "$CMUX_SOCKET_PATH" read-screen --surface "$CMUX_SURFACE_ID" --lines 1 && echo OK
+```
+
+**F. (In-app, not cmux) Swipe vs. vertical-scroll interaction.** Verify CSS scroll-snap horizontal
+paging doesn't fight the vertical message-thread scroll on iOS Safari (touch-action / overscroll
+tuning). Verify on a real device once slice 4 has two threads.
+
+**G. (Optional) DO `setAlarm` for revoke-on-exit grace.** Confirm the current `new_sqlite_classes` DO
+supports `ctx.storage.setAlarm()` for the grace timer (it does on SQLite-backed DOs); otherwise use a
+`lastEmptyAt` timestamp checked on the next connect.
 
 ---
 
-## 10. Incremental implementation plan (vertical slices, each ships value)
+## 12. What stays unchanged (scope discipline)
 
-Each slice is independently grabbable and leaves the system working.
-
-1. **Slice 1 — Stable machine session (one URL/QR).** Add `session.json` +
-   `loadOrCreateSession()` replacing `createDaemonInit()`'s per-activation secret. *No multi-thread
-   yet* — but now re-running start in any pane shows the **same** QR, and a refreshed phone keeps the
-   same URL. Ships the "one URL per machine" promise alone. (Touch: `config.ts`, `voice-daemon.ts`,
-   start skill.)
-2. **Slice 2 — `threadId` on the wire + DO routing for N daemons.** Extend `protocol.ts` with
-   `threadId` envelopes + the registry events; rework the DO to hold a thread map, drop
-   `evictRole("daemon")` for per-thread dedup, route browser→one-thread and tag daemon→browser.
-   Daemon tags every event with its `threadId` and sends `thread_register`. *Phone can now receive
-   from multiple panes* (even if the UI just merges them at first). (Touch: `src/shared/protocol.ts`,
-   `worker/src/index.ts`, `voice-daemon.ts`.)
-3. **Slice 3 — Thread roster + labels + per-thread presence.** DO maintains the roster +
-   per-thread `lastSeenAt`; emits `thread_roster`/`thread_joined`/`thread_left`. Daemon computes its
-   `label` (pane title / branch / cwd). *Phone has the data to list/switch threads.* (Touch: DO,
-   daemon label logic, `protocol.ts`.)
-4. **Slice 4 — Web thread switcher.** `App.tsx` → `messagesByThread`; switcher pill bar; per-thread
-   hero/thread scope; unread badges; per-thread offline grading (reuse #10). *The full multi-thread
-   UX.* (Touch: `web/src/App.tsx`, new `ThreadSwitcher.tsx`, `useBridge`/`usePlayback` keyed by
-   thread.)
-5. **Slice 5 — Spawn-a-thread (incl. voice).** `cmux.ts` `newSplitAndLaunch()`; `spawn_thread`
-   browser→daemon event + UI `+` affordance + voice mapping. *Hands-free "open another session."*
-   (Touch: `cmux.ts`, `protocol.ts`, `voice-daemon.ts`, `web`.)
-6. **Slice 6 (security hardening) — rotation + revoke-on-exit + docs.** `/voice-control:rotate`;
-   per-thread revoke-on-exit in the DO; reserve `threadToken?` for future per-thread sub-tokens;
-   document the one-URL-controls-all trade-off. (Touch: skills, DO, `config.ts`, docs.)
-
-Slices 1–3 are backend/protocol and ship incremental value (stable URL, then multi-receive). Slice 4
-is the visible payoff. 5–6 are the power-user + safety layers.
-
----
-
-## 11. Open questions
-
-1. **cmux spawn ergonomics [verify live].** Exact command(s) to open a new pane *and* target a cwd
-   and launch `claude`; how to resolve the new surface id deterministically; whether `new-split` is
-   the right primitive vs a new window/workspace. (`cmux new-split --help`, `cmux --help`,
-   `list-surfaces --json` before/after.)
-2. **Pane title for labels [verify live].** Does `list-surfaces --json` expose a human title, and
-   what's the field name? If not, fall back to branch + cwd.
-3. **`threadId` identity.** Use `CMUX_SURFACE_ID` (stable, dedups a reconnecting pane) vs a per-
-   process uuid (survives a surface-id change but loses dedup-on-reconnect). Recommend surface id
-   with a uuid fallback; confirm surface-id stability across a workspace move (repo says stable).
-4. **One token blast radius — acceptable?** Is "one URL controls all my Claude panes" acceptable for
-   the single-user use case (yes, likely), or do we want per-thread sub-tokens from day one? Decide
-   between §8 Option 1 vs 2 for v1.
-5. **DO storage limits.** The roster + per-thread last-seen is tiny, but confirm we never store
-   conversation content in the DO (keep the daemon ring as the only history) so the worker stays a
-   dumb relay.
-6. **Reconnect storms & iOS.** With N threads, a backgrounded iOS Safari still has **one** browser
-   socket multiplexing all threads — good (no per-thread sockets on the phone). Confirm the single
-   `sync` still backfills *all* threads' histories efficiently (the DO can fan out a per-thread
-   history request to each daemon, or the browser requests history per active thread on first view to
-   avoid pulling N rings at once on cellular).
-7. **Cross-pane voice routing.** When the phone sends to "the active thread," and that pane is
-   busy/offline, what's the fallback? (Surface an error scoped to that thread; don't silently
-   reroute.)
-8. **Interaction with #6 Option C orphan guard.** If a thread's daemon orphans (PID 1) after a pane
-   closes without `/stop`, it would keep a stale thread registered. The DO's `thread_left` (on
-   socket close) covers the *socket* dropping, but an orphaned-yet-still-connected daemon wouldn't
-   drop — so the #6 self-reap guard (detect reparent → stop) is what removes a zombie thread. Tie
-   the two designs together.
+- **The daemon's core** (`VoiceDaemon` injection/queue/reply/speak), the **history ring**, **openai**
+  STT/TTS, **qr**, the **Stop-hook reply path**, and the **cmux trust model** are untouched. #7 makes
+  identity/bridge/UI plural; it does not re-architect a working daemon.
+- The **worker stays a dumb relay** apart from the thread registry + the two security bits
+  (revoke-on-exit alarm, rate-limit). It **never** stores conversation content.
+- **No system-config changes** (cmux config, `~/.config`): spawn is CLI-only; everything in
+  `$CLAUDE_PLUGIN_DATA`. (Project memory: the plugin must work unmodified.)
 
 ---
 
 ## Sources
 
-This codebase (current-state authority):
-- Singleton state + secret: `src/daemon/config.ts`, `src/daemon/voice-daemon.ts`
-  (`createDaemonInit`), `src/daemon/mcp-server.ts` (`ACTIVE_FLAG`, reconcile poll).
-- DO 2-role bridge + hash routing + presence: `worker/src/index.ts`,
-  `src/shared/bridge-contract.ts`.
-- Protocol (no thread dimension yet): `src/shared/protocol.ts` (re-exported by
-  `web/src/lib/protocol.ts`).
-- cmux wrapper conventions (global surface resolution, --socket, workspace-clear):
-  `src/daemon/cmux.ts`.
-- Web bridge/UI to extend: `web/src/hooks/useBridge.ts`, `web/src/App.tsx`,
-  `web/src/lib/messages.ts`, `web/src/lib/status.ts` (per-thread offline grading reuse).
-- History ring (per-thread, unchanged within a thread): `src/daemon/history-ring.ts`.
+This codebase (current-state authority): `src/daemon/standalone.ts` (the shipped #6 daemon +
+`shouldReap`), `src/daemon/voice-daemon.ts` (`createDaemonInit`, `emitStatus`, history wiring),
+`src/daemon/config.ts` (`stateDir`, `runtimePath`, `qrPath`, 0600 enforcement),
+`src/daemon/history-ring.ts` (per-daemon ring), `src/daemon/cmux.ts` (`--surface` global resolution,
+`CMUX_WORKSPACE_ID` clear, `read-screen`), `src/shared/protocol.ts` + `src/shared/bridge-contract.ts`
+(wire + URL/secret), `worker/src/index.ts` (DO 2-role, `idFromName(sha256(secret))`,
+`evictRole("daemon")`, `daemonLastSeenAt`, origin check), `worker/wrangler.toml`,
+`web/src/App.tsx`, `web/src/hooks/useBridge.ts`, `web/src/lib/status.ts` (#10 grading),
+`web/src/lib/features.ts` (`threadTitle`/`threadNav` flags), `web/src/components/TopBar.tsx` (white
+pill), `web/src/components/BottomTabBar.tsx`, `skills/start/SKILL.md`, `skills/stop/SKILL.md`.
 
-cmux (CLI / config):
-- `cmux new-split`, `send`, `send-key`, `--surface`/`--workspace`/`--socket`, `list-surfaces --json`,
-  `CMUX_SURFACE_ID`/`CMUX_WORKSPACE_ID`/`CMUX_SOCKET_PATH`: https://cmux.com/docs/api
-- `socketControlMode` (`cmuxOnly` default): https://cmux.com/docs/configuration
+Cross-doc: `docs/research/no-mcp-background-daemon.md` (#6 — the standalone daemon this builds on),
+`docs/research/visible-background-process.md`.
 
-Cross-doc:
-- `docs/research/visible-background-process.md` (#6) — the per-thread visible/killable process model
-  this design depends on.
-- TODO.md items #2 (same URL/QR), #3 (thread switcher UI), #6 (visible process), #10 (session-offline
-  grading, reused per thread).
+cmux (CLI — note the two doc sites disagree; the manaflow/mintlify ref is the upstream repo's and is
+treated as primary; §11 probes resolve the conflicts):
+- Upstream CLI ref (`new-pane --cwd --command`, `new-workspace --cwd --command`, `new-split <dir>`,
+  `new-surface`, `send --surface`, `send-key --surface`, `read-screen --surface/--lines/--scrollback`,
+  `tree`/`identify`, `--id-format refs|uuids|both`, short refs): https://manaflow-ai-cmux.mintlify.app/automation/cli-reference
+- Alternate ref (`list-surfaces`, `new-split`, `CMUX_SURFACE_ID`/`CMUX_SOCKET_PATH`/`CMUX_WORKSPACE_ID`,
+  `socketControlMode`): https://cmux.com/docs/api , https://cmux.com/docs/configuration
+- `--command` flag for new-split/new-surface/new-pane (issue #2538): https://github.com/manaflow-ai/cmux/issues/2538
+- Surface/tab names not exposed via CLI (issue #2761): https://github.com/manaflow-ai/cmux/issues/2761
+- Workspace name as Claude session title (issue #5141): https://github.com/manaflow-ai/cmux/issues/5141
+
+Claude Code:
+- `SessionStart` hook with `source` ∈ `startup | resume | clear | compact`, payload `session_id` /
+  `source` / `cwd` / `hook_event_name`: https://code.claude.com/docs/en/hooks
+
+Cloudflare:
+- Rate Limiting binding (`[[ratelimits]]` `namespace_id`, `simple.limit`/`period` ∈ {10,60},
+  `env.X.limit({ key })` → `{ success }`; best-effort/per-location/eventually-consistent):
+  https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/
+- Durable Objects (Hibernatable WebSockets, `serializeAttachment`, `setAlarm`, storage):
+  https://developers.cloudflare.com/durable-objects/best-practices/websockets/ ,
+  https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
+</content>
+</invoke>

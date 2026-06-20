@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,12 +35,40 @@ export function stateDir(): string {
   return process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
 }
 
+/**
+ * Per-thread runtime file: `runtime/<surfaceId>.json` carries THIS pane's daemon
+ * `port`/`pid`/`surface`/`sessionUrl`. Multi-session means N daemons share one stateDir, so a
+ * single `runtime.json` would clobber between panes; keying it by the pane's CMUX_SURFACE_ID
+ * keeps each pane's launch handshake (and its Stop/reset hooks) targeting the right daemon.
+ *
+ * The DO roster is the live truth for "who's connected"; these files are only the local
+ * launch handshake (the start skill reads back the file it caused to be written, and the
+ * Stop/reset hooks read this pane's file to reach its own daemon).
+ *
+ * When the surface is unknown (daemon launched outside cmux) we fall back to a stable
+ * sentinel name so the path is still well-defined for the single-pane case.
+ */
+const RUNTIME_DIR_NAME = "runtime";
+const RUNTIME_FALLBACK_SURFACE = "default";
+
+export function runtimeDir(): string {
+  return join(stateDir(), RUNTIME_DIR_NAME);
+}
+
+/** Machine-level runtime.json — used ONLY for the "setup needed" signal (no daemon, no
+ *  surface yet, so it can't be per-thread). A live daemon publishes per-thread files via
+ *  threadRuntimePath(); the start skill reads this for the no-API-key onboarding path. */
 export function runtimePath(): string {
   return join(stateDir(), "runtime.json");
 }
 
-/** Pre-rendered Unicode QR of the phone URL, written next to runtime.json so the
- *  start skill can print it straight to the Claude Code chat. */
+export function threadRuntimePath(surfaceId?: string): string {
+  return join(runtimeDir(), `${surfaceId || RUNTIME_FALLBACK_SURFACE}.json`);
+}
+
+/** Pre-rendered Unicode QR of the phone URL. Machine-level (one URL/QR shared by every
+ *  pane, since it's a pure function of the shared secret) so the start skill can print it
+ *  straight to the Claude Code chat regardless of which pane started. */
 export function qrPath(): string {
   return join(stateDir(), "qr.txt");
 }
@@ -183,8 +212,70 @@ export function writeSetupNeededRuntime(setup: ConfigSetupNeeded): void {
   );
 }
 
-export function toWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole): string {
-  return toBridgeWebSocketUrl(bridgeUrl, secret, role);
+// ---- machine session secret (one URL/QR, shared by every pane) ------------------------
+
+/**
+ * The one machine-level capability: a single secret minted once into session.json and
+ * shared by every pane's daemon, so every pane derives the same phone URL/QR (TODO #2).
+ * Replaces the per-activation randomBytes(16) that gave each pane a different URL.
+ *
+ *   $CLAUDE_PLUGIN_DATA/session.json  (mode 0600, like config.json)
+ *   { "secret": "<base64url 128-bit>", "sessionId": "<sha256(secret)[:12]>", "createdAt": <ms> }
+ */
+export type MachineSession = { secret: string; sessionId: string };
+
+const SESSION_SECRET_BYTES = 16; // 128 bits — uncrackable by online guessing; keeps the QR small.
+const SESSION_ID_CHARS = 12; // short, non-secret label derived from the secret's hash.
+
+function sessionFilePath(): string {
+  return join(stateDir(), "session.json");
+}
+
+const SessionFileSchema = z.object({
+  secret: z.string().min(1),
+  sessionId: z.string().min(1),
+  createdAt: z.number()
+});
+
+function deriveSessionId(secret: string): string {
+  return createHash("sha256").update(secret).digest("base64url").slice(0, SESSION_ID_CHARS);
+}
+
+/**
+ * Load the machine session, minting it on first use. Idempotent and race-safe:
+ *  - a well-formed session.json is returned as-is;
+ *  - otherwise mint a secret and write it atomically (temp + rename, 0600), then RE-READ the
+ *    file and return its contents. Under a two-pane start race both panes write, `rename`
+ *    makes the last writer win, and the re-read makes both converge on that one secret — so
+ *    no pane is ever stranded on a different URL.
+ */
+export function loadOrCreateSession(): MachineSession {
+  const path = sessionFilePath();
+  const existing = readSessionFile(path);
+  if (existing) return existing;
+
+  mkdirSync(stateDir(), { recursive: true });
+  const secret = randomBytes(SESSION_SECRET_BYTES).toString("base64url");
+  const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 0o600 });
+  renameSync(tmp, path);
+  // Re-read so a racing pane's last-writer-wins secret is the one we (and it) return.
+  const settled = readSessionFile(path) ?? session;
+  return { secret: settled.secret, sessionId: settled.sessionId };
+}
+
+function readSessionFile(path: string): MachineSession | undefined {
+  try {
+    const parsed = SessionFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+    return { secret: parsed.secret, sessionId: parsed.sessionId };
+  } catch {
+    return undefined; // absent or malformed → caller mints.
+  }
+}
+
+export function toWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole, threadId?: string): string {
+  return toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId);
 }
 
 export function toBrowserUrl(bridgeUrl: string, secret: string): string {

@@ -6,8 +6,9 @@ export const FEATURES = {
   threadNav: false,
   /** Top-left menu (threads drawer) button. */
   threadMenu: false,
-  /** Centered thread title + dropdown (needs a real thread topic from Claude Code). */
-  threadTitle: false,
+  /** Centered thread title + dropdown switcher (the cmux task title · repo · branch; the dropdown
+   *  appears once a 2nd thread joins). Single thread → just the label pill. */
+  threadTitle: true,
   /** Top-right settings / adjustments button. */
   settings: false,
   /** The waveform button beside the mic (no defined behaviour yet). */

@@ -72,6 +72,15 @@ export class HistoryRing {
   }
 
   /**
+   * Drop the whole retained thread (used on `/clear` or `/compact` — a new topic in the same
+   * pane). `seq` keeps advancing so any in-flight reply still lands with a strictly-newer seq
+   * than the cleared turns and the phone never re-orders a fresh reply behind stale history.
+   */
+  clear(): void {
+    this.entries.length = 0;
+  }
+
+  /**
    * Keep the last `maxReplies` reply entries plus the user message(s) leading up to each.
    *
    * The window of the oldest retained reply starts right after the previous (now-evicted)

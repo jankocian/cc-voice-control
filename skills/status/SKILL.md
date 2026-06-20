@@ -4,26 +4,30 @@ disable-model-invocation: true
 allowed-tools: Bash
 ---
 
-Report whether the voice remote is running and re-show its QR code + phone URL. The remote is
-a background task; `runtime.json` (written by the daemon, removed on stop) is the source of
-truth, and its `pid` lets us confirm the task is actually alive:
+Report whether the voice remote is running **in this pane** and re-show its QR code + phone URL.
+Each pane runs its own daemon; this pane's per-pane runtime file
+(`runtime/<CMUX_SURFACE_ID>.json`, written by the daemon, removed on stop) is the source of
+truth, and its `pid` lets us confirm the task is actually alive. (The QR/URL is machine-level —
+the same for every pane.)
 
 ```sh
 D="${CLAUDE_PLUGIN_DATA}"
-if [ -f "$D/runtime.json" ]; then
-  PID=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' "$D/runtime.json" 2>/dev/null)
+R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
+if [ -f "$R" ]; then
+  PID=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' "$R" 2>/dev/null)
   if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then echo "active"; else echo "stale"; fi
-else
-  echo "stopped"
+elif [ -f "$D/runtime.json" ]; then echo "needs-setup"   # no API key yet (machine-level notice)
+else echo "stopped"
 fi
 cat "$D/qr.txt" 2>/dev/null
-cat "$D/runtime.json" 2>/dev/null || echo "no active session"
+cat "$R" 2>/dev/null || cat "$D/runtime.json" 2>/dev/null || echo "no active session"
 ```
 
-Summarize for the user: **active** (running), **stopped** (no session), or **stale** (a
-`runtime.json` exists but its task is gone — suggest re-running `/voice-control:start`). Then:
+Summarize for the user: **active** (running in this pane), **stopped** (no session here), or
+**stale** (a runtime file exists but its task is gone — suggest re-running
+`/voice-control:start`). Then:
 
-- If `runtime.json` contains `"needsSetup": true`, the remote can't start because the OpenAI API
+- If the output contains `"needsSetup": true`, the remote can't start because the OpenAI API
   key is missing. Don't show a QR code. Tell the user an OpenAI API key is required, show the
   exact `configPath` from the JSON to open or create, show a tiny example to paste
   (`{ "openaiApiKey": "sk-..." }`), and say to re-run

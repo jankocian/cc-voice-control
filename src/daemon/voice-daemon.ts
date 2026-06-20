@@ -1,17 +1,31 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import type {
   BridgeEnvelope,
   BrowserToDaemonEvent,
   DaemonToBrowserEvent,
   InjectMode,
-  SessionState
+  SessionState,
+  ThreadId,
+  ThreadInfo
 } from "../shared/protocol.js";
-import { cmuxHealth, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
-import { qrPath, runtimePath, stateDir, toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
+import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
+import {
+  loadOrCreateSession,
+  qrPath,
+  runtimeDir,
+  stateDir,
+  threadRuntimePath,
+  toBrowserUrl,
+  toWebSocketUrl,
+  type VoiceRemoteConfig
+} from "./config.js";
 import { buildHistoryEvent, HistoryRing, selectAudioReply } from "./history-ring.js";
+import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 
@@ -31,12 +45,40 @@ const MAX_SPEECH_CHARS = 40_000;
 // more scrollback survives a refresh, at the cost of holding more reply audio in memory.
 const HISTORY_REPLIES = 7;
 
+// This module's plugin-load root, derived from its own location: bundled, the daemon runs at
+// <root>/dist/daemon/standalone.js; in dev at <root>/src/daemon/voice-daemon.ts — three dirs up is
+// <root> either way. Only used to point a spawned `claude` at a `--plugin-dir`-loaded plugin (below).
+const PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+// In DEV the plugin is loaded with `--plugin-dir`, so a spawned `claude` must be pointed at it too —
+// Claude Code marks an `--plugin-dir` load with an `-inline` suffix on the plugin-data dir
+// (stateDir()). An INSTALLED plugin is global to every `claude`, so passing `--plugin-dir` would be
+// redundant/wrong: omit it. So the directory is added ONLY for an inline (dev) load.
+const PLUGIN_DIR_ARG = stateDir().endsWith("-inline") ? `--plugin-dir '${PLUGIN_ROOT}' ` : "";
+
+// The permission modes Claude Code accepts for `--permission-mode` (the same vocabulary it reports
+// in hook input as `permission_mode`). We pass the spawning session's live mode straight through so a
+// spawned thread inherits it EXACTLY. Allowlisted because the value is interpolated into the spawn
+// command — an unrecognized value is dropped (spawn falls back to the user's default) not passed on.
+const PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
+
+// Build the `--permission-mode` fragment for the spawn command (trailing space so it concatenates).
+// Allowlisted: a missing or unrecognized mode yields "" — the spawn falls back to the user's default
+// rather than interpolating an unknown value into the spawned command. Exported for tests.
+export function permissionModeArg(mode?: string): string {
+  return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
+}
+
 export type DaemonInit = {
   config: VoiceRemoteConfig;
   surface?: string;
-  // The whole capability: one unguessable secret that both routes the session and
-  // authorizes joining it. Carried in the phone URL path; never sent over the wire as a
-  // separate value.
+  // Non-secret, stable per pane: the thread's routing key (its CMUX_SURFACE_ID, or a
+  // per-process uuid outside cmux). Tags every event so the phone attributes it to one thread
+  // and a reconnecting pane re-registers to the SAME slot. NOT the session secret.
+  threadId: ThreadId;
+  // The whole capability: one MACHINE-level secret (session.json) that both routes the
+  // session and authorizes joining it. Shared by every pane → every pane derives the same
+  // phone URL/QR. Carried in the URL path; never sent over the wire as a separate value.
   secret: string;
   // A short, non-secret label derived from `secret` (its hash). Safe to relay in status
   // events and log; never the secret itself.
@@ -44,17 +86,19 @@ export type DaemonInit = {
   browserUrl: string;
 };
 
-/** Build a fresh session (secret + phone URL) from config and the current cmux pane. */
+/**
+ * Build the daemon init from config and the current cmux pane. The secret is the SHARED
+ * machine secret (loadOrCreateSession), so every pane derives the same URL/QR (TODO #2).
+ * `threadId = CMUX_SURFACE_ID` (already the cmux `--surface` target) so a re-quit pane
+ * re-registers to the same thread; outside cmux we fall back to a per-process uuid (loses
+ * dedup-on-reconnect, never collides).
+ */
 export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
   const surface = process.env.CMUX_SURFACE_ID;
-  // 128 bits of entropy → 22 url-safe chars. Uncrackable by online guessing, and the
-  // session is ephemeral (it dies with the daemon), so a single secret is ample. Keeping
-  // it short also keeps the QR small. The bridge hashes it to route, so the raw secret is
-  // never used as an identifier or persisted anywhere.
-  const secret = randomBytes(16).toString("base64url");
-  const sessionId = createHash("sha256").update(secret).digest("base64url").slice(0, 12);
+  const threadId = surface ?? randomUUID();
+  const { secret, sessionId } = loadOrCreateSession();
   const browserUrl = toBrowserUrl(config.bridgeUrl, secret);
-  return { config, surface, secret, sessionId, browserUrl };
+  return { config, surface, threadId, secret, sessionId, browserUrl };
 }
 
 /**
@@ -94,14 +138,26 @@ export class VoiceDaemon {
   private inFlight?: string;
   private readonly queue: string[] = [];
 
+  // The spawning session's LIVE permission mode, forwarded by the Stop hook each turn. A spawned
+  // thread is launched with `--permission-mode <this>` so it inherits the user's mode EXACTLY (a
+  // child `claude` does not inherit it via env/process tree). Undefined until the first turn reports
+  // it — until then a spawn omits the flag and falls back to the user's own default mode.
+  private inheritedPermissionMode?: string;
+
   // The durable conversation thread: the last HISTORY_REPLIES Claude replies (with audio)
   // plus their parent user messages. A reconnecting phone is caught up from this via a
   // `history` event, and reply audio is served from it on demand (`get_audio`). Replaces
   // the single-reply retention that lost the whole thread on a refresh.
   private readonly history = new HistoryRing(HISTORY_REPLIES);
 
+  // Last-computed thread label (repo·branch·cwd · cmux task title). Sent in thread_register
+  // on connect and refreshed on the cmux-health tick when the title changes (no extra timer).
+  // Starts with a cheap synchronous fallback so registration never blocks on git/cmux.
+  private label: ThreadInfo["label"];
+
   constructor(init: DaemonInit) {
     this.init = init;
+    this.label = { title: init.threadId };
   }
 
   get browserUrl(): string {
@@ -140,6 +196,9 @@ export class VoiceDaemon {
   }
 
   private async refreshCmuxHealth(): Promise<void> {
+    // Fold the label refresh into the existing tick (the cmux title tracks the running task)
+    // instead of adding a second timer; it re-registers only when something actually changed.
+    void this.refreshLabel();
     const health = await cmuxHealth(this.init.surface);
     if (health.socketUp !== this.cmuxReachable) {
       this.cmuxReachable = health.socketUp;
@@ -167,7 +226,10 @@ export class VoiceDaemon {
   private startHookListener(): Promise<void> {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
-        if (req.method !== "POST" || req.url !== "/reply") {
+        // Two POST routes, both from the plugin's hooks: /reply (Stop hook → speak the reply)
+        // and /reset (SessionStart on clear/compact → wipe this pane's voice history).
+        const route = req.method === "POST" ? req.url : undefined;
+        if (route !== "/reply" && route !== "/reset") {
           res.statusCode = 404;
           res.end();
           return;
@@ -177,8 +239,20 @@ export class VoiceDaemon {
         req.on("end", () => {
           res.statusCode = 204;
           res.end();
+          if (route === "/reset") {
+            this.handleReset();
+            return;
+          }
           try {
-            const { prompt, text } = JSON.parse(body || "{}") as { prompt?: string; text?: string };
+            const { prompt, text, permissionMode } = JSON.parse(body || "{}") as {
+              prompt?: string;
+              text?: string;
+              permissionMode?: string;
+            };
+            // Remember the session's live permission mode so a spawn mirrors it (see spawnThread).
+            if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
+              this.inheritedPermissionMode = permissionMode;
+            }
             this.onClaudeReply(typeof prompt === "string" ? prompt : "", typeof text === "string" ? text : "");
           } catch {
             // ignore malformed hook payloads
@@ -196,17 +270,19 @@ export class VoiceDaemon {
   }
 
   private writeRuntime(): void {
-    mkdirSync(stateDir(), { recursive: true });
-    // Render the QR before runtime.json so it's guaranteed present once the start
-    // skill (which waits on runtime.json) reads it. A render failure must never
-    // block the URL, so it's best-effort — the plain URL is the fallback.
+    mkdirSync(runtimeDir(), { recursive: true });
+    // Render the QR (machine-level — identical bytes for every pane, since the URL is a pure
+    // function of the shared secret) before the runtime file so it's present once the start
+    // skill reads it. A render failure must never block the URL, so it's best-effort.
     try {
       writeFileSync(qrPath(), `${renderQr(this.init.browserUrl)}\n`);
     } catch (error) {
       console.error(`[qr] render failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    // Per-thread runtime file (runtime/<surfaceId>.json) so panes don't clobber each other's
+    // port/pid and this pane's Stop/reset hooks reach THIS daemon.
     writeFileSync(
-      runtimePath(),
+      threadRuntimePath(this.init.surface),
       JSON.stringify(
         { port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl },
         null,
@@ -215,23 +291,43 @@ export class VoiceDaemon {
     );
   }
 
+  // Handle a /reset POST (SessionStart on clear/compact): a new topic in the SAME pane, so wipe
+  // the voice history and push an empty `history` so the phone drops the stale thread view.
+  private handleReset(): void {
+    this.history.clear();
+    this.inFlight = undefined; // the cleared topic's in-flight turn is moot after /clear.
+    console.error("[reset] cleared voice history for this thread (/clear or /compact)");
+    this.sendToBrowser(buildHistoryEvent(this.history));
+    this.emitStatus();
+  }
+
   // ---- bridge ----------------------------------------------------------------
 
   private connectBridge(): void {
     if (this.stopped) return;
-    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon");
+    // Pass the threadId on the connect URL so the DO attaches it before the first message —
+    // browser→daemon routing keys on it from the very first send.
+    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon", this.init.threadId);
     const ws = new WebSocket(url);
     this.ws = ws;
 
-    ws.on("open", () => this.emitStatus());
+    ws.on("open", () => {
+      // Register this thread with the DO (so the roster lists it) BEFORE the first status, then
+      // refresh the label asynchronously — git/cmux must never block the socket coming up.
+      this.registerThread();
+      this.emitStatus();
+      void this.refreshLabel();
+    });
     ws.on("message", (raw) => {
-      let envelope: { channel?: string; event?: BrowserToDaemonEvent };
+      let envelope: { channel?: string; threadId?: ThreadId; event?: BrowserToDaemonEvent };
       try {
         envelope = JSON.parse(raw.toString());
       } catch {
         return;
       }
-      if (envelope.channel === "daemon" && envelope.event) {
+      // Only act on events addressed to THIS thread (the DO routes browser→one daemon by
+      // threadId, but guard here too so a mis-tagged envelope can't drive the wrong pane).
+      if (envelope.channel === "daemon" && envelope.event && envelope.threadId === this.init.threadId) {
         this.handleBrowserEvent(envelope.event).catch((error) => this.sendError(error));
       }
     });
@@ -279,9 +375,41 @@ export class VoiceDaemon {
         // tell the phone gracefully when it has been evicted.
         this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
+      case "spawn_thread":
+        // Open a NEW cmux workspace running Claude + /voice-control:start. It reads the same
+        // session.json → joins this same session as a new thread (same QR). Routed here
+        // because this daemon has the cmux trust to spawn for the machine.
+        await this.spawnThread(event.cwd);
+        return;
       default:
         return;
     }
+  }
+
+  // Spawn a sibling thread via a new cmux workspace. cwd defaults to THIS daemon's cwd (a new
+  // session "next to" the current one). Surfaces a phone-facing error if the spawn fails so the
+  // user isn't left wondering; the new pane's own daemon registers itself once it connects.
+  private async spawnThread(cwd?: string): Promise<void> {
+    const command = this.buildSpawnCommand();
+    const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
+    if (ref) {
+      console.error(`[spawn] new workspace ${ref} :: ${command}`);
+      return;
+    }
+    this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+  }
+
+  // The command a spawned cmux workspace runs to join this session as a new thread.
+  //   --plugin-dir <root>     dev-only (see PLUGIN_DIR_ARG); installed plugins are global → omitted.
+  //   --permission-mode <m>   mirrors the spawning session's LIVE mode (from the Stop hook) so the
+  //                           new session has the SAME permissions the user already granted — never
+  //                           silently elevated, never silently dropped. Omitted until a turn has
+  //                           reported a mode, in which case the spawn uses the user's own default.
+  //   /voice-control:start    a positional slash command — auto-submits + runs on startup (verified).
+  // cmux must focus the new workspace (spawnWorkspace passes --focus true) to start the command; the
+  // workspace uses the spawning pane's cwd (already trusted), so there's no first-run trust gate.
+  private buildSpawnCommand(): string {
+    return `claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
   }
 
   private async handleAudio(audioBase64: string, mimeType: string, mode: InjectMode): Promise<void> {
@@ -401,8 +529,40 @@ export class VoiceDaemon {
     }
   }
 
+  // ---- thread registry -------------------------------------------------------
+
+  // Snapshot of this thread for the DO roster: id + label + live state/listening. The DO
+  // stores this and serves it to phones; the daemon keeps no roster of its own.
+  private buildThreadInfo(): ThreadInfo {
+    return {
+      threadId: this.init.threadId,
+      label: this.label,
+      state: this.inFlight !== undefined ? "working" : "idle",
+      listening: this.cmuxHealthy
+    };
+  }
+
+  // Tell the DO about this thread (register on connect, refresh on label/state change). The DO
+  // dedups by threadId and broadcasts a roster delta; sending it again is the refresh path.
+  private registerThread(): void {
+    this.send({ channel: "registry", event: { type: "thread_register", info: this.buildThreadInfo() } });
+  }
+
+  // Recompute the label (repo·branch·cwd · cmux title) and re-register only if it changed, so
+  // the cmux-health tick can call this every 5s without spamming the DO. Best-effort: a failed
+  // compute keeps the last good label.
+  private async refreshLabel(): Promise<void> {
+    const next = await computeLabel(process.cwd(), this.init.surface, this.init.threadId);
+    if (sameLabel(next, this.label)) return;
+    this.label = next;
+    if (this.ws?.readyState === WebSocket.OPEN) this.registerThread();
+  }
+
   // ---- helpers ---------------------------------------------------------------
 
+  // Status carries this thread's id so the phone files it (and the roster's per-thread #10
+  // grading) under the right thread; a thread_register also rides along so the roster's
+  // state/listening stay current as the daemon's runtime state changes.
   private emitStatus(): void {
     const state: SessionState = {
       sessionId: this.init.sessionId,
@@ -410,10 +570,16 @@ export class VoiceDaemon {
       state: this.inFlight !== undefined ? "working" : "idle"
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.inFlight } });
+    // Keep the roster's state/listening in lockstep with status (idle↔working, listening
+    // flips) without a separate channel — register is the refresh path, deduped DO-side.
+    if (this.ws?.readyState === WebSocket.OPEN) this.registerThread();
   }
 
   private sendToBrowser(event: DaemonToBrowserEvent): void {
-    this.send({ channel: "browser", event });
+    // Tag every outbound event with this daemon's threadId so the phone (and the DO) attribute
+    // it to the right thread. The DO trusts the socket's attachment, but tagging keeps the
+    // envelope self-describing and matches the browser→daemon direction.
+    this.send({ channel: "browser", threadId: this.init.threadId, event });
   }
 
   private send(envelope: BridgeEnvelope): void {
@@ -443,12 +609,22 @@ export class VoiceDaemon {
     }
     this.httpServer?.close();
     try {
-      rmSync(runtimePath(), { force: true });
-      rmSync(qrPath(), { force: true });
+      // Remove only THIS pane's runtime file (sibling panes keep theirs). qr.txt is
+      // machine-level: leave it as long as any pane might still be live — a sibling rewrites
+      // identical bytes on its next tick, and a fully-idle machine's stale QR is harmless
+      // (the DO revoke-on-exit kills the session it points at). Removing it here would yank
+      // the QR out from under a still-running sibling pane.
+      rmSync(threadRuntimePath(this.init.surface), { force: true });
     } catch {
       // ignore
     }
   }
+}
+
+// Structural equality of two labels (all fields), so a refresh re-registers only on a real
+// change and the cmux-health tick doesn't spam the DO every 5s.
+function sameLabel(a: ThreadInfo["label"], b: ThreadInfo["label"]): boolean {
+  return a.title === b.title && a.repo === b.repo && a.branch === b.branch && a.cwd === b.cwd;
 }
 
 // Safety ceiling only. Normal (even long) coding replies pass through untouched and are

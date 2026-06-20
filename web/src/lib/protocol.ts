@@ -7,6 +7,16 @@ export type {
   DaemonToBrowserEvent,
   HistoryTurn,
   InjectMode,
+  RegistryEvent,
+  RosterEvent,
+  RosterThread,
   SessionRuntimeState,
-  SessionState
+  SessionState,
+  ThreadId,
+  ThreadInfo,
+  ThreadJoined,
+  ThreadLabel,
+  ThreadLeft,
+  ThreadRegister,
+  ThreadRoster
 } from "../../../src/shared/protocol";

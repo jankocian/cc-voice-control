@@ -43,3 +43,22 @@ and ends on `/voice-control:stop` (or stopping its task in `/tasks`) or when the
 session closes. The daemon runs as a background task inside Claude's own process tree, so it
 can't outlive the session — closing Claude tears it down even if you never run stop, and if
 it's ever orphaned it self-reaps.
+
+## One URL, many panes (and what that means for security)
+
+The URL/QR is derived from **one machine-level secret** (`$CLAUDE_PLUGIN_DATA/session.json`,
+mode `0600`, minted on first `/voice-control:start`). Every Claude pane you start voice in joins
+the **same** URL as a separate **thread** — so you scan once and switch between sessions on the
+phone. The secret never travels over the wire as a value: it lives only in the URL path, and the
+bridge routes by its hash.
+
+Because that one URL can type into **every** Claude pane on the machine, **revoke-on-exit** keeps a
+leaked URL from being dangerous:
+
+- The session is only live while at least one pane's daemon is connected. When the last one
+  disconnects, the bridge waits a short grace (to ride out a laptop sleep / Wi-Fi flap) and then
+  **wipes the session** — a URL screenshotted yesterday is dead today unless a pane is currently
+  connected. The secret string is unchanged, but its session is gone; the next
+  `/voice-control:start` re-creates it.
+- To kill a leak immediately, `/voice-control:stop` your pane(s): the session goes dead as soon as
+  the last daemon disconnects, so the leaked URL stops working.

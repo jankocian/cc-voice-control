@@ -1,23 +1,38 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { BridgeEnvelope, BrowserToDaemonEvent, DaemonToBrowserEvent, SessionRuntimeState } from "../lib/protocol";
+import type {
+  BridgeEnvelope,
+  BrowserToDaemonEvent,
+  DaemonToBrowserEvent,
+  RosterEvent,
+  SessionRuntimeState,
+  ThreadId
+} from "../lib/protocol";
 import { buildWebSocketUrl } from "../lib/session";
 
-// Content events the bridge forwards to the app (presence + status are owned here).
+// Content events the bridge forwards to the app, tagged with the thread they belong to.
+// session_status is folded in too (it carries the per-thread runtime), so the app keeps one
+// runtime map keyed by threadId instead of a special-cased presence path.
 export type BridgeContentEvent = Extract<
   DaemonToBrowserEvent,
-  { type: "transcript" } | { type: "claude_reply" } | { type: "tts_audio" } | { type: "history" } | { type: "error" }
+  | { type: "transcript" }
+  | { type: "claude_reply" }
+  | { type: "tts_audio" }
+  | { type: "history" }
+  | { type: "error" }
+  | { type: "session_status" }
 >;
 
-// Everything the daemon would need a requestId for, minus the requestId itself
-// (the hook mints it, exactly like the vanilla `sendDaemon`). `get_audio` already carries
-// its own requestId (the reply being fetched), so the hook leaves it untouched.
-type DaemonCommand =
+// Everything the daemon would need a requestId for, minus the requestId itself (the hook mints
+// it, exactly like the vanilla `sendDaemon`). `get_audio` already carries its own requestId (the
+// reply being fetched), so the hook leaves it untouched. `spawn_thread` carries no requestId.
+export type DaemonCommand =
   | { type: "submit_audio"; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
   | { type: "status_request" }
   | { type: "summary_request" }
   | { type: "stop_task" }
   | { type: "sync" }
-  | { type: "get_audio"; requestId: string };
+  | { type: "get_audio"; requestId: string }
+  | { type: "spawn_thread"; cwd?: string };
 
 export type BridgeRuntime = {
   state: SessionRuntimeState;
@@ -29,64 +44,59 @@ export type UseBridgeOptions = {
   // The single capability secret from the URL path (/s/<secret>); used to build the
   // /ws/<secret>?role=browser bridge socket URL.
   secret: string;
-  // Called for transcript / claude_reply / tts_audio / history / error events.
-  onEvent: (event: BridgeContentEvent) => void;
-  // Fired when a daemon command can't be sent (socket gone / not ready).
-  onSendFailed?: () => void;
+  // Called for transcript / claude_reply / tts_audio / history / error / session_status events,
+  // tagged with the thread (from the envelope) so the app files each under the right thread.
+  onEvent: (threadId: ThreadId, event: BridgeContentEvent) => void;
+  // Called for roster snapshot + join/leave deltas so the app maintains the thread list.
+  onRoster: (event: RosterEvent) => void;
 };
 
 export type Bridge = {
-  // socket is OPEN
+  // The browser's own socket is OPEN. Per-thread daemon presence lives in the roster
+  // (connected/lastSeenAt) — there is no session-wide daemon flag anymore.
   connected: boolean;
-  daemonConnected: boolean;
-  browserConnected: boolean;
-  // Epoch-ms time the daemon was last seen by the worker (null = never, or unknown
-  // because the socket is currently down). Lets the UI grade "no daemon" by elapsed
-  // time — a 2s reconnect vs. a session that ended overnight.
-  daemonLastSeenAt: number | null;
-  runtime: BridgeRuntime;
-  bridgeReady: () => boolean;
-  sendDaemon: (command: DaemonCommand) => boolean;
+  // True if a socket is OPEN and the named thread has a live daemon. Lets a command guard on
+  // the thread it actually addresses (the shared mic/player act on the active thread).
+  bridgeReady: (threadId: ThreadId | null) => boolean;
+  // Stamp the envelope with the thread to address and send. Returns false if the socket is gone.
+  sendDaemon: (threadId: ThreadId, command: DaemonCommand) => boolean;
 };
 
 const RECONNECT_MS = 1500;
 
 export function useBridge(options: UseBridgeOptions): Bridge {
-  const { secret, onEvent, onSendFailed } = options;
+  const { secret, onEvent, onRoster } = options;
 
   const [connected, setConnected] = useState(false);
-  const [daemonConnected, setDaemonConnected] = useState(false);
-  const [browserConnected, setBrowserConnected] = useState(false);
-  // Last value carried on a bridge_presence event; reset to null on socket close so a
-  // fresh connect re-derives it from the worker's storage (the DO is the source of truth).
-  const [daemonLastSeenAt, setDaemonLastSeenAt] = useState<number | null>(null);
-  const [runtime, setRuntime] = useState<BridgeRuntime>({
-    state: "idle",
-    currentTask: undefined,
-    listening: true
-  });
 
   const socketRef = useRef<WebSocket | null>(null);
-  const daemonConnectedRef = useRef(false);
+  // Live presence per thread, mirrored from the roster so sends can guard on the addressed
+  // thread without a React read. `thread_joined` (connected:true) / `thread_left` flip it.
+  const connectedThreadsRef = useRef<Set<ThreadId>>(new Set());
 
-  // Keep the latest callbacks/values in refs so the effect mounts once.
+  // Keep the latest callbacks in refs so the effect mounts once (the socket lifecycle owns the
+  // single connection; re-subscribing per render would tear it down on every keystroke).
   const onEventRef = useRef(onEvent);
-  const onSendFailedRef = useRef(onSendFailed);
+  const onRosterRef = useRef(onRoster);
   onEventRef.current = onEvent;
-  onSendFailedRef.current = onSendFailed;
+  onRosterRef.current = onRoster;
 
-  const bridgeReady = useCallback((): boolean => {
+  const bridgeReady = useCallback((threadId: ThreadId | null): boolean => {
     const socket = socketRef.current;
-    return Boolean(socket && socket.readyState === WebSocket.OPEN && daemonConnectedRef.current);
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    return threadId !== null && connectedThreadsRef.current.has(threadId);
   }, []);
 
-  const sendDaemon = useCallback((command: DaemonCommand): boolean => {
+  const sendDaemon = useCallback((threadId: ThreadId, command: DaemonCommand): boolean => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !daemonConnectedRef.current) return false;
-    const requestId = crypto.randomUUID();
-    const event = { requestId, ...command } as BrowserToDaemonEvent;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (!connectedThreadsRef.current.has(threadId)) return false;
+    // spawn_thread is the one daemon command without a requestId (it's an action, not a turn).
+    const event = (
+      command.type === "spawn_thread" ? command : { requestId: crypto.randomUUID(), ...command }
+    ) as BrowserToDaemonEvent;
     try {
-      socket.send(JSON.stringify({ channel: "daemon", event } satisfies BridgeEnvelope));
+      socket.send(JSON.stringify({ channel: "daemon", threadId, event } satisfies BridgeEnvelope));
       return true;
     } catch {
       return false;
@@ -97,50 +107,43 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     let stopped = false;
     let reconnectTimer = 0;
 
-    function setDaemon(value: boolean): void {
-      daemonConnectedRef.current = value;
-      setDaemonConnected(value);
+    // Track which threads have a live daemon, mirroring the roster, so sendDaemon/bridgeReady
+    // can guard synchronously. A fresh connect resets it (the next thread_roster repopulates).
+    function applyRosterPresence(event: RosterEvent): void {
+      const set = connectedThreadsRef.current;
+      if (event.type === "thread_roster") {
+        set.clear();
+        for (const thread of event.threads) if (thread.connected) set.add(thread.threadId);
+      } else if (event.type === "thread_joined") {
+        if (event.thread.connected) set.add(event.thread.threadId);
+        else set.delete(event.thread.threadId);
+      } else {
+        set.delete(event.threadId);
+      }
     }
 
-    function handleBrowserEvent(event: DaemonToBrowserEvent | undefined): void {
-      if (!event) return;
-      switch (event.type) {
-        case "bridge_presence": {
-          const wasConnected = daemonConnectedRef.current;
-          const nextDaemon = event.daemonConnected === true;
-          setDaemon(nextDaemon);
-          setBrowserConnected(event.browserConnected === true);
-          setDaemonLastSeenAt(event.daemonLastSeenAt ?? null);
-          // The daemon emits status only on change; on (re)connect ask for the current
-          // status + the retained thread (it answers a `sync` with a `history` event).
-          if (nextDaemon && !wasConnected) {
-            const socket = socketRef.current;
-            if (socket && socket.readyState === WebSocket.OPEN) {
-              const requestId = crypto.randomUUID();
-              const sync = { type: "sync" as const, requestId };
-              try {
-                socket.send(JSON.stringify({ channel: "daemon", event: sync } satisfies BridgeEnvelope));
-              } catch {
-                /* socket closing; ignore */
-              }
-            }
-          }
-          return;
-        }
-        case "session_status":
-          setRuntime({
-            listening: event.state.listening === true,
-            state: event.state.state,
-            currentTask: event.memory?.currentTask
-          });
-          return;
-        case "transcript":
-        case "claude_reply":
-        case "tts_audio":
-        case "history":
-        case "error":
-          onEventRef.current(event);
-          return;
+    // On a (re)connect a freshly-present thread needs its current status + retained history; the
+    // daemon emits status only on change, so the browser asks. We sync each thread that just
+    // became connected (a roster snapshot may carry several; a join carries one).
+    function syncThread(threadId: ThreadId): void {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const sync = { type: "sync" as const, requestId: crypto.randomUUID() };
+      try {
+        socket.send(JSON.stringify({ channel: "daemon", threadId, event: sync } satisfies BridgeEnvelope));
+      } catch {
+        /* socket closing; ignore */
+      }
+    }
+
+    function handleRoster(event: RosterEvent): void {
+      const before = new Set(connectedThreadsRef.current);
+      applyRosterPresence(event);
+      onRosterRef.current(event);
+      // Sync any thread that transitioned offline→online so its history/status is restored
+      // (mirrors the old single-thread reconnect path, generalized to N threads).
+      for (const threadId of connectedThreadsRef.current) {
+        if (!before.has(threadId)) syncThread(threadId);
       }
     }
 
@@ -156,8 +159,15 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         } catch {
           return;
         }
-        if (envelope?.channel !== "browser") return;
-        handleBrowserEvent(envelope.event);
+        if (!envelope) return;
+        if (envelope.channel === "roster") {
+          handleRoster(envelope.event);
+          return;
+        }
+        if (envelope.channel === "browser") {
+          // Every content event is tagged with its thread; the app files it under that thread.
+          onEventRef.current(envelope.threadId, envelope.event as BridgeContentEvent);
+        }
       });
 
       socket.addEventListener("open", () => {
@@ -166,11 +176,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
 
       socket.addEventListener("close", () => {
         setConnected(false);
-        setDaemon(false);
-        setBrowserConnected(false);
-        // Drop the cached last-seen: while our own socket is down we don't know the
-        // session's state. The next connect's bridge_presence re-derives it from the DO.
-        setDaemonLastSeenAt(null);
+        connectedThreadsRef.current.clear();
         if (stopped) return;
         reconnectTimer = window.setTimeout(connect, RECONNECT_MS);
       });
@@ -197,7 +203,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       const socket = socketRef.current;
       socketRef.current = null;
-      daemonConnectedRef.current = false;
+      connectedThreadsRef.current.clear();
       if (socket) {
         try {
           socket.close();
@@ -208,9 +214,5 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     };
   }, [secret]);
 
-  // Surface a send-failure callback for sendControl-style flashes without
-  // re-creating sendDaemon. (onSendFailed is read from the ref by callers.)
-  void onSendFailedRef;
-
-  return { connected, daemonConnected, browserConnected, daemonLastSeenAt, runtime, bridgeReady, sendDaemon };
+  return { connected, bridgeReady, sendDaemon };
 }

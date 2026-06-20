@@ -157,6 +157,26 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
   return { key, dataState, lampClass, title, detail, canAct };
 }
 
+// The presence dot tone for one thread in the switcher (#7), graded with the SAME offline
+// rule as deriveStatus (#10): a thread with no live daemon is "offline" only once it's been
+// gone past the grace window — a brief drop still reads as present so a Wi-Fi flap doesn't
+// grey every chip. A working thread is coral; a connected idle/ready thread is success.
+export type ThreadTone = "success" | "coral" | "faint";
+
+export function gradeThread(inputs: {
+  connected: boolean;
+  state: SessionRuntimeState;
+  listening: boolean;
+}): ThreadTone {
+  const { connected, state, listening } = inputs;
+  // A thread with no live daemon, or one whose daemon can't reach its cmux pane, isn't
+  // actionable → grey it (the #10 reconnecting-vs-offline distinction is carried by the active
+  // thread's full StatusView/hero; the chip dot only needs reachable-or-not). A reachable
+  // thread is coral while working, success when idle/ready.
+  if (!connected || !listening) return "faint";
+  return state === "working" ? "coral" : "success";
+}
+
 // Coarse, human "time ago" for the offline detail line ("just now" / "3m ago" /
 // "14h ago" / "2d ago"). Floors to the largest whole unit — precision below a minute
 // isn't useful here and "0m ago" would read oddly, so sub-minute is "just now".

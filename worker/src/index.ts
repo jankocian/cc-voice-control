@@ -4,24 +4,32 @@ import {
   parseBridgeWebSocketPath,
   readBridgeAuthQuery
 } from "../../src/shared/bridge-contract";
-import type { BridgeClientRole, BridgeEnvelope } from "../../src/shared/protocol";
+import type { BridgeEnvelope, RosterThread, ThreadId, ThreadInfo } from "../../src/shared/protocol";
+import {
+  buildRoster,
+  EMPTY_SESSION_GRACE_MS,
+  isLastDaemon,
+  ROSTER_KEY_PREFIX,
+  rosterKey,
+  type StoredThread,
+  storedFromInfo
+} from "./registry";
 
 export interface Env {
   VOICE_SESSIONS: DurableObjectNamespace<VoiceSessionDurableObject>;
   // Static-asset handler for the built Vite SPA (../web/dist). Serves the hashed
   // /assets/* files and the build manifest; the Worker owns /s/<id> and /ws/<id>.
   ASSETS: Fetcher;
+  // Cloudflare native Rate Limiting binding (wrangler.toml [[ratelimits]]). Caps WS-connect
+  // attempts per client IP — abuse/DoS insurance, NOT the capability gate (a wrong secret
+  // already lands on a different, empty DO). Best-effort / per-edge / eventually-consistent.
+  // `RateLimit` is a global type from @cloudflare/workers-types.
+  WS_CONNECT: RateLimit;
 }
 
-type SocketAttachment = {
-  role: BridgeClientRole;
-};
-
-// Storage key for the epoch-ms time the daemon socket last closed. Persisted in the
-// DO so it survives the daemon dropping AND a browser (re)connecting later — the DO
-// (and its storage) outlive any single socket. `expireSession()`'s deleteAll() clears
-// it on a clean /stop, so a terminated session has no stale timestamp.
-const DAEMON_LAST_SEEN_KEY = "daemonLastSeenAt";
+// Daemon sockets carry their threadId (the routing key); browser sockets carry only the role.
+// A daemon attachment is dedup'd by threadId; a browser is not (phone + desktop may both watch).
+type SocketAttachment = { role: "daemon"; threadId: ThreadId } | { role: "browser" };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -42,6 +50,14 @@ export default {
 
     const webSocketSecret = parseBridgeWebSocketPath(url.pathname);
     if (request.method === "GET" && webSocketSecret) {
+      // Rate-limit WS-connect attempts per client IP BEFORE spinning up a DO, so spraying
+      // /ws/<random> can't burn DO instantiations / requests. Best-effort abuse-bounding only
+      // (the secret hash is the real gate); we never rely on it for correctness.
+      const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+      if (!(await rateLimitAllows(env.WS_CONNECT, ip))) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
+
       // Route by the secret's hash, never the raw secret: the Durable Object name is a
       // non-secret, one-way derivative, so reaching a session's DO already proves knowledge
       // of its secret (sha256 is preimage-resistant). That routing IS the capability gate —
@@ -59,7 +75,7 @@ export default {
 export class VoiceSessionDurableObject extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const { role } = readBridgeAuthQuery(url.searchParams);
+    const { role, threadId: daemonThreadId } = readBridgeAuthQuery(url.searchParams);
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
@@ -79,25 +95,32 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
     // No token/credential check here: this DO is only reachable via /ws/<secret> routed
     // through idFromName(sha256(secret)), so arriving at this object already proves the
-    // caller knows the session secret. The secret is the whole capability; the session
-    // lives until the daemon terminates it (no wall-clock expiry).
+    // caller knows the session secret. The secret is the whole capability.
 
-    // A session has exactly one daemon. If a previous daemon socket is still attached
-    // (a zombie from a killed/moved pane, or a reconnect that raced the old close),
-    // evict it now so the freshly-connecting daemon is authoritative and the browser's
-    // presence lamp can never reflect a dead daemon. Browsers are not unique (phone +
-    // desktop tab may both watch), so only the daemon role is deduplicated.
-    if (role === "daemon") this.evictRole("daemon");
+    const threadId = role === "daemon" ? daemonThreadId : undefined;
+    if (role === "daemon" && !threadId) {
+      return new Response("Missing threadId", { status: 400 });
+    }
+
+    // Per-thread dedup (replaces the old single-daemon evictRole): a reconnecting pane (or a
+    // zombie from a moved/re-quit pane) shares its threadId, so evict ONLY that thread's stale
+    // socket — sibling threads are untouched. "Newer connection wins," scoped to one thread.
+    if (role === "daemon" && threadId) this.evictThread(threadId);
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    server.serializeAttachment({ role } satisfies SocketAttachment);
+    const attachment: SocketAttachment = role === "daemon" && threadId ? { role, threadId } : { role: "browser" };
+    server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server);
 
-    // Runs after acceptWebSocket, so a (re)connecting browser receives the stored
-    // `daemonLastSeenAt` even when no daemon is present — the DO and its storage still
-    // exist, so the browser can immediately grade a long-dead session as offline.
-    await this.broadcastPresence();
+    // A daemon connecting (re)claims the session: cancel any pending revoke-on-exit alarm.
+    if (role === "daemon") await this.ctx.storage.deleteAlarm();
+
+    if (role === "browser") {
+      // A fresh phone needs the full roster to render/grade every thread (reuse #10 per-thread),
+      // even threads whose daemon is currently offline (their stored lastSeenAt drives grading).
+      await this.sendRoster(server);
+    }
 
     return new Response(null, {
       status: 101,
@@ -114,58 +137,129 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     const attachment = ws.deserializeAttachment() as SocketAttachment | undefined;
     if (!attachment) return;
 
-    // The daemon ends the session on shutdown so a leaked URL can't reconnect to a
-    // daemon-less session. Only the daemon may terminate; never relayed to browsers.
-    if (attachment.role === "daemon" && envelope.channel === "control" && envelope.event.type === "terminate") {
-      await this.expireSession();
+    // ---- daemon → DO / browser --------------------------------------------------------
+    if (attachment.role === "daemon") {
+      // The daemon ends its thread on shutdown so a leaked URL can't reconnect to a dead
+      // session. Removing the last thread expires the whole session (deleteAll); otherwise it
+      // just drops that thread from the roster.
+      if (envelope.channel === "control" && envelope.event.type === "terminate") {
+        await this.removeThread(attachment.threadId, ws);
+        return;
+      }
+      // Register/refresh this thread's label + state in the roster, then broadcast the delta.
+      if (envelope.channel === "registry" && envelope.event.type === "thread_register") {
+        await this.upsertThread(attachment.threadId, envelope.event.info);
+        return;
+      }
+      // Content (transcript/reply/tts/history/status/error) → all browsers, re-tagged with the
+      // daemon's own threadId from its attachment (the DO trusts the attachment, not the wire).
+      if (envelope.channel === "browser") {
+        this.broadcastToBrowsers({ ...envelope, threadId: attachment.threadId });
+      }
       return;
     }
 
-    if (attachment.role === "daemon" && envelope.channel === "browser") {
-      this.broadcastTo("browser", envelope);
-      return;
-    }
-
+    // ---- browser → ONE thread's daemon ------------------------------------------------
     if (attachment.role === "browser" && envelope.channel === "daemon") {
-      this.broadcastTo("daemon", envelope);
+      const target = this.daemonSocket(envelope.threadId);
+      if (target) {
+        send(target, envelope);
+      } else {
+        // Never silently reroute to another thread: tell the phone the addressed thread is gone.
+        send(ws, {
+          channel: "browser",
+          threadId: envelope.threadId,
+          event: { type: "error", message: "That thread is offline." }
+        });
+      }
     }
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
-    await this.stampDaemonLastSeen(ws);
-    await this.broadcastPresence(ws);
+    await this.onSocketGone(ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    await this.stampDaemonLastSeen(ws);
-    await this.broadcastPresence(ws);
+    await this.onSocketGone(ws);
   }
 
-  // Record when a *daemon* socket goes away (only the daemon — a browser leaving is
-  // irrelevant to session liveness). Date.now() is the wall clock at close time; the
-  // value is read back into the next bridge_presence so the phone can show "Last
-  // active 14h ago". A clean /stop hits expireSession() (deleteAll) instead and never
-  // reaches here, so a terminated session leaves no timestamp.
-  private async stampDaemonLastSeen(ws: WebSocket): Promise<void> {
+  // A daemon socket dropping marks its thread offline (stamp lastSeenAt, broadcast thread_left)
+  // and, if it was the last thread, arms the revoke-on-exit grace alarm. A browser leaving is
+  // irrelevant to session liveness, so it's a no-op here.
+  private async onSocketGone(ws: WebSocket): Promise<void> {
     const attachment = ws.deserializeAttachment() as SocketAttachment | undefined;
     if (attachment?.role !== "daemon") return;
-    await this.ctx.storage.put(DAEMON_LAST_SEEN_KEY, Date.now());
+
+    const stored = await this.getThread(attachment.threadId);
+    // Already gone — a clean terminate removed it (possibly expiring the whole session). Nothing
+    // to do; without this guard the trailing close after expireSession() would re-arm a spurious
+    // alarm on an already-empty DO.
+    if (!stored) return;
+
+    const lastSeenAt = Date.now();
+    await this.putThread(attachment.threadId, { ...stored, lastSeenAt });
+    this.broadcastToBrowsers({
+      channel: "roster",
+      event: { type: "thread_left", threadId: attachment.threadId, lastSeenAt }
+    });
+
+    // If this was the last daemon, start the revoke-on-exit grace timer. A reconnecting daemon
+    // cancels it (deleteAlarm in fetch); if none does, alarm() expires the session.
+    if (this.noDaemonRemains(ws)) await this.ctx.storage.setAlarm(Date.now() + EMPTY_SESSION_GRACE_MS);
   }
 
-  private async expireSession(): Promise<void> {
-    for (const socket of this.ctx.getWebSockets()) {
-      socket.close(1008, "session ended");
-    }
-    await this.ctx.storage.deleteAll();
+  // Revoke-on-exit: fires EMPTY_SESSION_GRACE_MS after the roster went empty. Only expire if it
+  // is STILL empty (a daemon may have reconnected and cancelled — belt-and-braces re-check), so
+  // a flapping daemon never loses a live session.
+  async alarm(): Promise<void> {
+    if (!this.noDaemonRemains()) return;
+    await this.expireSession();
   }
 
-  // Close every currently-attached socket of a role (used to evict a stale daemon
-  // when a new one connects). 1012 ("service restart") is non-terminal, so a still-
-  // live peer would simply reconnect; a zombie is just dropped.
-  private evictRole(role: BridgeClientRole): void {
+  // ---- roster mutation -------------------------------------------------------
+
+  // Register or refresh a thread, then broadcast a `thread_joined` upsert (the browser keys the
+  // roster by threadId and replaces, so one event covers both first-seen and label/state
+  // refresh). Reconnecting / refreshing a known thread clears its lastSeenAt — it's live again.
+  private async upsertThread(threadId: ThreadId, info: ThreadInfo): Promise<void> {
+    const stored = storedFromInfo(info);
+    await this.putThread(threadId, stored);
+    const thread: RosterThread = { threadId, ...stored, connected: true };
+    this.broadcastToBrowsers({ channel: "roster", event: { type: "thread_joined", thread } });
+  }
+
+  // Remove a thread from the roster on a clean terminate (the daemon shutting down). Dropping
+  // the LAST thread expires the whole session immediately (the user ran /stop in the only pane);
+  // a non-last terminate just drops that thread. `terminatingSocket` is the daemon socket that
+  // sent terminate — it is still listed by getWebSockets() here, so exclude it from the
+  // "any daemon left?" check (and evictThread closes it regardless).
+  private async removeThread(threadId: ThreadId, terminatingSocket: WebSocket): Promise<void> {
+    await this.ctx.storage.delete(rosterKey(threadId));
+    this.evictThread(threadId);
+    this.broadcastToBrowsers({
+      channel: "roster",
+      event: { type: "thread_left", threadId, lastSeenAt: Date.now() }
+    });
+    if (this.noDaemonRemains(terminatingSocket)) await this.expireSession();
+  }
+
+  // ---- presence / routing helpers --------------------------------------------
+
+  // The live daemon socket for `threadId`, if one is attached right now.
+  private daemonSocket(threadId: ThreadId): WebSocket | undefined {
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
-      if (attachment?.role !== role) continue;
+      if (attachment?.role === "daemon" && attachment.threadId === threadId) return socket;
+    }
+    return undefined;
+  }
+
+  // Close any attached daemon socket for `threadId` (1012 = non-terminal, so a still-live peer
+  // would just reconnect; a zombie is simply dropped). Used by per-thread dedup + removeThread.
+  private evictThread(threadId: ThreadId): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
+      if (attachment?.role !== "daemon" || attachment.threadId !== threadId) continue;
       try {
         socket.close(1012, "replaced by a newer connection");
       } catch {
@@ -174,53 +268,68 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     }
   }
 
-  private liveRoles(exclude?: WebSocket): { daemon: boolean; browser: boolean } {
-    let daemon = false;
-    let browser = false;
-    for (const socket of this.ctx.getWebSockets()) {
-      if (socket === exclude) continue;
-      const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
-      if (attachment?.role === "daemon") daemon = true;
-      else if (attachment?.role === "browser") browser = true;
-    }
-    return { daemon, browser };
+  // Is no daemon left, so revoke-on-exit should fire? Excludes a closing/terminating socket that
+  // getWebSockets() still lists during its own handler. The decision lives in registry.isLastDaemon.
+  private noDaemonRemains(exclude?: WebSocket): boolean {
+    return isLastDaemon(this.ctx.getWebSockets(), roleOf, exclude);
   }
 
-  private broadcastTo(role: BridgeClientRole, envelope: BridgeEnvelope): void {
+  // Send the full roster to one browser: every stored thread, with `connected` computed live
+  // from the attached daemon sockets and its stored `lastSeenAt` for #10 offline grading.
+  private async sendRoster(target: WebSocket): Promise<void> {
+    const stored = await this.ctx.storage.list<StoredThread>({ prefix: ROSTER_KEY_PREFIX });
+    const threads = buildRoster(stored, (threadId) => this.daemonSocket(threadId) !== undefined);
+    send(target, { channel: "roster", event: { type: "thread_roster", threads } });
+  }
+
+  private getThread(threadId: ThreadId): Promise<StoredThread | undefined> {
+    return this.ctx.storage.get<StoredThread>(rosterKey(threadId));
+  }
+
+  private putThread(threadId: ThreadId, thread: StoredThread): Promise<void> {
+    return this.ctx.storage.put(rosterKey(threadId), thread);
+  }
+
+  private broadcastToBrowsers(envelope: BridgeEnvelope): void {
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
-      if (attachment?.role === role) {
-        try {
-          socket.send(JSON.stringify(envelope));
-        } catch {
-          // socket is closing; ignore
-        }
-      }
+      if (attachment?.role === "browser") send(socket, envelope);
     }
   }
 
-  // Presence is a separate signal from the daemon's rich session_status so it
-  // never overwrites the daemon's runtime state or memory in the browser. Async only
-  // to read `daemonLastSeenAt` from storage (DO storage reads are fast + serialized);
-  // every caller is already in an async context (fetch / webSocketClose / webSocketError).
-  private async broadcastPresence(exclude?: WebSocket): Promise<void> {
-    const { daemon, browser } = this.liveRoles(exclude);
-    const daemonLastSeenAt = (await this.ctx.storage.get<number>(DAEMON_LAST_SEEN_KEY)) ?? null;
+  // Tear the whole session down: close every socket (1008 terminal — the daemon treats it as
+  // "do not reconnect") and wipe storage so a leaked URL reaching a revoked session sees nothing.
+  private async expireSession(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
     for (const socket of this.ctx.getWebSockets()) {
-      if (socket === exclude) continue;
-      const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
-      if (attachment?.role !== "browser") continue;
-      try {
-        socket.send(
-          JSON.stringify({
-            channel: "browser",
-            event: { type: "bridge_presence", daemonConnected: daemon, browserConnected: browser, daemonLastSeenAt }
-          } satisfies BridgeEnvelope)
-        );
-      } catch {
-        // socket is closing; ignore
-      }
+      socket.close(1008, "session ended");
     }
+    await this.ctx.storage.deleteAll();
+  }
+}
+
+function send(socket: WebSocket, envelope: BridgeEnvelope): void {
+  try {
+    socket.send(JSON.stringify(envelope));
+  } catch {
+    // socket is closing; ignore
+  }
+}
+
+// The role on a socket's attachment (undefined if unattached). Used by the revoke-on-exit
+// decision (registry.isLastDaemon); the per-thread routing helpers read the full attachment.
+function roleOf(socket: WebSocket): "daemon" | "browser" | undefined {
+  return (socket.deserializeAttachment() as SocketAttachment | undefined)?.role;
+}
+
+// Ask the rate-limiter, failing OPEN: it's abuse-bounding, not the capability gate, so a limiter
+// fault (or a binding that throws) must never block legitimate traffic. Any error → allow.
+async function rateLimitAllows(limiter: RateLimit, key: string): Promise<boolean> {
+  try {
+    const { success } = await limiter.limit({ key });
+    return success;
+  } catch {
+    return true;
   }
 }
 

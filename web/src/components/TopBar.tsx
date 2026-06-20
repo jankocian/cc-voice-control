@@ -1,21 +1,23 @@
-import { AudioLines, ChevronDown, Menu, SlidersHorizontal } from "lucide-react";
+import { AudioLines, Menu, SlidersHorizontal } from "lucide-react";
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { FEATURES } from "@/lib/features";
-import { cn } from "@/lib/utils";
 
-// Top app bar. For the current single-screen experience this is just a small
-// "voice control" wordmark (left). The menu / thread-title / settings surfaces are
-// kept here behind FEATURES flags so they can be switched back on later.
+// Top app bar. The center slot holds the thread switcher (#7) when there's something to switch;
+// the menu / settings surfaces are kept here behind FEATURES flags so they can be switched back
+// on later. With no `children`, the bar is just the small "voice control" wordmark (left).
 export function TopBar({
-  title = "",
-  online,
   onMenu,
-  onSettings
+  onSettings,
+  children
 }: {
-  title?: string;
-  online: boolean;
+  // Kept for API compatibility with the demo harness; the live online dot now lives on the
+  // switcher pill (per-active-thread), so the bar itself no longer reads it.
+  online?: boolean;
   onMenu?: () => void;
   onSettings?: () => void;
+  // The centered thread switcher (pill → dropdown). App gates it on FEATURES.threadTitle.
+  children?: ReactNode;
 }) {
   return (
     <header className="flex min-h-16 shrink-0 items-center justify-between gap-2 px-4 pt-safe">
@@ -27,19 +29,7 @@ export function TopBar({
         <Wordmark />
       )}
 
-      {FEATURES.threadTitle && (
-        <button
-          type="button"
-          className="flex min-w-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-ink transition-colors duration-200 ease-soft hover:bg-surface/70 active:scale-[0.98]"
-        >
-          <span
-            className={cn("size-2 shrink-0 rounded-full transition-colors", online ? "bg-success" : "bg-ink-faint")}
-            aria-hidden="true"
-          />
-          <span className="truncate text-base font-semibold tracking-tight">{title}</span>
-          <ChevronDown className="size-4 shrink-0 text-ink-faint" aria-hidden="true" />
-        </button>
-      )}
+      {children}
 
       {FEATURES.settings && (
         <Button variant="surface" size="icon" aria-label="Settings" onClick={onSettings}>

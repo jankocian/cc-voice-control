@@ -5,12 +5,18 @@ export type { BridgeClientRole } from "./protocol.js";
 export const BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 export const BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
 export const BRIDGE_ROLE_QUERY_PARAM = "role";
+// A daemon socket carries its non-secret threadId (the cmux surface id / per-process uuid) so
+// the DO can attach it before the first message — routing browser→daemon needs it from the
+// start. Browsers omit it (a browser is not bound to a single thread).
+export const BRIDGE_THREAD_ID_QUERY_PARAM = "threadId";
 
 // A session is gated by a single secret carried in the URL path. There is no separate
 // token: the secret both routes the session (the worker derives the Durable Object name
 // by hashing it) and authorizes joining it, so knowledge of the secret IS the capability.
+// `threadId` (daemon only) is a non-secret routing key, not a credential.
 export type BridgeAuthQuery = {
   role?: BridgeClientRole;
+  threadId?: string;
 };
 
 export type ParsedBridgeBrowserSessionUrl = {
@@ -19,6 +25,7 @@ export type ParsedBridgeBrowserSessionUrl = {
 
 export type ParsedBridgeWebSocketUrl = ParsedBridgeBrowserSessionUrl & {
   role: BridgeClientRole;
+  threadId?: string;
 };
 
 const BROWSER_SESSION_PATH_PATTERN = /^\/s\/([^/]+)$/;
@@ -30,11 +37,16 @@ export function toBridgeBrowserSessionUrl(bridgeUrl: string, secret: string): st
   return url.toString();
 }
 
-export function toBridgeWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole): string {
+export function toBridgeWebSocketUrl(
+  bridgeUrl: string,
+  secret: string,
+  role: BridgeClientRole,
+  threadId?: string
+): string {
   const url = new URL(bridgeUrl);
   url.protocol = toBridgeWebSocketProtocol(url.protocol);
   url.pathname = toBridgeWebSocketPath(secret);
-  writeBridgeAuthQuery(url.searchParams, role);
+  writeBridgeAuthQuery(url.searchParams, role, threadId);
   return url.toString();
 }
 
@@ -54,10 +66,10 @@ export function parseBridgeBrowserSessionUrl(input: string | URL): ParsedBridgeB
 export function parseBridgeWebSocketUrl(input: string | URL): ParsedBridgeWebSocketUrl | undefined {
   const url = asUrl(input);
   const secret = parseBridgeWebSocketPath(url.pathname);
-  const { role } = readBridgeAuthQuery(url.searchParams);
+  const { role, threadId } = readBridgeAuthQuery(url.searchParams);
 
   if (!secret || !role) return undefined;
-  return { secret, role };
+  return { secret, role, threadId };
 }
 
 export function parseBridgeBrowserSessionPath(pathname: string): string | undefined {
@@ -70,7 +82,8 @@ export function parseBridgeWebSocketPath(pathname: string): string | undefined {
 
 export function readBridgeAuthQuery(searchParams: URLSearchParams): BridgeAuthQuery {
   return {
-    role: parseBridgeClientRole(searchParams.get(BRIDGE_ROLE_QUERY_PARAM))
+    role: parseBridgeClientRole(searchParams.get(BRIDGE_ROLE_QUERY_PARAM)),
+    threadId: searchParams.get(BRIDGE_THREAD_ID_QUERY_PARAM) ?? undefined
   };
 }
 
@@ -78,8 +91,9 @@ export function parseBridgeClientRole(value: string | null | undefined): BridgeC
   return value === "daemon" || value === "browser" ? value : undefined;
 }
 
-function writeBridgeAuthQuery(searchParams: URLSearchParams, role?: BridgeClientRole): void {
+function writeBridgeAuthQuery(searchParams: URLSearchParams, role?: BridgeClientRole, threadId?: string): void {
   if (role) searchParams.set(BRIDGE_ROLE_QUERY_PARAM, role);
+  if (threadId) searchParams.set(BRIDGE_THREAD_ID_QUERY_PARAM, threadId);
 }
 
 function toBridgeWebSocketProtocol(protocol: string): "ws:" | "wss:" {
