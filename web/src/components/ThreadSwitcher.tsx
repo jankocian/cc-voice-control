@@ -37,7 +37,7 @@ export function ThreadSwitcher({
   if (!active) return null;
 
   return (
-    <div className="relative flex min-w-0 justify-center">
+    <div className="relative flex min-w-0 items-center justify-center gap-1">
       <button
         type="button"
         disabled={!multi}
@@ -49,6 +49,18 @@ export function ThreadSwitcher({
         <Dot tone={active.tone} />
         <ThreadLabelText label={active.thread.label} />
         {multi && <ChevronDown className="size-4 shrink-0 text-ink-faint" aria-hidden="true" />}
+      </button>
+
+      {/* Spawn is ALWAYS reachable, beside the pill — opening a 2nd session can't live only inside the
+          dropdown, which itself only appears once a 2nd thread exists (chicken-and-egg). One tap →
+          spawn_thread on the active thread's daemon. */}
+      <button
+        type="button"
+        onClick={onSpawn}
+        aria-label="New session"
+        className="grid size-8 shrink-0 place-items-center rounded-full text-ink-soft transition-colors duration-200 ease-soft hover:bg-surface/70 hover:text-ink active:scale-[0.98]"
+      >
+        <Plus className="size-4" aria-hidden="true" />
       </button>
 
       {open && multi && (
