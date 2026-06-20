@@ -69,11 +69,24 @@ export function permissionModeArg(mode?: string): string {
   return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
 }
 
-// A finished turn whose user prompt is a slash command (`/voice-control:start`, the spawn skill, any
-// `/…`) is a plugin/CLI command, not conversation — kept out of the phone's mirrored history.
+// A prompt that is a slash command (`/voice-control:start`, the spawn skill, any `/…`) is a
+// plugin/CLI command, not conversation. Classified from the REAL prompt the UserPromptSubmit hook
+// reports (never the post-expansion transcript, which buries the real text under SKILL.md bodies).
 export function isSlashCommand(prompt: string): boolean {
   return prompt.trimStart().startsWith("/");
 }
+
+// One turn Claude is running, classified from its REAL prompt (UserPromptSubmit). A reply (Stop)
+// closes the oldest open turn and acts on its kind: voice → speak; typed → mirror + speak; plugin →
+// ignore. `openedAt` lets a stale never-closing turn be reaped so injection can't wedge forever.
+type TurnKind = "voice" | "typed" | "plugin";
+type OpenTurn = { kind: TurnKind; prompt: string; openedAt: number };
+
+// A turn open longer than this with no Stop is treated as abandoned (Claude crashed, or an interrupt
+// swallowed the Stop) and reaped, so the idle-gate can release queued voice prompts. Generous: real
+// agent turns can run many minutes; interrupting (steer/stop) clears turns immediately, so this is
+// only the unattended backstop.
+const TURN_TTL_MS = 20 * 60 * 1000;
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
@@ -137,16 +150,22 @@ export class VoiceDaemon {
   private healthTimer?: ReturnType<typeof setInterval>;
   private stopped = false;
 
-  // One turn is injected at a time. `inFlight` is the prompt we typed and are waiting for Claude to
-  // finish; `queue` holds prompts captured while a turn was running. While `inFlight` is set the
-  // finishing turn is treated as ours (spoken); otherwise a finished turn was typed in the terminal.
+  // The daemon injects ONE voice prompt at a time and ONLY while Claude is idle (no open turn).
+  // `inFlight` is the prompt currently typed/awaited; `queue` holds voice prompts captured while
+  // Claude was busy, drained FIFO by `pump` once the pane goes idle.
   private inFlight?: string;
   private readonly queue: string[] = [];
 
-  // Whether Claude is mid-turn, for the phone's working/idle status. Set by the UserPromptSubmit
-  // hook (any prompt — voice OR typed), cleared on the Stop hook. This makes the status accurate
-  // for terminal-typed turns too (which `inFlight` doesn't cover — the daemon never injected them).
-  private turnActive = false;
+  // The turn model. We do NOT scrape the transcript for "what the user said" — Claude Code injects
+  // synthetic user-role records (slash markers, whole SKILL.md bodies) that poison it. Instead the
+  // UserPromptSubmit hook hands us the REAL pre-expansion prompt (/turn-open) and the Stop hook the
+  // reply (/turn-close). `openTurns` is the FIFO of turns Claude is running (each classified from its
+  // real prompt); a reply closes the oldest. `injectedPending` holds prompts WE typed, awaiting their
+  // /turn-open so we recognise our own voice turns by exact content. `seenReplyUuids` dedups a
+  // double-fired Stop.
+  private readonly openTurns: OpenTurn[] = [];
+  private readonly injectedPending: string[] = [];
+  private readonly seenReplyUuids = new Set<string>();
 
   // The spawning session's LIVE permission mode, forwarded by the Stop hook each turn. A spawned
   // thread is launched with `--permission-mode <this>` so it inherits the user's mode EXACTLY (a
@@ -236,11 +255,11 @@ export class VoiceDaemon {
   private startHookListener(): Promise<void> {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
-        // POST routes from the plugin's hooks/skills: /reply (Stop hook → speak the reply), /reset
-        // (SessionStart on clear/compact → wipe this pane's voice history), /working (UserPromptSubmit
-        // → mark Claude busy for the status), and /spawn (the spawn skill → open a new workspace).
+        // POST routes from the plugin's hooks/skills: /turn-open (UserPromptSubmit → a turn started,
+        // with the REAL pre-expansion prompt + live permission mode), /turn-close (Stop → the turn's
+        // reply), /reset (SessionStart on clear/compact → wipe history), /spawn (the spawn skill).
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/reply" && route !== "/reset" && route !== "/working" && route !== "/spawn") {
+        if (route !== "/turn-open" && route !== "/turn-close" && route !== "/reset" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -260,23 +279,20 @@ export class VoiceDaemon {
             this.handleReset();
             return;
           }
-          if (route === "/working") {
-            // A turn just started (any prompt — voice or typed). Reflect "working" until its Stop.
-            this.turnActive = true;
-            this.emitStatus();
-            return;
-          }
           try {
-            const { prompt, text, permissionMode } = JSON.parse(body || "{}") as {
-              prompt?: string;
-              text?: string;
-              permissionMode?: string;
-            };
-            // Remember the session's live permission mode so a spawn mirrors it (see spawnThread).
-            if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
-              this.inheritedPermissionMode = permissionMode;
+            if (route === "/turn-open") {
+              const { prompt, permissionMode } = JSON.parse(body || "{}") as {
+                prompt?: string;
+                permissionMode?: string;
+              };
+              this.onTurnOpen(typeof prompt === "string" ? prompt : "", permissionMode);
+            } else {
+              const { reply, replyUuid } = JSON.parse(body || "{}") as { reply?: string; replyUuid?: string };
+              this.onTurnClose(
+                typeof reply === "string" ? reply : "",
+                typeof replyUuid === "string" ? replyUuid : undefined
+              );
             }
-            this.onClaudeReply(typeof prompt === "string" ? prompt : "", typeof text === "string" ? text : "");
           } catch {
             // ignore malformed hook payloads
           }
@@ -318,7 +334,12 @@ export class VoiceDaemon {
   // the voice history and push an empty `history` so the phone drops the stale thread view.
   private handleReset(): void {
     this.history.clear();
-    this.inFlight = undefined; // the cleared topic's in-flight turn is moot after /clear.
+    // /clear or /compact ends the current topic: drop every in-flight/queued/open turn so a stale
+    // turn from before the reset can't be spoken or wedge the idle-gate.
+    this.inFlight = undefined;
+    this.queue.length = 0;
+    this.openTurns.length = 0;
+    this.injectedPending.length = 0;
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
     this.sendToBrowser(buildHistoryEvent(this.history));
     this.emitStatus();
@@ -479,18 +500,21 @@ export class VoiceDaemon {
 
   // ---- injection (one turn at a time) ---------------------------------------
 
-  // Queue a prompt and start it if the pane is idle. Claude answers turns in order; we
-  // never type a second prompt until the current one's reply has come back.
+  // Queue a voice prompt; inject it once Claude is idle. We answer turns in order and never type a
+  // second prompt while one is running — including a turn the daemon didn't start (e.g. a typed turn
+  // or the bootstrap /voice-control:start) — so a spoken command can't race into a busy pane.
   private enqueue(text: string): void {
     this.queue.push(text);
     void this.pump();
   }
 
   private async pump(): Promise<void> {
-    if (this.inFlight !== undefined) return; // a turn is already running
+    if (this.inFlight !== undefined) return; // our own injection is still pending
+    if (this.openTurns.length > 0) return; // Claude is mid-turn — wait for the pane to go idle
     const next = this.queue.shift();
     if (next === undefined) return;
     this.inFlight = next; // set before awaiting so a concurrent pump sees "busy"
+    this.injectedPending.push(next); // /turn-open recognises this turn as ours by exact content
     this.emitStatus();
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(next)}`);
     const ok = await cmuxSubmit(next, this.init.surface);
@@ -505,6 +529,7 @@ export class VoiceDaemon {
       return;
     }
     this.inFlight = undefined;
+    this.injectedPending.pop(); // the prompt we just (failed to) inject never opens a turn
     // Don't hard-fail "listening" on one send: re-probe (only a positive pane-gone
     // verdict flips it). A transient send error stays optimistic and just retries.
     void this.refreshCmuxHealth();
@@ -516,11 +541,11 @@ export class VoiceDaemon {
     void this.pump(); // try the next queued prompt
   }
 
-  // Esc the running turn and clear our in-flight marker. The cancelled turn's reply (if
-  // any) won't match anything, so it won't be spoken.
+  // Esc the running turn → Claude goes idle. Drop every open turn (its late Stop, if any, lands on an
+  // empty queue and is ignored — the cancelled reply is never spoken) and clear our injection lock.
   private async interrupt(): Promise<void> {
     await cmuxInterrupt(this.init.surface);
-    this.inFlight = undefined;
+    this.clearTurns();
     this.emitStatus();
     void this.pump();
   }
@@ -528,7 +553,7 @@ export class VoiceDaemon {
   // Interrupt the running turn and run `text` next, ahead of anything already queued.
   private async interruptWith(text: string): Promise<void> {
     await cmuxInterrupt(this.init.surface);
-    this.inFlight = undefined;
+    this.clearTurns();
     this.queue.unshift(text);
     void this.pump();
   }
@@ -561,36 +586,78 @@ export class VoiceDaemon {
     return entry.requestId;
   }
 
-  // Stop hook delivered a finished turn → Claude is idle again. If a voice turn is in flight, THIS
-  // is its completion (Claude runs turns serially, so it can't finish a different one while ours is
-  // injected): speak the reply + clear, WITHOUT requiring the extracted prompt to match. A skill the
-  // agent runs mid-turn shifts the transcript's "last user prompt", and the old exact-match left
-  // inFlight stuck forever (phone wedged on "working", reply never delivered). No voice turn in
-  // flight → the user typed it in the terminal → mirror it to the phone as text.
-  private onClaudeReply(prompt: string, text: string): void {
-    this.turnActive = false;
-    if (this.inFlight !== undefined) {
-      console.error(`[reply] in-flight turn done, ${text.length} chars`);
-      this.inFlight = undefined;
-      if (text) void this.speak(this.emitClaudeTurn(text), text);
-      this.emitStatus();
-      void this.pump();
-      return;
+  // A turn STARTED (UserPromptSubmit, with the REAL prompt). Classify it and remember the live
+  // permission mode so a spawn during this turn inherits it. Drives the working lamp.
+  private onTurnOpen(prompt: string, permissionMode?: string): void {
+    if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
+      this.inheritedPermissionMode = permissionMode;
     }
-    this.mirrorTerminalTurn(prompt, text);
+    this.reapStaleTurns();
+    this.openTurns.push({ kind: this.classifyTurn(prompt), prompt, openedAt: Date.now() });
     this.emitStatus();
   }
 
-  // Mirror a terminal-typed turn (user prompt + Claude reply) to the phone as text, so a session the
-  // user drives partly by voice and partly by keyboard reads as ONE conversation on the web. Text
-  // only (the user is at the keyboard, not listening, and synthesizing every typed turn is wasteful).
-  // Skipped: the plugin's own slash-command turns (/voice-control:start, the spawn skill, …) — those
-  // aren't conversation, just noise on the phone.
-  private mirrorTerminalTurn(prompt: string, text: string): void {
-    if (!text || isSlashCommand(prompt)) return;
-    console.error(`[reply] mirrored terminal turn, ${text.length} chars`);
-    if (prompt) this.emitUserTurn(prompt, true);
-    this.emitClaudeTurn(text);
+  // Classify a turn from its REAL prompt. VOICE = a prompt WE injected (exact content — we typed
+  // those bytes), consumed from injectedPending. PLUGIN = a slash command (/voice-control:start, the
+  // spawn skill, …). Otherwise the user typed it in the terminal.
+  private classifyTurn(prompt: string): TurnKind {
+    const trimmed = prompt.trim();
+    if (this.injectedPending.length > 0 && this.injectedPending[0].trim() === trimmed) {
+      this.injectedPending.shift();
+      return "voice";
+    }
+    return isSlashCommand(prompt) ? "plugin" : "typed";
+  }
+
+  // A turn FINISHED (Stop, with the reply). Pair it with the OLDEST open turn (Claude runs turns FIFO
+  // per pane) and act on that turn's kind. No open turn → the daemon started mid-turn (e.g. the
+  // bootstrap /voice-control:start) → ignore. A double-fired Stop (same reply uuid) → ignore.
+  private onTurnClose(reply: string, replyUuid?: string): void {
+    if (replyUuid) {
+      if (this.seenReplyUuids.has(replyUuid)) return;
+      this.seenReplyUuids.add(replyUuid);
+    }
+    const turn = this.openTurns.shift();
+    if (!turn) {
+      this.emitStatus();
+      return;
+    }
+    if (turn.kind === "voice") {
+      console.error(`[turn] voice reply, ${reply.length} chars`);
+      this.inFlight = undefined; // our injection completed → release the next queued voice prompt
+      if (reply) void this.speak(this.emitClaudeTurn(reply), reply);
+      void this.pump();
+    } else if (turn.kind === "typed") {
+      console.error(`[turn] typed reply, ${reply.length} chars`);
+      // The user typed this in the terminal: show their REAL prompt and speak the reply (their pick).
+      if (reply) {
+        this.emitUserTurn(turn.prompt, true);
+        void this.speak(this.emitClaudeTurn(reply), reply);
+      }
+    } else {
+      console.error("[turn] plugin turn ignored");
+    }
+    this.emitStatus();
+  }
+
+  // Drop the daemon's view of all turns (an interrupt Esc's the pane → Claude is idle; /reset wipes
+  // the topic). A late Stop for a dropped turn lands on an empty queue and is ignored.
+  private clearTurns(): void {
+    this.inFlight = undefined;
+    this.openTurns.length = 0;
+    this.injectedPending.length = 0;
+  }
+
+  // Backstop: drop open turns older than TURN_TTL_MS (Claude crashed / an interrupt swallowed the
+  // Stop) so the idle-gate can release queued voice prompts. A reaped voice turn clears the injection
+  // lock. Only the front is stale-checked since openTurns is age-ordered (FIFO by openedAt).
+  private reapStaleTurns(): void {
+    const cutoff = Date.now() - TURN_TTL_MS;
+    while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
+      const stale = this.openTurns.shift();
+      if (stale?.kind === "voice") this.inFlight = undefined;
+      console.error("[turn] reaped a stale open turn");
+    }
   }
 
   private async speak(requestId: string, text: string): Promise<void> {
@@ -618,11 +685,11 @@ export class VoiceDaemon {
     };
   }
 
-  // Claude is "working" while a turn is active (UserPromptSubmit→Stop) OR a voice turn we injected
-  // is in flight — the latter is a belt-and-braces fallback in case the UserPromptSubmit hook didn't
-  // land. Both clear on the Stop hook, so the status can never latch "working".
+  // Claude is "working" while any turn is open (UserPromptSubmit→Stop) OR a voice prompt we injected
+  // is awaiting its turn-open. Derived from the FIFO, so a missed Stop is reaped (lamp self-clears)
+  // and two prompts before one Stop keep it lit until both close — it can never latch or desync.
   private isWorking(): boolean {
-    return this.turnActive || this.inFlight !== undefined;
+    return this.openTurns.length > 0 || this.inFlight !== undefined;
   }
 
   // Tell the DO about this thread (register on connect, refresh on label/state change). The DO

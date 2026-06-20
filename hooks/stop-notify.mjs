@@ -2,27 +2,22 @@
 /**
  * Stop hook for the voice remote.
  *
- * Fires when the interactive Claude Code session finishes a turn. It reads, from the
- * transcript, the user prompt that started the turn and the turn's FINAL assistant
- * reply, then POSTs both to the local voice daemon. The daemon speaks the reply only
- * if the prompt matches the turn it injected, so terminal-typed turns aren't read
- * aloud. It also forwards the session's live `permission_mode` so the daemon can spawn
- * new sessions in the same mode. If the daemon isn't running, this is a no-op. It never
- * blocks the Stop event.
+ * Fires when the interactive Claude Code session finishes a turn. It reads the turn's FINAL
+ * assistant reply from the transcript and POSTs it to this pane's daemon at /turn-close. The daemon
+ * pairs it with the turn it opened (from the UserPromptSubmit hook) and speaks / mirrors / ignores
+ * accordingly — so this hook does NOT try to figure out what the user said (the transcript buries
+ * the real prompt under command markers and SKILL.md bodies; UserPromptSubmit carries it instead).
+ * If the daemon isn't running, this is a no-op. It never blocks the Stop event.
  */
 import { readFileSync, watch } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Plugin runtime state lives in Claude Code's managed per-plugin data dir
-// ($CLAUDE_PLUGIN_DATA, exported to hook processes), never in the user's ~/.config.
-// Falls back to a temp dir if the variable is somehow unset.
+// Per-thread runtime file: runtime/<surfaceId>.json (matches config.ts#threadRuntimePath). This hook
+// runs in the pane that finished a turn, so $CMUX_SURFACE_ID identifies its own daemon; "default"
+// mirrors the daemon's fallback when launched outside cmux.
 const STATE_DIR = process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
-// Per-thread runtime file: runtime/<surfaceId>.json (matches config.ts#threadRuntimePath and the
-// daemon's writeRuntime). This hook runs in the pane that finished a turn, so $CMUX_SURFACE_ID
-// identifies its own daemon; "default" mirrors the daemon's fallback when launched outside cmux.
-// (Mirrors session-reset.mjs — #7 made runtime files per-thread; the flat runtime.json is gone.)
 const SURFACE_ID = process.env.CMUX_SURFACE_ID || "default";
 const RUNTIME_PATH = join(STATE_DIR, "runtime", `${SURFACE_ID}.json`);
 
@@ -40,16 +35,10 @@ async function main() {
   const runtime = readRuntime();
   if (!runtime?.port) process.exit(0); // daemon not running
 
-  const turn = await resolveTurn(hook.transcript_path);
-  if (!turn) process.exit(0);
+  const reply = await resolveReply(hook.transcript_path);
+  if (!reply) process.exit(0);
 
-  // Forward the session's live permission_mode so the daemon can spawn new sessions in the SAME
-  // mode (a child `claude` doesn't inherit it via env/process tree, and no env var exposes it).
-  await post(runtime.port, {
-    prompt: turn.prompt,
-    text: turn.text,
-    permissionMode: hook.permission_mode || ""
-  }).catch(() => {});
+  await post(runtime.port, { reply: reply.text, replyUuid: reply.uuid }).catch(() => {});
   process.exit(0);
 }
 
@@ -72,49 +61,45 @@ function readRuntime() {
 }
 
 /**
- * Resolve the finished turn: its user prompt and the final assistant reply.
- *
- * The Stop hook can fire before Claude has flushed the final assistant message to the
- * transcript JSONL, so we read once and, if the final message isn't there yet, wait for
- * the file to change (fs.watch — event-driven, no polling) and re-read. A turn ends with
- * a terminal assistant message (stop_reason ≠ "tool_use"), so this resolves as soon as
- * that write lands. The ultimate backstop is Claude Code's own hook timeout.
+ * Resolve the turn's final assistant reply. The Stop hook can fire before Claude has flushed the
+ * final message to the transcript JSONL, so we read once and, if it isn't there yet, wait for the
+ * file to change (fs.watch — event-driven, no polling) and re-read. The turn is done once the newest
+ * assistant message carries a terminal stop_reason (not a tool_use pause). Backstop: the hook timeout.
  */
-function resolveTurn(transcriptPath) {
+function resolveReply(transcriptPath) {
   if (!transcriptPath) return Promise.resolve(undefined);
 
-  const read = () => readTurn(transcriptPath);
+  const read = () => readReply(transcriptPath);
   const first = read();
-  if (first.final) return Promise.resolve({ prompt: first.prompt, text: first.text });
+  if (first.final) return Promise.resolve({ text: first.text, uuid: first.uuid });
 
   return new Promise((resolve) => {
     let watcher;
     let settled = false;
-    const finish = (turn) => {
+    const finish = (reply) => {
       if (settled) return;
       settled = true;
       if (watcher) watcher.close();
-      resolve(turn);
+      resolve(reply);
     };
     try {
       watcher = watch(transcriptPath, () => {
         const r = read();
-        if (r.final) finish({ prompt: r.prompt, text: r.text });
+        if (r.final) finish({ text: r.text, uuid: r.uuid });
       });
-      // If watching fails mid-flight, fall back to whatever we last read.
-      watcher.on("error", () => finish(first.prompt ? { prompt: first.prompt, text: first.text } : undefined));
+      watcher.on("error", () => finish(undefined));
     } catch {
-      finish(first.prompt ? { prompt: first.prompt, text: first.text } : undefined);
+      finish(undefined);
     }
   });
 }
 
-function readTurn(transcriptPath) {
+function readReply(transcriptPath) {
   let raw;
   try {
     raw = readFileSync(transcriptPath, "utf8");
   } catch {
-    return { final: false, prompt: "", text: "" };
+    return { final: false };
   }
   const records = raw
     .split("\n")
@@ -128,36 +113,20 @@ function readTurn(transcriptPath) {
     })
     .filter(Boolean);
 
-  let lastUser = -1;
-  for (let i = 0; i < records.length; i++) if (isUserPrompt(records[i])) lastUser = i;
-  const prompt = lastUser >= 0 ? messageText(records[lastUser]) : "";
-
-  // Scan back from the end (after the most recent real user prompt) for the assistant
-  // message that ended the turn: a terminal stop_reason, not a tool_use pause.
-  for (let i = records.length - 1; i > lastUser; i--) {
-    const message = records[i].message || records[i];
-    const role = message.role || records[i].type;
+  // Scan from the end for the newest assistant message. The turn is finished once it carries a
+  // terminal stop_reason; a tool_use pause means the final reply hasn't been written yet.
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    const message = record.message || record;
+    const role = message.role || record.type;
     if (role !== "assistant") continue;
     const stop = message.stop_reason;
-    if (stop && stop !== "tool_use") return { final: true, prompt, text: extractText(message.content) };
+    if (stop && stop !== "tool_use") {
+      return { final: true, text: extractText(message.content), uuid: record.uuid || message.id || "" };
+    }
+    return { final: false }; // newest assistant message is a tool pause → not done yet
   }
-  return { final: false, prompt, text: "" };
-}
-
-// A real user turn (the injected prompt) — not a tool_result, which also has role "user".
-function isUserPrompt(record) {
-  const message = record.message || record;
-  const role = message.role || record.type;
-  if (role !== "user") return false;
-  const content = message.content;
-  if (typeof content === "string") return content.trim().length > 0;
-  if (Array.isArray(content)) return content.some((b) => b && b.type === "text");
-  return false;
-}
-
-function messageText(record) {
-  const message = record.message || record;
-  return extractText(message.content);
+  return { final: false };
 }
 
 function extractText(content) {
@@ -177,7 +146,7 @@ function post(port, body) {
       {
         host: "127.0.0.1",
         port,
-        path: "/reply",
+        path: "/turn-close",
         method: "POST",
         headers: { "content-type": "application/json", "content-length": data.length }
       },
