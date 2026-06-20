@@ -8,11 +8,13 @@ import type { BridgeEnvelope, RosterThread, ThreadId, ThreadInfo } from "../../s
 import {
   buildRoster,
   EMPTY_SESSION_GRACE_MS,
+  isGhostThread,
   isLastDaemon,
   ROSTER_KEY_PREFIX,
   rosterKey,
   type StoredThread,
-  storedFromInfo
+  storedFromInfo,
+  threadIdFromKey
 } from "./registry";
 
 export interface Env {
@@ -224,7 +226,9 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   private async upsertThread(threadId: ThreadId, info: ThreadInfo): Promise<void> {
     const stored = storedFromInfo(info);
     await this.putThread(threadId, stored);
-    const thread: RosterThread = { threadId, ...stored, connected: true };
+    // `spawnId` rides only on this live delta (a one-shot follow signal), never into storage — so a
+    // later full-roster snapshot can't re-fire the follow.
+    const thread: RosterThread = { threadId, ...stored, connected: true, spawnId: info.spawnId };
     this.broadcastToBrowsers({ channel: "roster", event: { type: "thread_joined", thread } });
   }
 
@@ -278,8 +282,14 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   // from the attached daemon sockets and its stored `lastSeenAt` for #10 offline grading.
   private async sendRoster(target: WebSocket): Promise<void> {
     const stored = await this.ctx.storage.list<StoredThread>({ prefix: ROSTER_KEY_PREFIX });
-    const threads = buildRoster(stored, (threadId) => this.daemonSocket(threadId) !== undefined);
-    send(target, { channel: "roster", event: { type: "thread_roster", threads } });
+    const now = Date.now();
+    const connected = (threadId: ThreadId) => this.daemonSocket(threadId) !== undefined;
+    // Prune long-offline ghosts from storage so they can't accumulate across a restart-heavy session
+    // (buildRoster also excludes them from this snapshot).
+    for (const [key, value] of stored) {
+      if (isGhostThread(value, connected(threadIdFromKey(key)), now)) void this.ctx.storage.delete(key);
+    }
+    send(target, { channel: "roster", event: { type: "thread_roster", threads: buildRoster(stored, connected, now) } });
   }
 
   private getThread(threadId: ThreadId): Promise<StoredThread | undefined> {

@@ -12,7 +12,7 @@ import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useR
 import { useThreads } from "./hooks/useThreads";
 import { useWakeLock } from "./hooks/useWakeLock";
 import { type Message, makeMessage, messageFromHistory, reconcileMessages } from "./lib/messages";
-import type { RosterThread, ThreadId } from "./lib/protocol";
+import type { RosterEvent, RosterThread, ThreadId } from "./lib/protocol";
 import type { SessionCredentials } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
 
@@ -61,10 +61,13 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   // daemon (the row being read belongs to the on-screen thread). Read active threadId lazily.
   const activeThreadIdRef = useRef<ThreadId | null>(activeThreadId);
   activeThreadIdRef.current = activeThreadId;
-  // Spawn-follow state: armed when the daemon signals `spawn_pending`; `seenThreadsRef` tracks every
-  // threadId seen so we can detect the fresh one. (Declared here so handleContentEvent can arm it.)
-  const seenThreadsRef = useRef<Set<ThreadId>>(new Set());
-  const activateOnSpawnRef = useRef(false);
+  // Spawn-follow: when the daemon signals `spawn_pending` it carries a one-shot `spawnId`. We add it
+  // here; the new thread echoes the SAME id in its thread_joined, and we switch to that exact thread
+  // (see the onRoster wrapper). Keyed by id → immune to ordering, ghosts, and unrelated reconnects.
+  const pendingSpawnIdsRef = useRef<Set<string>>(new Set());
+  // switchThread is defined further down; the onRoster wrapper (created with the bridge, above it)
+  // reaches it through this ref.
+  const switchThreadRef = useRef<(threadId: ThreadId) => void>(() => {});
   const sendDaemonRef = useRef<
     ((threadId: ThreadId, command: { type: "get_audio"; requestId: string }) => boolean) | null
   >(null);
@@ -135,15 +138,15 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
             event.replay === true || threadId !== activeThreadIdRef.current
           );
           return;
-        case "spawn_pending":
-          // A daemon (any thread — the "+" or the spawn skill) just opened a new session. Arm the
-          // follow so the phone switches to the new thread the moment it joins (see the effect
-          // below). Self-clears after a grace window so a much-later unrelated join can't steal focus.
-          activateOnSpawnRef.current = true;
-          window.setTimeout(() => {
-            activateOnSpawnRef.current = false;
-          }, SPAWN_FOLLOW_TIMEOUT_MS);
+        case "spawn_pending": {
+          // A daemon (the "+" or the spawn skill) just opened a new session with this exact spawnId.
+          // Remember it; the new thread carries the same id in its thread_joined → we follow it (see
+          // onRoster). Self-clears after a grace window if the spawn never joins.
+          const { spawnId } = event;
+          pendingSpawnIdsRef.current.add(spawnId);
+          window.setTimeout(() => pendingSpawnIdsRef.current.delete(spawnId), SPAWN_FOLLOW_TIMEOUT_MS);
           return;
+        }
         case "error":
           if (threadId === activeThreadIdRef.current) setTranscribingThreadId(null);
           // The only error carrying a requestId is a `get_audio` miss (that reply's audio was
@@ -156,10 +159,27 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [attachAudio, dropAudio, markPlayable, showFlash, threads]
   );
 
+  // Apply every roster event, and follow a spawn into its EXACT new thread the moment it joins
+  // (matched by the one-shot spawnId on its thread_joined — never a ghost or unrelated reconnect).
+  const onRoster = useCallback(
+    (event: RosterEvent) => {
+      threads.applyRosterEvent(event);
+      if (
+        event.type === "thread_joined" &&
+        event.thread.spawnId &&
+        pendingSpawnIdsRef.current.has(event.thread.spawnId)
+      ) {
+        pendingSpawnIdsRef.current.delete(event.thread.spawnId);
+        switchThreadRef.current(event.thread.threadId);
+      }
+    },
+    [threads]
+  );
+
   const bridge = useBridge({
     secret: credentials.secret,
     onEvent: handleContentEvent,
-    onRoster: threads.applyRosterEvent
+    onRoster
   });
   const { connected, bridgeReady, sendDaemon } = bridge;
 
@@ -208,20 +228,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     },
     [stopPlayback, threads]
   );
-
-  // Follow a spawn into its new thread: when `activateOnSpawnRef` is armed (the daemon signalled
-  // spawn_pending), the moment a fresh threadId appears in the roster we focus it, so the phone lands
-  // in the session just opened. `seenThreadsRef` tracks every threadId seen so an unrelated later
-  // join never wins the focus.
-  useEffect(() => {
-    const current = threads.threads.map((t) => t.threadId);
-    const fresh = current.filter((id) => !seenThreadsRef.current.has(id));
-    seenThreadsRef.current = new Set(current);
-    if (activateOnSpawnRef.current && fresh.length > 0) {
-      activateOnSpawnRef.current = false;
-      switchThread(fresh[0]);
-    }
-  }, [threads.threads, switchThread]);
+  // Let the onRoster wrapper (created above, with the bridge) reach the latest switchThread.
+  switchThreadRef.current = switchThread;
 
   // ---- recorder (shared singleton, acts on the active thread) -----------------
   const sendAudio = useCallback(

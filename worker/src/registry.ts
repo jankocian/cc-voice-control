@@ -54,14 +54,28 @@ export function isLastDaemon<S>(
 // live `connected` (is a daemon socket attached for it right now?). Pure (storage map +
 // presence predicate in, RosterThread[] out) so the join/lastSeenAt shaping is testable
 // without a DO runtime.
+// A thread offline (no daemon socket) for longer than this is a "ghost" — a crashed/quit pane the
+// user won't return to. Pruned from roster snapshots so a restart-heavy session doesn't pile up dead
+// entries (which made the old spawn-follow grab the wrong thread and clutter the switcher). Generous,
+// so a briefly-sleeping laptop isn't dropped from the list too eagerly.
+export const GHOST_TTL_MS = 30 * 60 * 1000;
+
+export function isGhostThread(stored: StoredThread, connected: boolean, now: number): boolean {
+  return !connected && stored.lastSeenAt !== null && now - stored.lastSeenAt > GHOST_TTL_MS;
+}
+
+// Build the roster snapshot, computing `connected` live and dropping long-offline ghosts.
 export function buildRoster(
   stored: Map<string, StoredThread>,
-  isConnected: (threadId: ThreadId) => boolean
+  isConnected: (threadId: ThreadId) => boolean,
+  now: number
 ): RosterThread[] {
   const threads: RosterThread[] = [];
   for (const [key, value] of stored) {
     const threadId = threadIdFromKey(key);
-    threads.push({ threadId, ...value, connected: isConnected(threadId) });
+    const connected = isConnected(threadId);
+    if (isGhostThread(value, connected, now)) continue;
+    threads.push({ threadId, ...value, connected });
   }
   return threads;
 }
