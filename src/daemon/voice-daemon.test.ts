@@ -6,19 +6,26 @@ import { VoiceDaemon } from "./voice-daemon.js";
 
 const BROWSER_URL = "https://voice.example.com/s/sek";
 
-describe("VoiceDaemon.ensureRuntimePublished", () => {
+describe("VoiceDaemon runtime publication", () => {
   let dataDir: string;
   let previousDataDir: string | undefined;
+  let previousCmuxBin: string | undefined;
 
   beforeEach(() => {
     previousDataDir = process.env.CLAUDE_PLUGIN_DATA;
+    previousCmuxBin = process.env.CMUX_BIN;
     dataDir = mkdtempSync(join(tmpdir(), "voice-control-test-"));
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
+    // Point cmux at a harmless binary so the health monitor's spawn never touches a real
+    // cmux socket during the test (its result is fire-and-forget; we don't assert on it).
+    process.env.CMUX_BIN = "true";
   });
 
   afterEach(() => {
     if (previousDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = previousDataDir;
+    if (previousCmuxBin === undefined) delete process.env.CMUX_BIN;
+    else process.env.CMUX_BIN = previousCmuxBin;
     rmSync(dataDir, { recursive: true, force: true });
   });
 
@@ -38,29 +45,26 @@ describe("VoiceDaemon.ensureRuntimePublished", () => {
     });
   }
 
-  it("writes runtime.json with the phone URL when it is missing", () => {
+  it("writes runtime.json (URL + port) and qr.txt on start(), then removes them on stop()", async () => {
     const runtime = join(dataDir, "runtime.json");
+    const qr = join(dataDir, "qr.txt");
     expect(existsSync(runtime)).toBe(false);
 
-    daemon().ensureRuntimePublished();
+    const d = daemon();
+    await d.start();
 
     expect(existsSync(runtime)).toBe(true);
+    expect(existsSync(qr)).toBe(true);
     const parsed = JSON.parse(readFileSync(runtime, "utf8"));
     expect(parsed.sessionUrl).toBe(BROWSER_URL);
     expect(parsed.surface).toBe("SURF");
-  });
+    expect(typeof parsed.port).toBe("number");
+    expect(parsed.pid).toBe(process.pid);
 
-  // The exact recovery the bug needed: the start skill deletes runtime.json while
-  // the daemon keeps running; the next reconcile tick must bring it back.
-  it("re-creates runtime.json after it is deleted out from under a running daemon", () => {
-    const runtime = join(dataDir, "runtime.json");
-    const d = daemon();
-
-    d.ensureRuntimePublished();
-    rmSync(runtime);
+    // stop() tears down the listener + bridge + timers and removes the runtime artifacts,
+    // so the test leaves no open handles (and no stale URL on disk).
+    d.stop();
     expect(existsSync(runtime)).toBe(false);
-
-    d.ensureRuntimePublished();
-    expect(existsSync(runtime)).toBe(true);
+    expect(existsSync(qr)).toBe(false);
   });
 });

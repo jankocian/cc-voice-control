@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import WebSocket from "ws";
 import type {
@@ -64,13 +64,13 @@ export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
  * as a real user message. The plugin Stop hook POSTs Claude's reply back here →
  * OpenAI TTS → phone. It is the real interactive session — no turn-hijack.
  *
- * Critically, this runs *inside Claude Code's process tree* (hosted by the plugin
- * MCP server), so it keeps cmux's socket trust AND dies with the Claude session: a
- * detached/`nohup` process would be reparented to launchd and would both lose cmux's
- * trust and outlive the session.
+ * Critically, this runs *inside Claude Code's process tree* (hosted as a background
+ * Bash task by `/voice-control:start`), so it keeps cmux's socket trust AND dies with
+ * the Claude session: a detached/`nohup` process would be reparented to launchd and
+ * would both lose cmux's trust and outlive the session.
  *
- * IMPORTANT: never write to stdout here. When hosted as an MCP server, stdout is
- * the JSON-RPC channel; all logging goes to stderr.
+ * Logging goes to stderr (teed to ${stateDir}/daemon.log by the entry point); the
+ * standalone entry reserves stdout for its short "voice active" banner.
  */
 export class VoiceDaemon {
   private readonly init: DaemonInit;
@@ -213,18 +213,6 @@ export class VoiceDaemon {
         2
       )
     );
-  }
-
-  /**
-   * Re-publish runtime.json if it has gone missing while the daemon is still up.
-   * `runtime.json` is derived state, not a one-shot artifact: the `/voice-control:start`
-   * skill deletes it as a liveness probe before re-touching an already-present `active`
-   * flag, so no rising-edge activation fires to recreate it. The MCP server's reconcile
-   * poll calls this every tick; it's cheap and only writes when the file is actually
-   * absent, so a running daemon always keeps the phone URL on disk.
-   */
-  ensureRuntimePublished(): void {
-    if (!existsSync(runtimePath())) this.writeRuntime();
   }
 
   // ---- bridge ----------------------------------------------------------------

@@ -4,8 +4,8 @@
  * the single latest reply the daemon used to retain.
  *
  * Pure data structure (no I/O, no protocol/network awareness) so the eviction + sequencing
- * rules are unit-testable in isolation, the same way `reconcile.ts` pulls the MCP server's
- * decision logic out of its side-effectful host module.
+ * rules are unit-testable in isolation, the same way `standalone.ts`'s `shouldReap` pulls the
+ * orphan-guard decision out of its side-effectful host module.
  *
  * The ring holds the last `maxReplies` CLAUDE replies PLUS the user message(s) that
  * preceded each retained reply. Reply entries carry their synthesized audio (mp3

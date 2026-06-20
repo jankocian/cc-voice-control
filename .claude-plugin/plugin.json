@@ -7,11 +7,5 @@
     "email": "mail@jankocian.com"
   },
   "homepage": "https://github.com/jankocian/cc-voice-control",
-  "license": "MIT",
-  "mcpServers": {
-    "voice-control": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/daemon/mcp-server.js"]
-    }
-  }
+  "license": "MIT"
 }
