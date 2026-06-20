@@ -19,7 +19,12 @@ import { join } from "node:path";
 // ($CLAUDE_PLUGIN_DATA, exported to hook processes), never in the user's ~/.config.
 // Falls back to a temp dir if the variable is somehow unset.
 const STATE_DIR = process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
-const RUNTIME_PATH = join(STATE_DIR, "runtime.json");
+// Per-thread runtime file: runtime/<surfaceId>.json (matches config.ts#threadRuntimePath and the
+// daemon's writeRuntime). This hook runs in the pane that finished a turn, so $CMUX_SURFACE_ID
+// identifies its own daemon; "default" mirrors the daemon's fallback when launched outside cmux.
+// (Mirrors session-reset.mjs — #7 made runtime files per-thread; the flat runtime.json is gone.)
+const SURFACE_ID = process.env.CMUX_SURFACE_ID || "default";
+const RUNTIME_PATH = join(STATE_DIR, "runtime", `${SURFACE_ID}.json`);
 
 main().catch(() => process.exit(0));
 
