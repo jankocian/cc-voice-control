@@ -2,14 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  loadConfig,
-  loadOrCreateSession,
-  resolveConfig,
-  threadRuntimePath,
-  toBrowserUrl,
-  toWebSocketUrl
-} from "./config.js";
+import { loadOrCreateSession, resolveConfig, threadRuntimePath, toBrowserUrl, toWebSocketUrl } from "./config.js";
 
 describe("voice remote URL helpers", () => {
   it("creates browser session URLs from the single secret", () => {
@@ -91,11 +84,6 @@ describe("resolveConfig", () => {
     writeFileSync(path, JSON.stringify({ openaiApiKey: "sk-test" }));
     chmodSync(path, 0o644);
     await expect(resolveConfig(path)).rejects.toThrow(/permissions/);
-  });
-
-  it("throws via loadConfig when the key is missing", async () => {
-    const path = writeConfig({ bridgeUrl: "https://example.workers.dev" });
-    await expect(loadConfig(path)).rejects.toThrow(/OpenAI API key is required/);
   });
 });
 

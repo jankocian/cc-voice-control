@@ -1,8 +1,5 @@
 import type { VoiceRemoteConfig } from "./config.js";
 
-const DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
-const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
-const DEFAULT_VOICE = "marin";
 const OPENAI_BASE = "https://api.openai.com/v1";
 
 /** OpenAI's /audio/speech accepts at most ~4096 characters of input per call. Longer
@@ -20,8 +17,7 @@ function filenameForMime(mimeType: string): string {
   return "speech.webm";
 }
 
-/** Transcribe a recorded audio clip with the OpenAI speech-to-text API.
- *  Mirrors elevenlabs.transcribeAudio's signature/return so call sites are unchanged. */
+/** Transcribe a recorded audio clip with the OpenAI speech-to-text API. */
 export async function transcribeAudio(config: VoiceRemoteConfig, audio: Uint8Array, mimeType: string): Promise<string> {
   const form = new FormData();
   // Copy into a fresh ArrayBuffer-backed view so the DOM Blob type is satisfied.
@@ -29,7 +25,7 @@ export async function transcribeAudio(config: VoiceRemoteConfig, audio: Uint8Arr
   bytes.set(audio);
   const type = mimeType || "audio/webm";
   form.append("file", new Blob([bytes], { type }), filenameForMime(type));
-  form.append("model", config.sttModel ?? DEFAULT_STT_MODEL);
+  form.append("model", config.sttModel);
   if (config.language) form.append("language", config.language);
   // We only need the final transcript string; "text" returns it raw (no JSON envelope).
   form.append("response_format", "text");
@@ -60,8 +56,8 @@ async function synthesizeChunk(config: VoiceRemoteConfig, text: string, voiceOve
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      model: config.ttsModel ?? DEFAULT_TTS_MODEL,
-      voice: voiceOverride ?? config.openaiVoice ?? DEFAULT_VOICE,
+      model: config.ttsModel,
+      voice: voiceOverride ?? config.openaiVoice,
       input: text,
       response_format: "mp3",
       ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {})
@@ -77,9 +73,8 @@ async function synthesizeChunk(config: VoiceRemoteConfig, text: string, voiceOve
 }
 
 /** Render text to speech with the OpenAI text-to-speech API. Returns base64 MP3 with
- *  mimeType "audio/mpeg" — byte-shape identical to elevenlabs.synthesizeSpeech, so the
- *  browser playback contract is unchanged. `voiceOverride` lets the phone pick a voice
- *  for the session ahead of the config default.
+ *  mimeType "audio/mpeg". `voiceOverride` lets the phone pick a voice for the session
+ *  ahead of the config default.
  *
  *  Chunking is transparent: a reply within the per-call limit is one request (fast path);
  *  a longer reply is split on sentence boundaries (`splitForTts`) into ≤-limit chunks,

@@ -1,4 +1,4 @@
-// Audio helpers ported verbatim from the vanilla client.
+// Audio helpers: pick a supported recording MIME type and decode/convert clips.
 
 export function pickMimeType(): string {
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];

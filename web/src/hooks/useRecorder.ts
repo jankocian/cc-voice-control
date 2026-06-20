@@ -15,9 +15,9 @@ export type UseRecorderOptions = {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   // Called with the finished clip once recording stops and is read.
   onClip: (clip: RecordedClip) => void;
-  // Called for the error states the vanilla client flashed.
+  // Called for recorder error states (surfaced to the user as a transient flash).
   onError: (error: RecorderError) => void;
-  // Called when recording starts so playback can be stopped (vanilla: stopPlayback()).
+  // Called when recording starts so playback can be stopped.
   onStart?: () => void;
 };
 

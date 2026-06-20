@@ -102,9 +102,9 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       return new Response("Missing threadId", { status: 400 });
     }
 
-    // Per-thread dedup (replaces the old single-daemon evictRole): a reconnecting pane (or a
-    // zombie from a moved/re-quit pane) shares its threadId, so evict ONLY that thread's stale
-    // socket — sibling threads are untouched. "Newer connection wins," scoped to one thread.
+    // Per-thread dedup: a reconnecting pane (or a zombie from a moved/re-quit pane) shares its
+    // threadId, so evict ONLY that thread's stale socket — sibling threads are untouched.
+    // "Newer connection wins," scoped to one thread.
     if (role === "daemon" && threadId) this.evictThread(threadId);
 
     const pair = new WebSocketPair();

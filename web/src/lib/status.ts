@@ -20,7 +20,7 @@ export type StatusKey =
 export const RECONNECT_GRACE_MS = 90_000;
 
 // data-state on the status panel only uses this reduced set (the offline branches
-// and not-listening all map to "offline" visually, exactly as the vanilla client).
+// and not-listening all map to "offline" visually).
 export type StatusDataState = "offline" | "ready" | "recording" | "sending" | "speaking" | "working";
 
 export type StatusView = {
@@ -52,8 +52,7 @@ export type StatusInputs = {
   flash: string | null;
 };
 
-// Pure port of the vanilla `render()` state machine (the ordering of branches is
-// load-bearing — it is a priority cascade).
+// The status state machine. The ordering of branches is load-bearing — it is a priority cascade.
 export function deriveStatus(inputs: StatusInputs): StatusView {
   // currentTask is intentionally ignored (see the working branch below).
   const {

@@ -23,8 +23,8 @@ export type BridgeContentEvent = Extract<
 >;
 
 // Everything the daemon would need a requestId for, minus the requestId itself (the hook mints
-// it, exactly like the vanilla `sendDaemon`). `get_audio` already carries its own requestId (the
-// reply being fetched), so the hook leaves it untouched. `spawn_thread` carries no requestId.
+// it). `get_audio` already carries its own requestId (the reply being fetched), so the hook leaves
+// it untouched. `spawn_thread` carries no requestId.
 export type DaemonCommand =
   | { type: "submit_audio"; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
   | { type: "status_request" }

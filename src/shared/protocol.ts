@@ -120,7 +120,7 @@ export type RosterEvent = ThreadRoster | ThreadJoined | ThreadLeft;
 // only the envelope grew a tag.
 export type BridgeEnvelope =
   // browser → ONE thread's daemon (`threadId` = the selected thread).
-  | { channel: "daemon"; threadId: ThreadId; event: BrowserToDaemonEvent; threadToken?: string }
+  | { channel: "daemon"; threadId: ThreadId; event: BrowserToDaemonEvent }
   // a thread's daemon → browser(s), tagged with that daemon's threadId.
   | { channel: "browser"; threadId: ThreadId; event: DaemonToBrowserEvent }
   // daemon → DO, unchanged (terminate this thread; the DO expires the session on the last).

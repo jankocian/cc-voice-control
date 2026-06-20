@@ -48,7 +48,6 @@ async function main() {
   await post(runtime.port, {
     prompt: turn.prompt,
     text: turn.text,
-    sessionId: hook.session_id || "",
     permissionMode: hook.permission_mode || ""
   }).catch(() => {});
   process.exit(0);

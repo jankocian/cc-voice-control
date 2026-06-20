@@ -14,7 +14,7 @@ function clampRate(rate: number): number {
 // allowed by the browser's autoplay policy (esp. iOS Safari).
 const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
-export function formatRate(rate: number): string {
+function formatRate(rate: number): string {
   return `${rate}x`;
 }
 
@@ -37,7 +37,6 @@ export type Playback = {
   speaking: boolean;
   playbackRate: number;
   formattedRate: string;
-  hasAudio: (requestId: string) => boolean;
   attachAudio: (requestId: string, audioBase64: string, mimeType: string, replay: boolean) => void;
   // Mark replies the daemon still has audio for (from a `history` event) as playable, even
   // though their bytes aren't cached yet — tapping play fetches them on demand.
@@ -56,7 +55,7 @@ export type Playback = {
 };
 
 export type UsePlaybackOptions = {
-  // Mirrors the vanilla guard: a fresh reply auto-plays only when not recording.
+  // A fresh reply auto-plays only when not recording.
   getRecording: () => boolean;
   // Fetch a reply's audio on demand (tap-to-play on a history row whose bytes aren't
   // cached). App wires this to `sendDaemon({ type: "get_audio", requestId })`; the daemon
@@ -101,8 +100,7 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
 
   player.playbackRate = playbackRate;
 
-  // Reflect the audio element's actual play/pause into render state. The vanilla
-  // client toggled the .playing class on play and cleared it on pause/ended/error.
+  // Reflect the audio element's actual play/pause into render state.
   useEffect(() => {
     const onPlay = () => setPlayingId(currentPlayingIdRef.current);
     // Fully tear down the <audio> element. This is the load-bearing fix for "background
@@ -348,8 +346,6 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
     }
   }, [player]);
 
-  const hasAudio = useCallback((requestId: string): boolean => audioByRequest.current.has(requestId), []);
-
   const dropAudio = useCallback(
     (requestId: string): void => {
       if (requestId === currentPlayingIdRef.current) {
@@ -385,7 +381,6 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
     speaking,
     playbackRate,
     formattedRate,
-    hasAudio,
     attachAudio,
     markPlayable,
     playEntry,

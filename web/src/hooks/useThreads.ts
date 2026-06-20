@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import type { RosterEvent, RosterThread, ThreadId } from "../lib/protocol";
 import {
   applyJoined,
@@ -49,12 +49,10 @@ export function useThreads(): Threads {
     setState((prev) => switchThread(prev, threadId));
   }, []);
 
-  const unread = useMemo(() => state.unread, [state.unread]);
-
   return {
     threads: state.threads,
     activeThreadId: state.activeThreadId,
-    unread,
+    unread: state.unread,
     applyRosterEvent,
     noteActivity,
     setActive

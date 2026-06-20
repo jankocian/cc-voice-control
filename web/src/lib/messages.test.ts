@@ -35,8 +35,8 @@ describe("reconcileMessages", () => {
   });
 
   it("dedups by requestId for seq-less rows", () => {
-    const first: Message = { id: "x", kind: "system", requestId: "rx", title: "", body: "one", time: "" };
-    const again: Message = { id: "x2", kind: "system", requestId: "rx", title: "", body: "two", time: "" };
+    const first: Message = { id: "x", kind: "claude", requestId: "rx", title: "", body: "one", time: "" };
+    const again: Message = { id: "x2", kind: "claude", requestId: "rx", title: "", body: "two", time: "" };
     const out = reconcileMessages([first], [again]);
     const matches = out.filter((m) => m.requestId === "rx");
     expect(matches).toHaveLength(1);
