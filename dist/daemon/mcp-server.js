@@ -19088,6 +19088,7 @@ var DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
 var DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
 var DEFAULT_VOICE = "marin";
 var OPENAI_BASE = "https://api.openai.com/v1";
+var MAX_TTS_INPUT_CHARS = 4096;
 function filenameForMime(mimeType) {
   if (mimeType.includes("mp4"))
     return "speech.mp4";
@@ -19120,7 +19121,7 @@ async function transcribeAudio(config2, audio, mimeType) {
   }
   return (await response.text()).trim();
 }
-async function synthesizeSpeech(config2, text, voiceOverride) {
+async function synthesizeChunk(config2, text, voiceOverride) {
   const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
     method: "POST",
     headers: {
@@ -19139,8 +19140,69 @@ async function synthesizeSpeech(config2, text, voiceOverride) {
     const body = await response.text().catch(() => "");
     throw new Error(`OpenAI text-to-speech failed (${response.status}): ${body}`);
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
+  return Buffer.from(await response.arrayBuffer());
+}
+async function synthesizeSpeech(config2, text, voiceOverride) {
+  if (text.length <= MAX_TTS_INPUT_CHARS) {
+    const buffer = await synthesizeChunk(config2, text, voiceOverride);
+    return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
+  }
+  const parts = [];
+  for (const chunk of splitForTts(text, MAX_TTS_INPUT_CHARS)) {
+    try {
+      parts.push(await synthesizeChunk(config2, chunk, voiceOverride));
+    } catch (error51) {
+      if (parts.length === 0)
+        throw error51;
+      break;
+    }
+  }
+  return { audioBase64: Buffer.concat(parts).toString("base64"), mimeType: "audio/mpeg" };
+}
+function splitForTts(text, limit = MAX_TTS_INPUT_CHARS) {
+  const trimmed = text.trim();
+  if (trimmed.length === 0)
+    return [];
+  if (trimmed.length <= limit)
+    return [trimmed];
+  const sentences = trimmed.match(/[\s\S]*?(?:[.!?]+["')\]]*\s+|\n+|$)/g)?.filter((s) => s.length > 0) ?? [trimmed];
+  const chunks = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if (sentence.length > limit) {
+      if (current.length > 0) {
+        chunks.push(current);
+        current = "";
+      }
+      for (const piece of hardSplit(sentence, limit))
+        chunks.push(piece);
+      continue;
+    }
+    if (current.length + sentence.length > limit) {
+      chunks.push(current);
+      current = sentence;
+    } else {
+      current += sentence;
+    }
+  }
+  if (current.length > 0)
+    chunks.push(current);
+  return chunks.map((c) => c.trim()).filter((c) => c.length > 0);
+}
+function hardSplit(text, limit) {
+  const pieces = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(i + limit, text.length);
+    if (end < text.length && end - 1 > i) {
+      const code = text.charCodeAt(end - 1);
+      if (code >= 55296 && code <= 56319)
+        end -= 1;
+    }
+    pieces.push(text.slice(i, end));
+    i = end;
+  }
+  return pieces;
 }
 
 // src/daemon/qr.ts
@@ -19184,7 +19246,7 @@ function renderQr(text, margin = 2) {
 // src/daemon/voice-daemon.ts
 var RECONNECT_DELAY_MS = 1500;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
-var MAX_SPEECH_CHARS = 2500;
+var MAX_SPEECH_CHARS = 40000;
 function selectMissedReply(lastReply, lastSeenReplyId) {
   if (!lastReply || lastReply.requestId === lastSeenReplyId)
     return [];
