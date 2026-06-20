@@ -13,9 +13,17 @@ import { deriveStatus, type StatusInputs } from "@/lib/status";
 // screenshotted offline, including the scroll → condensed-bar behaviour.
 // Not used in production (App.tsx is the real, bridge-wired entry).
 
+// Fixed clock for the demo presets so the time-graded offline states are reproducible.
+const DEMO_NOW = 1_700_000_000_000;
+
 const PRESETS: Record<string, Partial<StatusInputs>> = {
   connecting: { connected: false },
+  // No daemon, never seen → "Waiting for Claude Code".
   waiting: { connected: true, daemonConnected: false },
+  // No daemon, seen seconds ago → "Reconnecting…".
+  reconnecting: { connected: true, daemonConnected: false, daemonLastSeenAt: DEMO_NOW - 5_000 },
+  // No daemon, seen long ago → "Session offline".
+  "offline-stale": { connected: true, daemonConnected: false, daemonLastSeenAt: DEMO_NOW - 14 * 60 * 60 * 1000 },
   ready: {},
   recording: { recording: true },
   sending: { transcribing: true },
@@ -27,6 +35,8 @@ function buildStatus(over: Partial<StatusInputs>) {
   return deriveStatus({
     connected: true,
     daemonConnected: true,
+    daemonLastSeenAt: null,
+    now: DEMO_NOW,
     recording: false,
     transcribing: false,
     speaking: false,

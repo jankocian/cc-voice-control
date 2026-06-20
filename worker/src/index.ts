@@ -17,6 +17,12 @@ type SocketAttachment = {
   role: BridgeClientRole;
 };
 
+// Storage key for the epoch-ms time the daemon socket last closed. Persisted in the
+// DO so it survives the daemon dropping AND a browser (re)connecting later — the DO
+// (and its storage) outlive any single socket. `expireSession()`'s deleteAll() clears
+// it on a clean /stop, so a terminated session has no stale timestamp.
+const DAEMON_LAST_SEEN_KEY = "daemonLastSeenAt";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -88,7 +94,10 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     server.serializeAttachment({ role } satisfies SocketAttachment);
     this.ctx.acceptWebSocket(server);
 
-    this.broadcastPresence();
+    // Runs after acceptWebSocket, so a (re)connecting browser receives the stored
+    // `daemonLastSeenAt` even when no daemon is present — the DO and its storage still
+    // exist, so the browser can immediately grade a long-dead session as offline.
+    await this.broadcastPresence();
 
     return new Response(null, {
       status: 101,
@@ -123,11 +132,24 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
-    this.broadcastPresence(ws);
+    await this.stampDaemonLastSeen(ws);
+    await this.broadcastPresence(ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    this.broadcastPresence(ws);
+    await this.stampDaemonLastSeen(ws);
+    await this.broadcastPresence(ws);
+  }
+
+  // Record when a *daemon* socket goes away (only the daemon — a browser leaving is
+  // irrelevant to session liveness). Date.now() is the wall clock at close time; the
+  // value is read back into the next bridge_presence so the phone can show "Last
+  // active 14h ago". A clean /stop hits expireSession() (deleteAll) instead and never
+  // reaches here, so a terminated session leaves no timestamp.
+  private async stampDaemonLastSeen(ws: WebSocket): Promise<void> {
+    const attachment = ws.deserializeAttachment() as SocketAttachment | undefined;
+    if (attachment?.role !== "daemon") return;
+    await this.ctx.storage.put(DAEMON_LAST_SEEN_KEY, Date.now());
   }
 
   private async expireSession(): Promise<void> {
@@ -178,9 +200,12 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   }
 
   // Presence is a separate signal from the daemon's rich session_status so it
-  // never overwrites the daemon's runtime state or memory in the browser.
-  private broadcastPresence(exclude?: WebSocket): void {
+  // never overwrites the daemon's runtime state or memory in the browser. Async only
+  // to read `daemonLastSeenAt` from storage (DO storage reads are fast + serialized);
+  // every caller is already in an async context (fetch / webSocketClose / webSocketError).
+  private async broadcastPresence(exclude?: WebSocket): Promise<void> {
     const { daemon, browser } = this.liveRoles(exclude);
+    const daemonLastSeenAt = (await this.ctx.storage.get<number>(DAEMON_LAST_SEEN_KEY)) ?? null;
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === exclude) continue;
       const attachment = socket.deserializeAttachment() as SocketAttachment | undefined;
@@ -189,7 +214,7 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
         socket.send(
           JSON.stringify({
             channel: "browser",
-            event: { type: "bridge_presence", daemonConnected: daemon, browserConnected: browser }
+            event: { type: "bridge_presence", daemonConnected: daemon, browserConnected: browser, daemonLastSeenAt }
           } satisfies BridgeEnvelope)
         );
       } catch {
