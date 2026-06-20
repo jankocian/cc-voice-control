@@ -39,14 +39,16 @@ describe("VoiceDaemon runtime publication", () => {
         bridgeUrl: "https://voice.example.com"
       },
       surface: "SURF",
+      threadId: "SURF",
       secret: "sek",
       sessionId: "sid",
       browserUrl: BROWSER_URL
     });
   }
 
-  it("writes runtime.json (URL + port) and qr.txt on start(), then removes them on stop()", async () => {
-    const runtime = join(dataDir, "runtime.json");
+  it("writes a PER-THREAD runtime file (URL + port) and qr.txt on start(), removing its own on stop()", async () => {
+    // The runtime file is keyed by the pane's surface id so panes don't clobber each other.
+    const runtime = join(dataDir, "runtime", "SURF.json");
     const qr = join(dataDir, "qr.txt");
     expect(existsSync(runtime)).toBe(false);
 
@@ -61,10 +63,10 @@ describe("VoiceDaemon runtime publication", () => {
     expect(typeof parsed.port).toBe("number");
     expect(parsed.pid).toBe(process.pid);
 
-    // stop() tears down the listener + bridge + timers and removes the runtime artifacts,
-    // so the test leaves no open handles (and no stale URL on disk).
+    // stop() removes ONLY this pane's runtime file (siblings keep theirs). qr.txt is
+    // machine-level and deliberately left in place (a sibling pane may still be live).
     d.stop();
     expect(existsSync(runtime)).toBe(false);
-    expect(existsSync(qr)).toBe(false);
+    expect(existsSync(qr)).toBe(true);
   });
 });

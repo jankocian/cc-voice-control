@@ -20,3 +20,13 @@ class_name = "VoiceSessionDurableObject"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["VoiceSessionDurableObject"]
+
+# Native Cloudflare Rate Limiting binding. Gates WS-connect attempts per client IP at the top
+# of the Worker fetch (before a DO is touched) — abuse/DoS insurance, NOT the capability gate
+# (a wrong secret already lands on an empty DO). Best-effort / per-edge / eventually-consistent.
+# `period` must be 10 or 60; 30 connects/min is generous for the legitimate reconnect churn iOS
+# Safari produces while bounding a /ws/<random> spray.
+[[ratelimits]]
+name = "WS_CONNECT"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }

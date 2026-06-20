@@ -1,8 +1,15 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig, resolveConfig, toBrowserUrl, toWebSocketUrl } from "./config.js";
+import {
+  loadConfig,
+  loadOrCreateSession,
+  resolveConfig,
+  threadRuntimePath,
+  toBrowserUrl,
+  toWebSocketUrl
+} from "./config.js";
 
 describe("voice remote URL helpers", () => {
   it("creates browser session URLs from the single secret", () => {
@@ -89,5 +96,65 @@ describe("resolveConfig", () => {
   it("throws via loadConfig when the key is missing", async () => {
     const path = writeConfig({ bridgeUrl: "https://example.workers.dev" });
     await expect(loadConfig(path)).rejects.toThrow(/OpenAI API key is required/);
+  });
+});
+
+describe("loadOrCreateSession (one machine secret, shared by every pane)", () => {
+  let dir: string;
+  const ORIGINAL = process.env.CLAUDE_PLUGIN_DATA;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "voice-control-session-"));
+    // The secret lives in stateDir() = $CLAUDE_PLUGIN_DATA; point it at a throwaway dir.
+    process.env.CLAUDE_PLUGIN_DATA = dir;
+  });
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = ORIGINAL;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("mints once and returns the SAME secret on every later call (idempotent → one URL/QR)", () => {
+    const first = loadOrCreateSession();
+    const second = loadOrCreateSession();
+    expect(first.secret).toBe(second.secret);
+    expect(first.sessionId).toBe(second.sessionId);
+    // sessionId is the short, non-secret hash label — distinct from the secret itself.
+    expect(first.secret).not.toBe(first.sessionId);
+    expect(first.sessionId.length).toBeGreaterThan(0);
+  });
+
+  it("writes session.json with 0600 permissions (it holds the capability secret)", () => {
+    loadOrCreateSession();
+    const mode = statSync(join(dir, "session.json")).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it("persists the minted secret so a second process reads it back rather than re-minting", () => {
+    const session = loadOrCreateSession();
+    const onDisk = JSON.parse(readFileSync(join(dir, "session.json"), "utf8"));
+    expect(onDisk.secret).toBe(session.secret);
+    expect(onDisk.sessionId).toBe(session.sessionId);
+    expect(typeof onDisk.createdAt).toBe("number");
+  });
+});
+
+describe("threadRuntimePath (per-pane runtime file so panes don't clobber)", () => {
+  const ORIGINAL = process.env.CLAUDE_PLUGIN_DATA;
+  beforeEach(() => {
+    process.env.CLAUDE_PLUGIN_DATA = "/tmp/voice-state";
+  });
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = ORIGINAL;
+  });
+
+  it("keys the runtime file by the pane's surface id under a runtime/ dir", () => {
+    expect(threadRuntimePath("surface-abc")).toBe("/tmp/voice-state/runtime/surface-abc.json");
+  });
+
+  it("falls back to a stable sentinel name when launched outside cmux (no surface)", () => {
+    expect(threadRuntimePath(undefined)).toBe("/tmp/voice-state/runtime/default.json");
   });
 });

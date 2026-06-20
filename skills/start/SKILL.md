@@ -23,16 +23,21 @@ then shows a scannable QR code + the phone URL. State lives in the plugin's own 
    keep running. (If the OpenAI key is missing it instead writes onboarding state and exits.)
 
 2. **Wait for the daemon to publish the session, then show it.** The daemon writes a
-   pre-rendered QR code (`qr.txt`) and the URL (`runtime.json`). Poll for `runtime.json`
-   in a **separate, normal (foreground) Bash call**:
+   machine-level QR code (`qr.txt`, the same URL/QR for every pane) and a **per-pane** runtime
+   file (`runtime/<CMUX_SURFACE_ID>.json`, so multiple panes don't clobber each other). Poll for
+   THIS pane's runtime file in a **separate, normal (foreground) Bash call** — and also handle
+   the no-API-key case, which writes the machine-level `runtime.json` and exits:
 
    ```sh
    D="${CLAUDE_PLUGIN_DATA}"
-   for i in $(seq 1 20); do [ -f "$D/runtime.json" ] && break; sleep 0.5; done
-   if [ -f "$D/runtime.json" ]; then cat "$D/qr.txt" 2>/dev/null; echo; cat "$D/runtime.json"; else echo "NOT_RUNNING"; fi
+   R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
+   for i in $(seq 1 20); do { [ -f "$R" ] || [ -f "$D/runtime.json" ]; } && break; sleep 0.5; done
+   if [ -f "$R" ]; then cat "$D/qr.txt" 2>/dev/null; echo; cat "$R";
+   elif [ -f "$D/runtime.json" ]; then cat "$D/runtime.json";   # may be a needsSetup notice
+   else echo "NOT_RUNNING"; fi
    ```
 
-3. **If `runtime.json` contains `"needsSetup": true`** (instead of a `sessionUrl`), the daemon
+3. **If the output contains `"needsSetup": true`** (instead of a `sessionUrl`), the daemon
    could not start because the OpenAI API key is missing (the background task already exited, so
    there's no ghost `/tasks` entry). Do **not** show a QR code. Instead, print a friendly,
    clearly-formatted message that:

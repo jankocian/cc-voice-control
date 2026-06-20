@@ -124,3 +124,80 @@ export async function cmuxInterrupt(surface?: string): Promise<boolean> {
   const r = await runCmux(["send-key", ...cmuxTarget(surface), "escape"]);
   return r.ok;
 }
+
+/**
+ * The cmux per-surface TITLE for `surface` (the live Claude task description, e.g.
+ * "Review to-dos and plan next implementation"), or undefined if unavailable. Probe §0.6-A
+ * confirmed `tree --all --json --id-format both` exposes a per-surface `title`. We match the
+ * entry whose ref/uuid equals `surface` (`--id-format both` makes both forms present), and
+ * strip the leading spinner glyph the title carries while a turn is running.
+ *
+ * Best-effort: any failure (cmux down, no title field, surface not found) returns undefined
+ * so the label falls through to repo·branch. The whole subtree is searched recursively since
+ * cmux nests workspaces → surfaces.
+ */
+export async function cmuxSurfaceTitle(surface?: string): Promise<string | undefined> {
+  if (!surface) return undefined;
+  const r = await runCmux(["tree", "--all", "--json", "--id-format", "both"]);
+  if (!r.ok) return undefined;
+  try {
+    const node = findSurfaceNode(JSON.parse(r.stdout) as unknown, surface);
+    const title = node && typeof node.title === "string" ? stripSpinnerGlyph(node.title) : "";
+    return title.length > 0 ? title : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// A surface node carries an opaque `title` plus one or more id forms. We don't model the
+// whole cmux tree — only the fields we read — and recurse over any array-valued children.
+type CmuxNode = { title?: unknown; id?: unknown; ref?: unknown; uuid?: unknown; [k: string]: unknown };
+
+// Find the tree node whose id/ref/uuid matches `surface`. `--id-format both` means a surface
+// may carry either the short ref (surface:N) or the UUID under any of these keys, so we match
+// against all of them.
+function findSurfaceNode(root: unknown, surface: string): CmuxNode | undefined {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (Array.isArray(cur)) {
+      stack.push(...cur);
+    } else if (cur && typeof cur === "object") {
+      const node = cur as CmuxNode;
+      if (node.id === surface || node.ref === surface || node.uuid === surface) return node;
+      for (const value of Object.values(node)) if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  return undefined;
+}
+
+// cmux prefixes the title with a Braille spinner glyph (⠂⠂…) + whitespace while a turn runs.
+// Strip any leading non-word run so the chip shows the bare task description. Exported for tests.
+export function stripSpinnerGlyph(title: string): string {
+  return title.replace(/^[^\p{L}\p{N}]+/u, "").trim();
+}
+
+/**
+ * Spawn a NEW cmux workspace with `cwd` set and `command` launched in it, for spawn-by-voice
+ * (§9). On this cmux build `new-pane` has no `--cwd`/`--command`; `new-workspace` does (probe
+ * §0.6-B), and prints `OK workspace:<N>` on stdout — deterministic, no tree diff. `--focus
+ * false` keeps the user's current pane focused. Returns the new workspace ref, or undefined
+ * if the spawn failed / the stdout didn't parse.
+ *
+ * Note: whether `claude "<prompt>"` auto-SUBMITS a slash command is confirmed in slice-5
+ * follow-up (probe §0.6-C). We ship the straightforward path — `--command "claude
+ * /voice-control:start"` — and keep it swappable: the fallback is `--command "claude"` then
+ * poll `read-screen` + `send`/`send-key` the activation once the prompt appears.
+ */
+export async function spawnWorkspace({ cwd, command }: { cwd: string; command: string }): Promise<string | undefined> {
+  const r = await runCmux(["new-workspace", "--cwd", cwd, "--command", command, "--focus", "false"]);
+  if (!r.ok) return undefined;
+  return parseWorkspaceRef(r.stdout);
+}
+
+// Parse `new-workspace` stdout. It prints `OK workspace:<N>` (probe §0.6-B); we take the last
+// whitespace-delimited token of the matching line so trailing log noise can't break it.
+export function parseWorkspaceRef(stdout: string): string | undefined {
+  const match = stdout.match(/\bworkspace:\d+\b/);
+  return match ? match[0] : undefined;
+}

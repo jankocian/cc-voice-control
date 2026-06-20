@@ -68,6 +68,11 @@ export function useBridge(options: UseBridgeOptions): Bridge {
 
   const socketRef = useRef<WebSocket | null>(null);
   const daemonConnectedRef = useRef(false);
+  // The thread the browser currently routes to. Multi-thread (#7) adds a real switcher; until
+  // then this single-thread shell learns its one threadId from the first tagged inbound
+  // envelope (the daemon tags every browser-channel event with its threadId) and stamps it
+  // onto outbound daemon-channel sends. The full per-thread switcher is a separate change.
+  const activeThreadIdRef = useRef<string>("");
 
   // Keep the latest callbacks/values in refs so the effect mounts once.
   const onEventRef = useRef(onEvent);
@@ -86,7 +91,13 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     const requestId = crypto.randomUUID();
     const event = { requestId, ...command } as BrowserToDaemonEvent;
     try {
-      socket.send(JSON.stringify({ channel: "daemon", event } satisfies BridgeEnvelope));
+      socket.send(
+        JSON.stringify({
+          channel: "daemon",
+          threadId: activeThreadIdRef.current,
+          event
+        } satisfies BridgeEnvelope)
+      );
       return true;
     } catch {
       return false;
@@ -119,7 +130,13 @@ export function useBridge(options: UseBridgeOptions): Bridge {
               const requestId = crypto.randomUUID();
               const sync = { type: "sync" as const, requestId };
               try {
-                socket.send(JSON.stringify({ channel: "daemon", event: sync } satisfies BridgeEnvelope));
+                socket.send(
+                  JSON.stringify({
+                    channel: "daemon",
+                    threadId: activeThreadIdRef.current,
+                    event: sync
+                  } satisfies BridgeEnvelope)
+                );
               } catch {
                 /* socket closing; ignore */
               }
@@ -157,6 +174,9 @@ export function useBridge(options: UseBridgeOptions): Bridge {
           return;
         }
         if (envelope?.channel !== "browser") return;
+        // Learn the single thread's id from its tagged events so outbound sends can address it
+        // (multi-thread #7 will route this per active thread instead).
+        if (envelope.threadId) activeThreadIdRef.current = envelope.threadId;
         handleBrowserEvent(envelope.event);
       });
 
