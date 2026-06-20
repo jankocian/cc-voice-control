@@ -47,11 +47,7 @@ export type BrowserToDaemonEvent =
   | { type: "sync"; requestId: string }
   // Fetch the audio for a specific reply on demand (tap-to-play on a history row whose
   // bytes aren't cached locally). The daemon answers with a `tts_audio` carrying `replay`.
-  | { type: "get_audio"; requestId: string }
-  // Open a NEW cmux workspace running Claude + /voice-control:start, so it joins this same
-  // session as a new thread (same QR). Routed to the ACTIVE thread's daemon, which has the
-  // cmux trust to spawn for its machine. `cwd` defaults to the spawning daemon's cwd.
-  | { type: "spawn_thread"; cwd?: string };
+  | { type: "get_audio"; requestId: string };
 
 export type DaemonToBrowserEvent =
   | { type: "session_status"; state: SessionState; memory: { currentTask?: string } }

@@ -11,7 +11,7 @@ import type {
   ThreadId,
   ThreadInfo
 } from "../shared/protocol.js";
-import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
+import { cmuxHealth, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
 import {
   loadOrCreateSession,
   qrPath,
@@ -41,8 +41,6 @@ const MAX_SPEECH_CHARS = 40_000;
 // retains so a refreshed/2nd phone can restore the thread on reconnect. Tunable: bigger =
 // more scrollback survives a refresh, at the cost of holding more reply audio in memory.
 const HISTORY_REPLIES = 7;
-// The slash command a spawned pane's Claude runs to join this same session as a new thread.
-const SPAWN_ACTIVATION_COMMAND = "claude /voice-control:start";
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
@@ -336,27 +334,9 @@ export class VoiceDaemon {
         // tell the phone gracefully when it has been evicted.
         this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
-      case "spawn_thread":
-        // Open a NEW cmux workspace running Claude + /voice-control:start. It reads the same
-        // session.json → joins this same session as a new thread (same QR). Routed here
-        // because this daemon has the cmux trust to spawn for the machine.
-        await this.spawnThread(event.cwd);
-        return;
       default:
         return;
     }
-  }
-
-  // Spawn a sibling thread via a new cmux workspace. cwd defaults to THIS daemon's cwd (a new
-  // session "next to" the current one). Surfaces a phone-facing error if the spawn fails so the
-  // user isn't left wondering; the new pane's own daemon registers itself once it connects.
-  private async spawnThread(cwd?: string): Promise<void> {
-    const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command: SPAWN_ACTIVATION_COMMAND });
-    if (ref) {
-      console.error(`[spawn] new workspace ${ref}`);
-      return;
-    }
-    this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
   }
 
   private async handleAudio(audioBase64: string, mimeType: string, mode: InjectMode): Promise<void> {

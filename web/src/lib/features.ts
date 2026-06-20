@@ -2,7 +2,7 @@
 // experience but kept in the codebase so they can be switched back on (no rebuild
 // of the components needed) as the product grows.
 export const FEATURES = {
-  /** Bottom tab bar: Threads · voice · New thread. */
+  /** Bottom tab bar: Threads · voice. */
   threadNav: false,
   /** Top-left menu (threads drawer) button. */
   threadMenu: false,

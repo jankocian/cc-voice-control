@@ -176,28 +176,3 @@ function findSurfaceNode(root: unknown, surface: string): CmuxNode | undefined {
 export function stripSpinnerGlyph(title: string): string {
   return title.replace(/^[^\p{L}\p{N}]+/u, "").trim();
 }
-
-/**
- * Spawn a NEW cmux workspace with `cwd` set and `command` launched in it, for spawn-by-voice
- * (§9). On this cmux build `new-pane` has no `--cwd`/`--command`; `new-workspace` does (probe
- * §0.6-B), and prints `OK workspace:<N>` on stdout — deterministic, no tree diff. `--focus
- * false` keeps the user's current pane focused. Returns the new workspace ref, or undefined
- * if the spawn failed / the stdout didn't parse.
- *
- * Note: whether `claude "<prompt>"` auto-SUBMITS a slash command is confirmed in slice-5
- * follow-up (probe §0.6-C). We ship the straightforward path — `--command "claude
- * /voice-control:start"` — and keep it swappable: the fallback is `--command "claude"` then
- * poll `read-screen` + `send`/`send-key` the activation once the prompt appears.
- */
-export async function spawnWorkspace({ cwd, command }: { cwd: string; command: string }): Promise<string | undefined> {
-  const r = await runCmux(["new-workspace", "--cwd", cwd, "--command", command, "--focus", "false"]);
-  if (!r.ok) return undefined;
-  return parseWorkspaceRef(r.stdout);
-}
-
-// Parse `new-workspace` stdout. It prints `OK workspace:<N>` (probe §0.6-B); we take the last
-// whitespace-delimited token of the matching line so trailing log noise can't break it.
-export function parseWorkspaceRef(stdout: string): string | undefined {
-  const match = stdout.match(/\bworkspace:\d+\b/);
-  return match ? match[0] : undefined;
-}

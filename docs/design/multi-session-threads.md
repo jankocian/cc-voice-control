@@ -78,14 +78,25 @@ corrections folded in below.
   `--type/--direction/--url/--focus`). The spawn primitive is **`new-workspace --cwd <path>
   --command "<cmd>" --focus false`** (a workspace per spawned session is also the natural "open
   another project" UX). §9 is corrected accordingly.
-- **C (activation) — viable.** `claude` takes a positional **`prompt`** arg, so
-  `claude "/voice-control:start"` likely auto-runs the activation; the confirmed fallback is
-  `--command "claude"` then `send`/`send-key` after polling `read-screen`. **Spawn is v1-GO** either
-  way; whether the positional prompt auto-*submits* a slash command is the one detail to confirm
-  during slice 5 (not a blocker).
+- **C (activation) — UNRESOLVED → spawn deferred from v1.** Empirical testing turned up two
+  blockers the probe missed, so **spawn-by-voice is deferred from v1** (slice 5 is not in the
+  multi-thread PR):
+  1. **Plugin load.** The plugin is loaded via `--plugin-dir` (data dir `voice-control-inline`),
+     which is scoped to the cmux pane that launched it. A freshly-spawned `claude` in another
+     cwd/pane does **not** have the voice-control plugin, so `/voice-control:start` is an unknown
+     command and never runs — the new pane never joins the session.
+  2. **Auto-submit unverified.** Whether `claude` with a positional **`prompt`** arg
+     (`claude "/voice-control:start"`) auto-*submits* a slash command is still unconfirmed.
+  **Fix path (slice-5 follow-up):** make the spawned `claude` carry the plugin — pass
+  `--plugin-dir ${CLAUDE_PLUGIN_ROOT}` to the spawned command, or require a global plugin install
+  — then confirm the positional prompt actually auto-submits the activation (else fall back to
+  `--command "claude"` + `send`/`send-key` after polling `read-screen`). The spawn primitive
+  itself (probe B) is sound; activation is what needs nailing.
 - **E (trust) — PASS.** `read-screen --surface $CMUX_SURFACE_ID` → OK.
 
-Net: **labels (slice 3, with the task-title) and spawn-by-voice (slice 5) are both unblocked.**
+Net: **labels (slice 3, with the task-title) are unblocked. Spawn-by-voice (slice 5) is deferred
+from v1** (see C above) — the CORE multi-thread (open a 2nd pane yourself + `/voice-control:start`)
+is unaffected and ships.
 
 ---
 
@@ -511,7 +522,16 @@ The app is `App.tsx` (one `messages: Message[]`) + `Hero` + `MessageThread` + `M
 
 ---
 
-## 9. Spawn a thread by voice (v1 target)
+## 9. Spawn a thread by voice (follow-up)
+
+> **Status: deferred from v1.** Empirical testing surfaced two blockers (§0.6-C): the plugin is
+> `--plugin-dir`-loaded (data dir `voice-control-inline`), so a freshly-spawned `claude` in another
+> pane lacks the voice-control plugin and `/voice-control:start` never runs; and the positional-prompt
+> auto-submit is unverified. Per "no fallbacks / it must actually work," slice 5 is cut from v1. The
+> CORE multi-thread (open a 2nd pane yourself + `/voice-control:start`) is unaffected and ships. The
+> body below is the **follow-up plan**: the spawn primitive is sound; the fix is to make the spawned
+> `claude` carry the plugin (`--plugin-dir ${CLAUDE_PLUGIN_ROOT}` or a global install) and confirm the
+> activation auto-submits.
 
 Goal: from the phone (by voice) or the `+` affordance, open a **new** cmux pane, launch Claude there
 running `/voice-control:start`, so it joins the **same** session as a new thread — **same QR**.
@@ -579,13 +599,14 @@ rather than dropping it — the protocol/UI affordance is cheap; only the cmux c
 | **2. `threadId` on the wire + DO N-daemon routing** | Phone receives from multiple panes (UI may merge at first). Drop `evictRole("daemon")`; per-thread dedup; route browser→one-thread, tag daemon→browser. | `protocol.ts`, `worker/src/index.ts`, `voice-daemon.ts` (tag events, send `thread_register`). | **No** — buildable now. |
 | **3. Roster + labels + per-thread presence** | Phone has data to list/switch threads; per-thread offline grading. Daemon computes label (repo·branch·cwd; paneTitle if available). | DO roster + `thread_left`/`thread_roster`, `src/daemon/labels.ts`, `protocol.ts`. | **Half** — repo·branch·cwd: no. **paneTitle: gated on §11-A.** Ship label without paneTitle if A fails. |
 | **4. Web thread switcher** | Full multi-thread UX: white-pill dropdown + CSS swipe, per-thread state, unread badges, per-thread #10 grading. | `App.tsx` (`messagesByThread`), `useBridge`/`usePlayback` keyed by thread, `TopBar` pill (`FEATURES.threadTitle`), new `ThreadSwitcher`/pager, reuse `BottomTabBar`. | **No** (arch) — buildable now; swipe CSS tuning verified live (§11-F). |
-| **5. Spawn-a-thread (incl. voice)** | Hands-free "open another session." `spawn_thread` event + `cmux.ts` `spawnPane`, `+` affordance, voice grammar. | `cmux.ts`, `protocol.ts`, `voice-daemon.ts`, `web`. | **Yes — §11-B / §11-C** (new-surface-id resolution; slash-command auto-run/timing). |
+| **5. Spawn-a-thread (incl. voice)** — **DEFERRED from v1 (not in this PR)** | Hands-free "open another session." `spawn_thread` event + `cmux.ts` `spawnPane`, `+` affordance, voice grammar. | `cmux.ts`, `protocol.ts`, `voice-daemon.ts`, `web`. | **Deferred** — empirical testing found the spawned `claude` lacks the `--plugin-dir`-loaded plugin so `/voice-control:start` never runs, and positional-prompt auto-submit is unverified (§0.6-C). Returns as a focused follow-up. |
 | **6. Security hardening** | Revoke-on-exit (DO alarm grace), worker rate-limit binding, `/voice-control:rotate` (idle-only auto + explicit), reserve `threadToken?`, docs of the one-URL trade-off. | `worker/index.ts` (alarm, ratelimit), `wrangler.toml`, skills, `config.ts`, `docs/configuration.md`. | **No** — buildable now (rate-limit binding is a config + 3-line check). |
 
-Slices 1–4 deliver the full visible product without any cmux unknown. 5 is the power-user layer (its
-two probes are the only true external gates). 6 is the safety layer and can land in parallel.
-**Recommended order:** 1 → 2 → 3 → 4 (the payoff), then 5 and 6 in either order. The user wants spawn
-in v1 → run §11-B/§11-C **early** (alongside slice 1) so slice 5 isn't surprised.
+Slices 1–4 deliver the full visible product without any cmux unknown, and 6 is the safety layer that
+lands in parallel — together they are v1. Slice 5 (spawn) is the power-user layer; it is **deferred
+from v1** because the spawned `claude` lacks the `--plugin-dir`-loaded plugin and the activation
+auto-submit is unverified (§0.6-C / §9). It returns once plugin-load + activation are nailed.
+**Recommended order:** 1 → 2 → 3 → 4 (the payoff), then 6 — and 5 as a focused follow-up.
 
 ---
 

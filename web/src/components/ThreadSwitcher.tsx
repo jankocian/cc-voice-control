@@ -1,4 +1,4 @@
-import { ChevronDown, Plus } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { RosterThread, ThreadId } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
@@ -21,13 +21,11 @@ export type ThreadRow = {
 export function ThreadSwitcher({
   rows,
   activeThreadId,
-  onSelect,
-  onSpawn
+  onSelect
 }: {
   rows: ThreadRow[];
   activeThreadId: ThreadId | null;
   onSelect: (threadId: ThreadId) => void;
-  onSpawn: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const active = rows.find((r) => r.thread.threadId === activeThreadId) ?? rows[0];
@@ -59,10 +57,6 @@ export function ThreadSwitcher({
             setOpen(false);
             onSelect(id);
           }}
-          onSpawn={() => {
-            setOpen(false);
-            onSpawn();
-          }}
           onDismiss={() => setOpen(false)}
         />
       )}
@@ -74,13 +68,11 @@ function ThreadMenu({
   rows,
   activeThreadId,
   onSelect,
-  onSpawn,
   onDismiss
 }: {
   rows: ThreadRow[];
   activeThreadId: ThreadId | null;
   onSelect: (threadId: ThreadId) => void;
-  onSpawn: () => void;
   onDismiss: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -134,18 +126,6 @@ function ThreadMenu({
           </button>
         );
       })}
-
-      <button
-        type="button"
-        role="menuitem"
-        onClick={onSpawn}
-        className="mt-1 flex w-full items-center gap-2.5 rounded-control border-t border-hairline px-2.5 py-2 text-left text-ink-soft transition-colors hover:bg-canvas-deep/40 hover:text-ink"
-      >
-        <span className="grid size-2 shrink-0 place-items-center text-ink-faint">
-          <Plus className="size-4" />
-        </span>
-        <span className="text-sm font-medium">New thread</span>
-      </button>
     </div>
   );
 }
