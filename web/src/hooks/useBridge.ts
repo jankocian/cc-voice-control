@@ -181,10 +181,19 @@ export function useBridge(options: UseBridgeOptions): Bridge {
       });
     }
 
-    connect();
+    // Defer the first WebSocket open until after `load`: iOS Safari counts a socket opened
+    // during page load as an outstanding subresource, so the `load` event never fires and the
+    // progress bar sticks ("page not loaded") — worst on a cached refresh, when React mounts
+    // before load. Reconnects (post-load) go straight through the close handler.
+    if (document.readyState === "complete") {
+      connect();
+    } else {
+      window.addEventListener("load", connect, { once: true });
+    }
 
     return () => {
       stopped = true;
+      window.removeEventListener("load", connect);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       const socket = socketRef.current;
       socketRef.current = null;

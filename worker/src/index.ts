@@ -309,13 +309,14 @@ ${styleLinks}
         // Mic capture is MediaRecorder, the only network target is the same-origin
         // bridge WebSocket (covered by connect-src 'self'), and TTS replies play
         // from in-memory blob: URLs. The Tailwind stylesheet is an external file
-        // from 'self' (no inline styles), so style-src 'self' passes.
+        // from 'self' (no inline styles), so style-src 'self' passes. `data:` is in
+        // media-src for the silent-WAV that unlocks iOS autoplay on first tap.
         "default-src 'self'",
         "script-src 'self'",
         "style-src 'self'",
         "img-src 'self' data:",
         "connect-src 'self'",
-        "media-src 'self' blob:",
+        "media-src 'self' blob: data:",
         "base-uri 'none'",
         "frame-ancestors 'none'"
       ].join("; ")
