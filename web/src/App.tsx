@@ -192,6 +192,22 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [stopPlayback, threads]
   );
 
+  // After the user taps "+", follow the spawn: focus the new thread as soon as its daemon joins the
+  // roster, so the phone lands in the session they just opened. We track every threadId seen so far;
+  // the first fresh one that appears while a spawn is pending wins focus. The pending flag self-clears
+  // after a grace window so an unrelated pane opening much later never steals focus.
+  const seenThreadsRef = useRef<Set<ThreadId>>(new Set());
+  const activateOnSpawnRef = useRef(false);
+  useEffect(() => {
+    const current = threads.threads.map((t) => t.threadId);
+    const fresh = current.filter((id) => !seenThreadsRef.current.has(id));
+    seenThreadsRef.current = new Set(current);
+    if (activateOnSpawnRef.current && fresh.length > 0) {
+      activateOnSpawnRef.current = false;
+      switchThread(fresh[0]);
+    }
+  }, [threads.threads, switchThread]);
+
   // ---- recorder (shared singleton, acts on the active thread) -----------------
   const sendAudio = useCallback(
     (clip: RecordedClip, mode: "queue" | "interrupt") => {
@@ -261,14 +277,20 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const onStopTask = useCallback(() => sendControl({ type: "stop_task" }), [sendControl]);
 
   // ---- spawn a new thread -----------------------------------------------------
-  // The "+" affordance emits spawn_thread on the ACTIVE thread's daemon (it has the cmux trust
-  // to open another pane). v1 is minimal: no cwd input, no voice grammar (out of scope).
+  // The "+" affordance emits spawn_thread on the ACTIVE thread's daemon (it has the cmux trust to
+  // open another pane); the new pane opens at the active pane's cwd, inheriting its permission mode.
+  // (To open at a specific path, ask the agent — the /voice-control:spawn skill takes a directory.)
   const onSpawn = useCallback(() => {
     const threadId = activeThreadIdRef.current;
     if (!threadId || !sendDaemon(threadId, { type: "spawn_thread" })) {
       showFlash("Start voice in a pane first");
       return;
     }
+    // Follow the spawn into its new thread once it joins (see the seenThreads effect).
+    activateOnSpawnRef.current = true;
+    window.setTimeout(() => {
+      activateOnSpawnRef.current = false;
+    }, SPAWN_FOLLOW_TIMEOUT_MS);
     showFlash("Opening a new session…");
   }, [sendDaemon, showFlash]);
 
@@ -428,6 +450,10 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
 
 // A stable empty array so threads with no messages yet don't churn the pager memo.
 const EMPTY_MESSAGES: Message[] = [];
+
+// How long after tapping "+" we keep following the spawn (focus the next new thread). Long enough
+// for a fresh pane's daemon to launch + register; after this an unrelated join won't steal focus.
+const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
 
 // Fall back to a thread's roster snapshot (state/listening) for its runtime before its first
 // session_status arrives. currentTask is only on session_status, so it stays undefined here.

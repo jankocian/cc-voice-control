@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
@@ -226,10 +226,11 @@ export class VoiceDaemon {
   private startHookListener(): Promise<void> {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
-        // Two POST routes, both from the plugin's hooks: /reply (Stop hook → speak the reply)
-        // and /reset (SessionStart on clear/compact → wipe this pane's voice history).
+        // POST routes from the plugin: /reply (Stop hook → speak the reply), /reset (SessionStart
+        // on clear/compact → wipe this pane's voice history), and /spawn (the spawn skill → open a
+        // new voice-controlled workspace).
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/reply" && route !== "/reset") {
+        if (route !== "/reply" && route !== "/reset" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -237,6 +238,12 @@ export class VoiceDaemon {
         let body = "";
         req.on("data", (chunk) => (body += chunk));
         req.on("end", () => {
+          // /spawn answers with the result so the agent can report where the new session opened;
+          // the other routes are fire-and-forget (acked immediately).
+          if (route === "/spawn") {
+            void this.handleSpawnRequest(body, res);
+            return;
+          }
           res.statusCode = 204;
           res.end();
           if (route === "/reset") {
@@ -375,28 +382,47 @@ export class VoiceDaemon {
         // tell the phone gracefully when it has been evicted.
         this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
-      case "spawn_thread":
-        // Open a NEW cmux workspace running Claude + /voice-control:start. It reads the same
-        // session.json → joins this same session as a new thread (same QR). Routed here
+      case "spawn_thread": {
+        // The phone "+" : open a NEW cmux workspace running Claude + /voice-control:start. It reads
+        // the same session.json → joins this same session as a new thread (same QR). Routed here
         // because this daemon has the cmux trust to spawn for the machine.
-        await this.spawnThread(event.cwd);
+        const result = await this.spawnThread(event.cwd);
+        if (!result.ok) {
+          this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+        }
         return;
+      }
       default:
         return;
     }
   }
 
-  // Spawn a sibling thread via a new cmux workspace. cwd defaults to THIS daemon's cwd (a new
-  // session "next to" the current one). Surfaces a phone-facing error if the spawn fails so the
-  // user isn't left wondering; the new pane's own daemon registers itself once it connects.
-  private async spawnThread(cwd?: string): Promise<void> {
+  // Spawn a sibling thread via a new cmux workspace, inheriting this session's permission mode
+  // (buildSpawnCommand). cwd defaults to THIS daemon's cwd (a new session "next to" the current
+  // one). Returns the new workspace ref; the spawned pane's own daemon registers itself once it
+  // connects. Callers decide how to surface a failure (phone error, or the /spawn HTTP response).
+  private async spawnThread(cwd?: string): Promise<{ ok: boolean; ref?: string }> {
     const command = this.buildSpawnCommand();
     const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
-    if (ref) {
-      console.error(`[spawn] new workspace ${ref} :: ${command}`);
-      return;
+    if (ref) console.error(`[spawn] new workspace ${ref} :: ${command}`);
+    return { ok: Boolean(ref), ref };
+  }
+
+  // Handle a /spawn POST (the spawn skill, so the Claude agent can open a new voice-controlled
+  // session on request — optionally at a given cwd). Inherits this session's permission mode and
+  // answers with { ok, ref } so the agent can tell the user where the new session opened.
+  private async handleSpawnRequest(body: string, res: ServerResponse): Promise<void> {
+    let cwd: string | undefined;
+    try {
+      const parsed = JSON.parse(body || "{}") as { cwd?: string };
+      if (typeof parsed.cwd === "string" && parsed.cwd.trim()) cwd = parsed.cwd.trim();
+    } catch {
+      // malformed body → spawn at the daemon's own cwd
     }
-    this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+    const result = await this.spawnThread(cwd);
+    res.statusCode = result.ok ? 200 : 500;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(result));
   }
 
   // The command a spawned cmux workspace runs to join this session as a new thread.

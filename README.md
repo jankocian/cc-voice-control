@@ -97,7 +97,7 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
 - `src/daemon/voice-daemon.ts` — the session: bridge client, STT/TTS, cmux injection.
 - `src/daemon/{cmux,openai,config}.ts` — cmux CLI, OpenAI calls, config loading.
 - `hooks/` — the `Stop` hook (returns each turn's final reply) and the `SessionStart` hook (resets thread history on `/clear` · `/compact`).
-- `skills/` — `start` / `stop` / `status`.
+- `skills/` — `start` / `stop` / `status` / `spawn` (open a new voice-controlled session in another workspace).
 - `src/shared/` — the wire protocol and bridge URL contract (shared by daemon + worker).
 - `worker/` — the Cloudflare bridge and the phone page.
 
