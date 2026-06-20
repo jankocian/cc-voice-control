@@ -81,38 +81,38 @@ bubbles (`MessageBubble.tsx`/`MessageThread.tsx`), 3d inline playback + draggabl
 (`InlineAudioPlayer.tsx`/`usePlayback.ts`). **Remaining:** the **design MD (3e)** is not written,
 and the hero is only *condensed-bar* sticky, not fully sticky (3f).
 
-### 3a. Status monitor (the hero)
+### 3a. Status monitor (the hero) ✅
 
-- [ ] Big, centered, **huge typography** for state (Ready / Listening / Transcribing / Working / Speaking).
-- [ ] **Square** area (width = height).
-- [ ] **Full-bleed saturated background** that fills the whole area — not an outlined card.
-- [ ] Background + motion change per state (calm when idle, alive when active).
-- [ ] Use the **Claude Code brand color** and the **Claude star/sunburst logo**, animated (e.g. pulsing) so it reads as "something is happening".
-- [ ] Distinct, beautiful animation for **audio ingest** (while recording the user's voice).
-- [ ] Distinct, beautiful animation for **Claude working**.
+- [x] Big, centered, **huge typography** for state (Ready / Listening / Transcribing / Working / Speaking).
+- [x] **Square** area (width = height).
+- [x] **Full-bleed saturated background** that fills the whole area — not an outlined card.
+- [x] Background + motion change per state (calm when idle, alive when active).
+- [x] Use the **Claude Code brand color** and the **Claude star/sunburst logo**, animated (e.g. pulsing) so it reads as "something is happening".
+- [x] Distinct, beautiful animation for **audio ingest** (while recording the user's voice).
+- [x] Distinct, beautiful animation for **Claude working**.
 
-### 3b. Stop button (contextual)
+### 3b. Stop button (contextual) ✅
 
-- [ ] Show a **Stop** button (stop icon, red) **only while Claude is working**.
-- [ ] Place it in a corner of the monitor (upper- or lower-right).
-- [ ] Remove the standalone "Stop" ghost button (it only makes sense while Claude works).
+- [x] Show a **Stop** button (stop icon, red) **only while Claude is working**.
+- [x] Place it in a corner of the monitor (upper- or lower-right).
+- [x] Remove the standalone "Stop" ghost button (it only makes sense while Claude works).
 
-### 3c. Messages → iOS-style chat
+### 3c. Messages → iOS-style chat ✅
 
-- [ ] Remove the "Activity" heading (meaningless).
-- [ ] Restructure messages as a natural **chat (iMessage / WhatsApp style)**:
-  - [ ] **My messages right-aligned**, **Claude's left-aligned**, as speech bubbles.
-  - [ ] Make them genuinely beautiful, not rudimentary rows.
+- [x] Remove the "Activity" heading (meaningless).
+- [x] Restructure messages as a natural **chat (iMessage / WhatsApp style)**:
+  - [x] **My messages right-aligned**, **Claude's left-aligned**, as speech bubbles.
+  - [x] Make them genuinely beautiful, not rudimentary rows.
 
-### 3d. TTS playback controls (per Claude message)
+### 3d. TTS playback controls (per Claude message) ✅
 
-- [ ] While playing back Claude's reply, show a **playback progress indicator** — e.g. the bubble's bottom border fills as it plays.
-- [ ] Add a **draggable knob/scrubber** the user can touch to seek / fast-forward / skip to the end.
+- [x] While playing back Claude's reply, show a **playback progress indicator** — e.g. the bubble's bottom border fills as it plays.
+- [x] Add a **draggable knob/scrubber** the user can touch to seek / fast-forward / skip to the end.
 
 ### 3e. General polish
 
-- [ ] Clean, minimal, cohesive — one consistent type + motion language throughout.
-- [ ] Optimized for small phone screens (touch targets, safe-area, one-hand reach).
+- [x] Clean, minimal, cohesive — one consistent type + motion language throughout.
+- [x] Optimized for small phone screens (touch targets, safe-area, one-hand reach).
 - [ ] Write a short **design MD** documenting tokens, states, and motion so it stays coherent.
 
 ### 3f. Sticky hero + controls
