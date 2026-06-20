@@ -52,12 +52,6 @@ describe("resolveConfig", () => {
     expect(result.config.bridgeUrl).toBe("https://voice-control.nee.rs");
   });
 
-  it("keeps legacy ElevenLabs fields optional so old config files don't break", async () => {
-    const path = writeConfig({ openaiApiKey: "sk-test", elevenlabsApiKey: "xi", voiceId: "v1" });
-    const result = await resolveConfig(path);
-    expect(result.ok).toBe(true);
-  });
-
   // Case (b): a config file exists but has no openaiApiKey → point at THAT file.
   it("returns setup-needed (not a throw) when the config file has no openaiApiKey", async () => {
     const path = writeConfig({ bridgeUrl: "https://example.workers.dev" });

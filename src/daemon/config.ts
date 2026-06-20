@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
 import { type BridgeClientRole, toBridgeBrowserSessionUrl, toBridgeWebSocketUrl } from "../shared/bridge-contract.js";
@@ -17,11 +17,6 @@ const ConfigSchema = z.object({
   ttsInstructions: z.string().min(1).optional(),
   // Optional ISO-639-1 STT hint (e.g. "en"); short clips can mis-detect language.
   language: z.string().min(1).optional(),
-  // Legacy ElevenLabs fields — kept optional so existing config files don't hard-break.
-  elevenlabsApiKey: z.string().min(1).optional(),
-  voiceId: z.string().min(1).optional(),
-  ttsModelId: z.string().min(1).optional(),
-  sttModelId: z.string().min(1).optional(),
   // Where the daemon connects (and the phone URL points). Defaults to the public bridge so
   // installed users only set openaiApiKey; override to self-host or for local dev.
   bridgeUrl: z.string().url().default("https://voice-control.nee.rs")
@@ -49,22 +44,19 @@ export function qrPath(): string {
   return join(stateDir(), "qr.txt");
 }
 
-const LEGACY_CONFIG_PATH = join(homedir(), ".config", "voice-remote", "config.json");
-
-/** The path we recommend the user create when no config file exists at all. */
+/** The path we recommend the user create when no config file exists at all. Always lives in
+ *  the plugin's managed data dir (via stateDir()) — never the user's ~/.config. */
 export function recommendedConfigPath(): string {
   if (process.env.VOICE_REMOTE_CONFIG) return process.env.VOICE_REMOTE_CONFIG;
-  if (process.env.CLAUDE_PLUGIN_DATA) return join(process.env.CLAUDE_PLUGIN_DATA, "config.json");
-  return LEGACY_CONFIG_PATH;
+  return join(stateDir(), "config.json");
 }
 
-// Config is looked up in order: explicit $VOICE_REMOTE_CONFIG, then the plugin
-// data dir, then the legacy ~/.config path (back-compat for existing setups).
+// Config is looked up in order: explicit $VOICE_REMOTE_CONFIG, then the plugin's managed
+// data dir ($CLAUDE_PLUGIN_DATA, via stateDir()).
 function configCandidates(): string[] {
   const candidates: string[] = [];
   if (process.env.VOICE_REMOTE_CONFIG) candidates.push(process.env.VOICE_REMOTE_CONFIG);
-  if (process.env.CLAUDE_PLUGIN_DATA) candidates.push(join(process.env.CLAUDE_PLUGIN_DATA, "config.json"));
-  candidates.push(LEGACY_CONFIG_PATH);
+  candidates.push(join(stateDir(), "config.json"));
   return candidates;
 }
 

@@ -13,9 +13,8 @@ It is looked up in this order (first match wins):
 
 1. `$VOICE_REMOTE_CONFIG` — an explicit path you set in your shell.
 2. `$CLAUDE_PLUGIN_DATA/config.json` — the plugin's own managed data dir
-   (`~/.claude/plugins/data/voice-control…/`). **Recommended** — this is where the
-   plugin keeps all its state, so nothing lands in your `~/.config`.
-3. `~/.config/voice-remote/config.json` — legacy location, still read for back-compat.
+   (`~/.claude/plugins/data/voice-control…/`). This is where the plugin keeps all
+   its state, so nothing lands in your `~/.config`.
 
 Lock it down (it holds a secret):
 
