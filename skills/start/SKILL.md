@@ -40,7 +40,7 @@ then shows a scannable QR code + the phone URL. State lives in the plugin's own 
    - shows the exact `configPath` from the JSON to open or create (use that value verbatim);
    - shows a tiny example to paste into that file:
      ```json
-     { "openaiApiKey": "sk-...", "bridgeUrl": "https://...workers.dev" }
+     { "openaiApiKey": "sk-..." }
      ```
    - tells them to **re-run `/voice-control:start` after saving**.
 

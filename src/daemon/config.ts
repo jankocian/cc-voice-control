@@ -83,7 +83,7 @@ export type ConfigSetupNeeded = {
 
 export type ConfigLoadResult = { ok: true; config: VoiceRemoteConfig } | ConfigSetupNeeded;
 
-const SETUP_EXAMPLE = '{ "openaiApiKey": "sk-...", "bridgeUrl": "https://...workers.dev" }';
+const SETUP_EXAMPLE = '{ "openaiApiKey": "sk-..." }';
 
 function setupMessage(configPath: string, exists: boolean): string {
   const action = exists ? `add your OpenAI API key to ${configPath}` : `create ${configPath}`;
