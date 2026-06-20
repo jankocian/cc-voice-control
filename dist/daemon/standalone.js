@@ -1706,7 +1706,7 @@ var require_websocket = __commonJS((exports, module) => {
   var http = __require("http");
   var net = __require("net");
   var tls = __require("tls");
-  var { randomBytes, createHash } = __require("crypto");
+  var { randomBytes: randomBytes2, createHash: createHash2 } = __require("crypto");
   var { Duplex, Readable } = __require("stream");
   var { URL: URL2 } = __require("url");
   var PerMessageDeflate = require_permessage_deflate();
@@ -2122,7 +2122,7 @@ var require_websocket = __commonJS((exports, module) => {
       }
     }
     const defaultPort = isSecure ? 443 : 80;
-    const key = randomBytes(16).toString("base64");
+    const key = randomBytes2(16).toString("base64");
     const request = isSecure ? https.request : http.request;
     const protocolSet = new Set;
     let perMessageDeflate;
@@ -2249,7 +2249,7 @@ var require_websocket = __commonJS((exports, module) => {
         abortHandshake(websocket, socket, "Invalid Upgrade header");
         return;
       }
-      const digest = createHash("sha1").update(key + GUID).digest("base64");
+      const digest = createHash2("sha1").update(key + GUID).digest("base64");
       if (res.headers["sec-websocket-accept"] !== digest) {
         abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
         return;
@@ -2624,7 +2624,7 @@ var require_websocket_server = __commonJS((exports, module) => {
   var EventEmitter = __require("events");
   var http = __require("http");
   var { Duplex } = __require("stream");
-  var { createHash } = __require("crypto");
+  var { createHash: createHash2 } = __require("crypto");
   var extension = require_extension();
   var PerMessageDeflate = require_permessage_deflate();
   var subprotocol = require_subprotocol();
@@ -2839,7 +2839,7 @@ var require_websocket_server = __commonJS((exports, module) => {
       }
       if (this._state > RUNNING)
         return abortHandshake(socket, 503);
-      const digest = createHash("sha1").update(key + GUID).digest("base64");
+      const digest = createHash2("sha1").update(key + GUID).digest("base64");
       const headers = [
         "HTTP/1.1 101 Switching Protocols",
         "Upgrade: websocket",
@@ -4568,10 +4568,11 @@ var require_qrcode = __commonJS((exports, module) => {
 import { appendFileSync, existsSync, mkdirSync as mkdirSync3, realpathSync, statSync, truncateSync } from "node:fs";
 import { join as join2 } from "node:path";
 import { argv } from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/daemon/config.ts
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18856,16 +18857,17 @@ config(en_default());
 var BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 var BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
 var BRIDGE_ROLE_QUERY_PARAM = "role";
+var BRIDGE_THREAD_ID_QUERY_PARAM = "threadId";
 function toBridgeBrowserSessionUrl(bridgeUrl, secret) {
   const url2 = new URL(bridgeUrl);
   url2.pathname = toBridgeBrowserSessionPath(secret);
   return url2.toString();
 }
-function toBridgeWebSocketUrl(bridgeUrl, secret, role) {
+function toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId) {
   const url2 = new URL(bridgeUrl);
   url2.protocol = toBridgeWebSocketProtocol(url2.protocol);
   url2.pathname = toBridgeWebSocketPath(secret);
-  writeBridgeAuthQuery(url2.searchParams, role);
+  writeBridgeAuthQuery(url2.searchParams, role, threadId);
   return url2.toString();
 }
 function toBridgeBrowserSessionPath(secret) {
@@ -18874,9 +18876,11 @@ function toBridgeBrowserSessionPath(secret) {
 function toBridgeWebSocketPath(secret) {
   return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
-function writeBridgeAuthQuery(searchParams, role) {
+function writeBridgeAuthQuery(searchParams, role, threadId) {
   if (role)
     searchParams.set(BRIDGE_ROLE_QUERY_PARAM, role);
+  if (threadId)
+    searchParams.set(BRIDGE_THREAD_ID_QUERY_PARAM, threadId);
 }
 function toBridgeWebSocketProtocol(protocol) {
   return protocol === "https:" || protocol === "wss:" ? "wss:" : "ws:";
@@ -18900,8 +18904,16 @@ var ConfigSchema = exports_external.object({
 function stateDir() {
   return process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
 }
+var RUNTIME_DIR_NAME = "runtime";
+var RUNTIME_FALLBACK_SURFACE = "default";
+function runtimeDir() {
+  return join(stateDir(), RUNTIME_DIR_NAME);
+}
 function runtimePath() {
   return join(stateDir(), "runtime.json");
+}
+function threadRuntimePath(surfaceId) {
+  return join(runtimeDir(), `${surfaceId || RUNTIME_FALLBACK_SURFACE}.json`);
 }
 function qrPath() {
   return join(stateDir(), "qr.txt");
@@ -18977,17 +18989,54 @@ function writeSetupNeededRuntime(setup) {
     message: setup.message
   }, null, 2));
 }
-function toWebSocketUrl(bridgeUrl, secret, role) {
-  return toBridgeWebSocketUrl(bridgeUrl, secret, role);
+var SESSION_SECRET_BYTES = 16;
+var SESSION_ID_CHARS = 12;
+function sessionFilePath() {
+  return join(stateDir(), "session.json");
+}
+var SessionFileSchema = exports_external.object({
+  secret: exports_external.string().min(1),
+  sessionId: exports_external.string().min(1),
+  createdAt: exports_external.number()
+});
+function deriveSessionId(secret) {
+  return createHash("sha256").update(secret).digest("base64url").slice(0, SESSION_ID_CHARS);
+}
+function loadOrCreateSession() {
+  const path = sessionFilePath();
+  const existing = readSessionFile(path);
+  if (existing)
+    return existing;
+  mkdirSync(stateDir(), { recursive: true });
+  const secret = randomBytes(SESSION_SECRET_BYTES).toString("base64url");
+  const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 384 });
+  renameSync(tmp, path);
+  const settled = readSessionFile(path) ?? session;
+  return { secret: settled.secret, sessionId: settled.sessionId };
+}
+function readSessionFile(path) {
+  try {
+    const parsed = SessionFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+    return { secret: parsed.secret, sessionId: parsed.sessionId };
+  } catch {
+    return;
+  }
+}
+function toWebSocketUrl(bridgeUrl, secret, role, threadId) {
+  return toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId);
 }
 function toBrowserUrl(bridgeUrl, secret) {
   return toBridgeBrowserSessionUrl(bridgeUrl, secret);
 }
 
 // src/daemon/voice-daemon.ts
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdirSync as mkdirSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { createServer } from "node:http";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -19072,6 +19121,50 @@ async function cmuxInterrupt(surface) {
   const r = await runCmux(["send-key", ...cmuxTarget(surface), "escape"]);
   return r.ok;
 }
+async function cmuxSurfaceTitle(surface) {
+  if (!surface)
+    return;
+  const r = await runCmux(["tree", "--all", "--json", "--id-format", "both"]);
+  if (!r.ok)
+    return;
+  try {
+    const node = findSurfaceNode(JSON.parse(r.stdout), surface);
+    const title = node && typeof node.title === "string" ? stripSpinnerGlyph(node.title) : "";
+    return title.length > 0 ? title : undefined;
+  } catch {
+    return;
+  }
+}
+function findSurfaceNode(root, surface) {
+  const stack = [root];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (Array.isArray(cur)) {
+      stack.push(...cur);
+    } else if (cur && typeof cur === "object") {
+      const node = cur;
+      if (node.id === surface || node.ref === surface || node.uuid === surface)
+        return node;
+      for (const value of Object.values(node))
+        if (value && typeof value === "object")
+          stack.push(value);
+    }
+  }
+  return;
+}
+function stripSpinnerGlyph(title) {
+  return title.replace(/^[^\p{L}\p{N}]+/u, "").trim();
+}
+async function spawnWorkspace({ cwd, command }) {
+  const r = await runCmux(["new-workspace", "--cwd", cwd, "--command", command, "--focus", "true"]);
+  if (!r.ok)
+    return;
+  return parseWorkspaceRef(r.stdout);
+}
+function parseWorkspaceRef(stdout) {
+  const match = stdout.match(/\bworkspace:\d+\b/);
+  return match ? match[0] : undefined;
+}
 
 // src/daemon/history-ring.ts
 var MAX_ENTRIES_PER_REPLY = 4;
@@ -19101,6 +19194,9 @@ class HistoryRing {
   }
   snapshot() {
     return this.entries;
+  }
+  clear() {
+    this.entries.length = 0;
   }
   evict() {
     const replySeqs = this.entries.filter((e) => e.role === "claude").map((e) => e.seq);
@@ -19136,6 +19232,65 @@ function selectAudioReply(ring, requestId) {
     return { type: "tts_audio", requestId, replay: true, ...entry.audio };
   }
   return { type: "error", requestId, message: "Audio for that reply is no longer available." };
+}
+
+// src/daemon/labels.ts
+import { spawn as spawn2 } from "node:child_process";
+import { basename } from "node:path";
+var TITLE_SEPARATOR = " · ";
+async function computeLabel(cwd, surfaceId, threadId, probes = defaultProbes) {
+  const [paneTitle, { repo, branch }] = await Promise.all([probes.surfaceTitle(surfaceId), probes.gitRepoBranch(cwd)]);
+  const cwdBase = basename(cwd) || undefined;
+  return { title: pickTitle({ paneTitle, repo, branch, cwd: cwdBase, threadId }), repo, branch, cwd: cwdBase };
+}
+function pickTitle(parts) {
+  if (parts.paneTitle)
+    return parts.paneTitle;
+  if (parts.repo && parts.branch)
+    return `${parts.repo}${TITLE_SEPARATOR}${parts.branch}`;
+  if (parts.repo)
+    return parts.repo;
+  if (parts.cwd)
+    return parts.cwd;
+  return parts.threadId;
+}
+var defaultProbes = {
+  surfaceTitle: cmuxSurfaceTitle,
+  gitRepoBranch
+};
+async function gitRepoBranch(cwd) {
+  const [top, head] = await Promise.all([
+    runGit(["-C", cwd, "rev-parse", "--show-toplevel"]),
+    runGit(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+  ]);
+  return {
+    repo: top ? basename(top) : undefined,
+    branch: head && head !== "HEAD" ? head : undefined
+  };
+}
+var GIT_TIMEOUT_MS = 4000;
+function runGit(args) {
+  return new Promise((resolve) => {
+    const child = spawn2("git", args, { stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    let settled = false;
+    const done = (value) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      done(undefined);
+    }, GIT_TIMEOUT_MS);
+    child.stdout.on("data", (d) => stdout += d.toString());
+    child.on("error", () => done(undefined));
+    child.on("exit", (code) => done(code === 0 ? stdout.trim() || undefined : undefined));
+  });
 }
 
 // src/daemon/openai.ts
@@ -19303,12 +19458,18 @@ var RECONNECT_DELAY_MS = 1500;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 40000;
 var HISTORY_REPLIES = 7;
+var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+var PLUGIN_DIR_ARG = stateDir().endsWith("-inline") ? `--plugin-dir '${PLUGIN_ROOT}' ` : "";
+var PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
+function permissionModeArg(mode) {
+  return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
+}
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
-  const secret = randomBytes(16).toString("base64url");
-  const sessionId = createHash("sha256").update(secret).digest("base64url").slice(0, 12);
+  const threadId = surface ?? randomUUID();
+  const { secret, sessionId } = loadOrCreateSession();
   const browserUrl = toBrowserUrl(config2.bridgeUrl, secret);
-  return { config: config2, surface, secret, sessionId, browserUrl };
+  return { config: config2, surface, threadId, secret, sessionId, browserUrl };
 }
 
 class VoiceDaemon {
@@ -19323,9 +19484,12 @@ class VoiceDaemon {
   stopped = false;
   inFlight;
   queue = [];
+  inheritedPermissionMode;
   history = new HistoryRing(HISTORY_REPLIES);
+  label;
   constructor(init) {
     this.init = init;
+    this.label = { title: init.threadId };
   }
   get browserUrl() {
     return this.init.browserUrl;
@@ -19343,6 +19507,7 @@ class VoiceDaemon {
     this.healthTimer = setInterval(() => void this.refreshCmuxHealth(), CMUX_HEALTH_INTERVAL_MS);
   }
   async refreshCmuxHealth() {
+    this.refreshLabel();
     const health = await cmuxHealth(this.init.surface);
     if (health.socketUp !== this.cmuxReachable) {
       this.cmuxReachable = health.socketUp;
@@ -19358,7 +19523,8 @@ class VoiceDaemon {
   startHookListener() {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
-        if (req.method !== "POST" || req.url !== "/reply") {
+        const route = req.method === "POST" ? req.url : undefined;
+        if (route !== "/reply" && route !== "/reset") {
           res.statusCode = 404;
           res.end();
           return;
@@ -19368,8 +19534,15 @@ class VoiceDaemon {
         req.on("end", () => {
           res.statusCode = 204;
           res.end();
+          if (route === "/reset") {
+            this.handleReset();
+            return;
+          }
           try {
-            const { prompt, text } = JSON.parse(body || "{}");
+            const { prompt, text, permissionMode } = JSON.parse(body || "{}");
+            if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
+              this.inheritedPermissionMode = permissionMode;
+            }
             this.onClaudeReply(typeof prompt === "string" ? prompt : "", typeof text === "string" ? text : "");
           } catch {}
         });
@@ -19384,22 +19557,33 @@ class VoiceDaemon {
     });
   }
   writeRuntime() {
-    mkdirSync2(stateDir(), { recursive: true });
+    mkdirSync2(runtimeDir(), { recursive: true });
     try {
       writeFileSync2(qrPath(), `${renderQr(this.init.browserUrl)}
 `);
     } catch (error51) {
       console.error(`[qr] render failed: ${error51 instanceof Error ? error51.message : String(error51)}`);
     }
-    writeFileSync2(runtimePath(), JSON.stringify({ port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl }, null, 2));
+    writeFileSync2(threadRuntimePath(this.init.surface), JSON.stringify({ port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl }, null, 2));
+  }
+  handleReset() {
+    this.history.clear();
+    this.inFlight = undefined;
+    console.error("[reset] cleared voice history for this thread (/clear or /compact)");
+    this.sendToBrowser(buildHistoryEvent(this.history));
+    this.emitStatus();
   }
   connectBridge() {
     if (this.stopped)
       return;
-    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon");
+    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon", this.init.threadId);
     const ws = new wrapper_default(url2);
     this.ws = ws;
-    ws.on("open", () => this.emitStatus());
+    ws.on("open", () => {
+      this.registerThread();
+      this.emitStatus();
+      this.refreshLabel();
+    });
     ws.on("message", (raw) => {
       let envelope;
       try {
@@ -19407,7 +19591,7 @@ class VoiceDaemon {
       } catch {
         return;
       }
-      if (envelope.channel === "daemon" && envelope.event) {
+      if (envelope.channel === "daemon" && envelope.event && envelope.threadId === this.init.threadId) {
         this.handleBrowserEvent(envelope.event).catch((error51) => this.sendError(error51));
       }
     });
@@ -19444,9 +19628,24 @@ class VoiceDaemon {
       case "get_audio":
         this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
+      case "spawn_thread":
+        await this.spawnThread(event.cwd);
+        return;
       default:
         return;
     }
+  }
+  async spawnThread(cwd) {
+    const command = this.buildSpawnCommand();
+    const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
+    if (ref) {
+      console.error(`[spawn] new workspace ${ref} :: ${command}`);
+      return;
+    }
+    this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+  }
+  buildSpawnCommand() {
+    return `claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
   }
   async handleAudio(audioBase64, mimeType, mode) {
     let transcript;
@@ -19542,6 +19741,25 @@ class VoiceDaemon {
       this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
     } catch {}
   }
+  buildThreadInfo() {
+    return {
+      threadId: this.init.threadId,
+      label: this.label,
+      state: this.inFlight !== undefined ? "working" : "idle",
+      listening: this.cmuxHealthy
+    };
+  }
+  registerThread() {
+    this.send({ channel: "registry", event: { type: "thread_register", info: this.buildThreadInfo() } });
+  }
+  async refreshLabel() {
+    const next = await computeLabel(process.cwd(), this.init.surface, this.init.threadId);
+    if (sameLabel(next, this.label))
+      return;
+    this.label = next;
+    if (this.ws?.readyState === wrapper_default.OPEN)
+      this.registerThread();
+  }
   emitStatus() {
     const state = {
       sessionId: this.init.sessionId,
@@ -19549,9 +19767,11 @@ class VoiceDaemon {
       state: this.inFlight !== undefined ? "working" : "idle"
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.inFlight } });
+    if (this.ws?.readyState === wrapper_default.OPEN)
+      this.registerThread();
   }
   sendToBrowser(event) {
-    this.send({ channel: "browser", event });
+    this.send({ channel: "browser", threadId: this.init.threadId, event });
   }
   send(envelope) {
     if (this.ws?.readyState !== wrapper_default.OPEN)
@@ -19575,10 +19795,12 @@ class VoiceDaemon {
     } catch {}
     this.httpServer?.close();
     try {
-      rmSync(runtimePath(), { force: true });
-      rmSync(qrPath(), { force: true });
+      rmSync(threadRuntimePath(this.init.surface), { force: true });
     } catch {}
   }
+}
+function sameLabel(a, b) {
+  return a.title === b.title && a.repo === b.repo && a.branch === b.branch && a.cwd === b.cwd;
 }
 function capForSpeech(text) {
   return text.length > MAX_SPEECH_CHARS ? `${text.slice(0, MAX_SPEECH_CHARS)}…` : text;
@@ -19640,7 +19862,7 @@ function isEntryPoint() {
   if (!argv[1])
     return false;
   try {
-    return realpathSync(argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+    return realpathSync(argv[1]) === realpathSync(fileURLToPath2(import.meta.url));
   } catch {
     return false;
   }
