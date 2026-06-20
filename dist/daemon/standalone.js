@@ -19294,9 +19294,6 @@ function runGit(args) {
 }
 
 // src/daemon/openai.ts
-var DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
-var DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
-var DEFAULT_VOICE = "marin";
 var OPENAI_BASE = "https://api.openai.com/v1";
 var MAX_TTS_INPUT_CHARS = 4096;
 function filenameForMime(mimeType) {
@@ -19316,7 +19313,7 @@ async function transcribeAudio(config2, audio, mimeType) {
   bytes.set(audio);
   const type = mimeType || "audio/webm";
   form.append("file", new Blob([bytes], { type }), filenameForMime(type));
-  form.append("model", config2.sttModel ?? DEFAULT_STT_MODEL);
+  form.append("model", config2.sttModel);
   if (config2.language)
     form.append("language", config2.language);
   form.append("response_format", "text");
@@ -19339,8 +19336,8 @@ async function synthesizeChunk(config2, text, voiceOverride) {
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      model: config2.ttsModel ?? DEFAULT_TTS_MODEL,
-      voice: voiceOverride ?? config2.openaiVoice ?? DEFAULT_VOICE,
+      model: config2.ttsModel,
+      voice: voiceOverride ?? config2.openaiVoice,
       input: text,
       response_format: "mp3",
       ...config2.ttsInstructions ? { instructions: config2.ttsInstructions } : {}
