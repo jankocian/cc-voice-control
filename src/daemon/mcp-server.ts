@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, statSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { resolveConfig, stateDir, writeSetupNeededRuntime } from "./config.js";
 import { reconcile } from "./reconcile.js";
@@ -18,6 +18,24 @@ import { createDaemonInit, VoiceDaemon } from "./voice-daemon.js";
  * stdout is the MCP JSON-RPC channel and MUST stay clean — route every log to
  * stderr (including any stray console.log from dependencies).
  */
+mkdirSync(stateDir(), { recursive: true });
+
+// Persist all diagnostics to ${stateDir}/daemon.log. Claude Code only captures the
+// MCP server's stderr up to the connection handshake, so without this the daemon's
+// runtime diagnostics (cmux health, injection results) are lost — exactly when you
+// need them. Tee console.error to the file; cap it so it can't grow without bound.
+const LOG_FILE = join(stateDir(), "daemon.log");
+const LOG_MAX_BYTES = 1_000_000;
+const baseError = console.error.bind(console);
+console.error = (...args: unknown[]): void => {
+  baseError(...args);
+  try {
+    if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > LOG_MAX_BYTES) truncateSync(LOG_FILE, 0);
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${args.map((a) => String(a)).join(" ")}\n`);
+  } catch {
+    // logging must never throw into the daemon
+  }
+};
 console.log = (...args: unknown[]) => console.error(...args);
 
 const ACTIVE_FLAG = join(stateDir(), "active");
@@ -122,7 +140,6 @@ function shutdown(): void {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-mkdirSync(stateDir(), { recursive: true });
 setInterval(() => void pollFlag(), 1000);
 void pollFlag();
 console.error("[mcp] voice-control server up; waiting for /voice-control:start");

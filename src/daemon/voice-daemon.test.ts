@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { selectMissedReply, VoiceDaemon } from "./voice-daemon.js";
 
-const BROWSER_URL = "https://voice.example.com/s/sid?token=tok";
+const BROWSER_URL = "https://voice.example.com/s/sek";
 
 describe("VoiceDaemon.ensureRuntimePublished", () => {
   let dataDir: string;
@@ -32,8 +32,8 @@ describe("VoiceDaemon.ensureRuntimePublished", () => {
         bridgeUrl: "https://voice.example.com"
       },
       surface: "SURF",
+      secret: "sek",
       sessionId: "sid",
-      token: "tok",
       browserUrl: BROWSER_URL
     });
   }

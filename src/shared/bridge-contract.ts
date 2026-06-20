@@ -4,17 +4,17 @@ export type { BridgeClientRole } from "./protocol.js";
 
 export const BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 export const BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
-export const BRIDGE_TOKEN_QUERY_PARAM = "token";
 export const BRIDGE_ROLE_QUERY_PARAM = "role";
 
+// A session is gated by a single secret carried in the URL path. There is no separate
+// token: the secret both routes the session (the worker derives the Durable Object name
+// by hashing it) and authorizes joining it, so knowledge of the secret IS the capability.
 export type BridgeAuthQuery = {
-  token: string;
   role?: BridgeClientRole;
 };
 
 export type ParsedBridgeBrowserSessionUrl = {
-  sessionId: string;
-  token: string;
+  secret: string;
 };
 
 export type ParsedBridgeWebSocketUrl = ParsedBridgeBrowserSessionUrl & {
@@ -24,50 +24,40 @@ export type ParsedBridgeWebSocketUrl = ParsedBridgeBrowserSessionUrl & {
 const BROWSER_SESSION_PATH_PATTERN = /^\/s\/([^/]+)$/;
 const WEBSOCKET_PATH_PATTERN = /^\/ws\/([^/]+)$/;
 
-export function toBridgeBrowserSessionUrl(bridgeUrl: string, sessionId: string, token: string): string {
+export function toBridgeBrowserSessionUrl(bridgeUrl: string, secret: string): string {
   const url = new URL(bridgeUrl);
-  url.pathname = toBridgeBrowserSessionPath(sessionId);
-  writeBridgeAuthQuery(url.searchParams, token);
+  url.pathname = toBridgeBrowserSessionPath(secret);
   return url.toString();
 }
 
-export function toBridgeWebSocketUrl(
-  bridgeUrl: string,
-  sessionId: string,
-  token: string,
-  role: BridgeClientRole
-): string {
+export function toBridgeWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole): string {
   const url = new URL(bridgeUrl);
   url.protocol = toBridgeWebSocketProtocol(url.protocol);
-  url.pathname = toBridgeWebSocketPath(sessionId);
-  writeBridgeAuthQuery(url.searchParams, token, role);
+  url.pathname = toBridgeWebSocketPath(secret);
+  writeBridgeAuthQuery(url.searchParams, role);
   return url.toString();
 }
 
-export function toBridgeBrowserSessionPath(sessionId: string): string {
-  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSessionId(sessionId)}`;
+export function toBridgeBrowserSessionPath(secret: string): string {
+  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
 
-export function toBridgeWebSocketPath(sessionId: string): string {
-  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSessionId(sessionId)}`;
+export function toBridgeWebSocketPath(secret: string): string {
+  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
 
 export function parseBridgeBrowserSessionUrl(input: string | URL): ParsedBridgeBrowserSessionUrl | undefined {
-  const url = asUrl(input);
-  const sessionId = parseBridgeBrowserSessionPath(url.pathname);
-  const query = readBridgeAuthQuery(url.searchParams);
-
-  if (!sessionId || !query.token) return undefined;
-  return { sessionId, token: query.token };
+  const secret = parseBridgeBrowserSessionPath(asUrl(input).pathname);
+  return secret ? { secret } : undefined;
 }
 
 export function parseBridgeWebSocketUrl(input: string | URL): ParsedBridgeWebSocketUrl | undefined {
   const url = asUrl(input);
-  const sessionId = parseBridgeWebSocketPath(url.pathname);
-  const query = readBridgeAuthQuery(url.searchParams);
+  const secret = parseBridgeWebSocketPath(url.pathname);
+  const { role } = readBridgeAuthQuery(url.searchParams);
 
-  if (!sessionId || !query.token || !query.role) return undefined;
-  return { sessionId, token: query.token, role: query.role };
+  if (!secret || !role) return undefined;
+  return { secret, role };
 }
 
 export function parseBridgeBrowserSessionPath(pathname: string): string | undefined {
@@ -80,7 +70,6 @@ export function parseBridgeWebSocketPath(pathname: string): string | undefined {
 
 export function readBridgeAuthQuery(searchParams: URLSearchParams): BridgeAuthQuery {
   return {
-    token: searchParams.get(BRIDGE_TOKEN_QUERY_PARAM) ?? "",
     role: parseBridgeClientRole(searchParams.get(BRIDGE_ROLE_QUERY_PARAM))
   };
 }
@@ -89,10 +78,7 @@ export function parseBridgeClientRole(value: string | null | undefined): BridgeC
   return value === "daemon" || value === "browser" ? value : undefined;
 }
 
-function writeBridgeAuthQuery(searchParams: URLSearchParams, token: string, role?: BridgeClientRole): void {
-  if (!token) throw new Error("token is required");
-
-  searchParams.set(BRIDGE_TOKEN_QUERY_PARAM, token);
+function writeBridgeAuthQuery(searchParams: URLSearchParams, role?: BridgeClientRole): void {
   if (role) searchParams.set(BRIDGE_ROLE_QUERY_PARAM, role);
 }
 
@@ -105,16 +91,16 @@ function parseSessionPath(pathname: string, pattern: RegExp): string | undefined
   if (!match) return undefined;
 
   try {
-    const sessionId = decodeURIComponent(match[1]);
-    return sessionId.length > 0 ? sessionId : undefined;
+    const secret = decodeURIComponent(match[1]);
+    return secret.length > 0 ? secret : undefined;
   } catch {
     return undefined;
   }
 }
 
-function encodeSessionId(sessionId: string): string {
-  if (!sessionId) throw new Error("sessionId is required");
-  return encodeURIComponent(sessionId);
+function encodeSecret(secret: string): string {
+  if (!secret) throw new Error("secret is required");
+  return encodeURIComponent(secret);
 }
 
 function asUrl(input: string | URL): URL {

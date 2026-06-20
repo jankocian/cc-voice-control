@@ -2,9 +2,8 @@ import jsQR from "jsqr";
 import { describe, expect, it } from "vitest";
 import { encodeQr, type QrMatrix, renderQr, renderQrUnicode } from "./qr.js";
 
-// A realistic phone URL, matching what the daemon builds: bridge + UUID session id + 43-char token.
-const SAMPLE_URL =
-  "https://voice-control.nee.rs/s/123e4567-e89b-12d3-a456-426614174000?token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+// A realistic phone URL, matching what the daemon builds: bridge + one 22-char session secret.
+const SAMPLE_URL = "https://voice-control.nee.rs/s/f1ZP8nKb2wQx7Lm3rT9aZv";
 
 /** Paint a boolean module grid into an RGBA bitmap jsQR can decode (black ink on white). */
 function rasterize(bits: boolean[][], scale = 4, quiet = 4) {

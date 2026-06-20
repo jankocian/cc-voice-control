@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import WebSocket from "ws";
@@ -9,7 +9,7 @@ import type {
   InjectMode,
   SessionState
 } from "../shared/protocol.js";
-import { cmuxInterrupt, cmuxPing, cmuxSubmit } from "./cmux.js";
+import { cmuxHealth, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
 import { qrPath, runtimePath, stateDir, toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
@@ -17,14 +17,22 @@ import { renderQr } from "./qr.js";
 // Reconnect backoff for transient bridge drops (network blips, worker redeploys).
 // A terminal close (1008) is handled separately and does not reconnect.
 const RECONNECT_DELAY_MS = 1500;
+// How often the daemon re-resolves its cmux pane so `listening` self-heals (a moved
+// pane / transient cmux hiccup recovers automatically instead of latching false).
+const CMUX_HEALTH_INTERVAL_MS = 5000;
 // Hard cap on spoken text so a huge reply can't blow past the TTS input limit.
 const MAX_SPEECH_CHARS = 2500;
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
   surface?: string;
+  // The whole capability: one unguessable secret that both routes the session and
+  // authorizes joining it. Carried in the phone URL path; never sent over the wire as a
+  // separate value.
+  secret: string;
+  // A short, non-secret label derived from `secret` (its hash). Safe to relay in status
+  // events and log; never the secret itself.
   sessionId: string;
-  token: string;
   browserUrl: string;
 };
 
@@ -49,13 +57,17 @@ export function selectMissedReply(
   return events;
 }
 
-/** Build a fresh session (id, token, phone URL) from config and the current cmux pane. */
+/** Build a fresh session (secret + phone URL) from config and the current cmux pane. */
 export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
   const surface = process.env.CMUX_SURFACE_ID;
-  const sessionId = randomUUID();
-  const token = randomBytes(32).toString("base64url");
-  const browserUrl = toBrowserUrl(config.bridgeUrl, sessionId, token);
-  return { config, surface, sessionId, token, browserUrl };
+  // 128 bits of entropy → 22 url-safe chars. Uncrackable by online guessing, and the
+  // session is ephemeral (it dies with the daemon), so a single secret is ample. Keeping
+  // it short also keeps the QR small. The bridge hashes it to route, so the raw secret is
+  // never used as an identifier or persisted anywhere.
+  const secret = randomBytes(16).toString("base64url");
+  const sessionId = createHash("sha256").update(secret).digest("base64url").slice(0, 12);
+  const browserUrl = toBrowserUrl(config.bridgeUrl, secret);
+  return { config, surface, secret, sessionId, browserUrl };
 }
 
 /**
@@ -78,8 +90,14 @@ export class VoiceDaemon {
   private ws?: WebSocket;
   private httpServer?: Server;
   private port = 0;
+  // `cmuxHealthy` drives the phone's "listening" lamp; it starts optimistic (true)
+  // and only drops on a POSITIVE "pane gone" verdict (see refreshCmuxHealth).
+  // `cmuxReachable` tracks the socket separately, purely so we log its transitions
+  // without spamming and without ever locking the user out on an ambiguous blip.
   private cmuxHealthy = true;
+  private cmuxReachable = true;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private healthTimer?: ReturnType<typeof setInterval>;
   private stopped = false;
 
   // One turn is injected at a time. `inFlight` is the exact prompt we typed and are
@@ -109,15 +127,49 @@ export class VoiceDaemon {
       `voice-remote ready. cmux surface=${this.init.surface ?? "(none — CMUX_SURFACE_ID was not set!)"} hookPort=${this.port}`
     );
     console.error(`Phone URL: ${this.init.browserUrl}`);
-    // Health-check cmux without blocking startup — a hung/missing cmux must not
-    // prevent the daemon from coming up and showing the phone URL.
-    void this.checkCmuxHealth();
+    // Monitor cmux without blocking startup — a hung/missing cmux must not prevent
+    // the daemon from coming up and showing the phone URL.
+    this.startCmuxMonitor();
   }
 
-  private async checkCmuxHealth(): Promise<void> {
-    this.cmuxHealthy = await cmuxPing();
-    if (!this.cmuxHealthy)
-      console.error("WARNING: cmux control socket is unreachable — injection will fail until cmux is running.");
+  // ---- cmux liveness (optimistic + self-healing) ----------------------------
+
+  // Re-resolve the cmux pane on a timer so `listening` always reflects reality and
+  // self-heals. Two design rules learned the hard way:
+  //
+  //  1. OPTIMISTIC. We only declare "not listening" when cmux POSITIVELY confirms the
+  //     pane is gone (identify resolves but the surface no longer exists). A cmux
+  //     socket that's merely unreachable this tick (cold CLI, app momentarily busy)
+  //     keeps us listening — locking the user out on an ambiguous signal is the bug
+  //     that made a perfectly-alive pane read "Claude isn't listening". If cmux is
+  //     truly down, the next injection fails and tells the user *then*.
+  //  2. SELF-HEALING. The surface ref is stable across a workspace move, so a re-probe
+  //     re-validates it and recovers on its own — no restart, no user action.
+  private startCmuxMonitor(): void {
+    void this.refreshCmuxHealth();
+    this.healthTimer = setInterval(() => void this.refreshCmuxHealth(), CMUX_HEALTH_INTERVAL_MS);
+  }
+
+  private async refreshCmuxHealth(): Promise<void> {
+    const health = await cmuxHealth(this.init.surface);
+    if (health.socketUp !== this.cmuxReachable) {
+      this.cmuxReachable = health.socketUp;
+      console.error(
+        health.socketUp
+          ? "[cmux] control socket reachable again"
+          : "WARNING: cmux control socket unreachable this tick — staying optimistic (injection will surface any real failure)."
+      );
+    }
+    // listening is false ONLY on a POSITIVE "pane gone" verdict (surfaceAlive===false).
+    // A reachable pane, an unknown probe, or a down socket all stay optimistic.
+    const healthy = health.surfaceAlive !== false;
+    if (healthy === this.cmuxHealthy) return; // only emit on change
+    this.cmuxHealthy = healthy;
+    console.error(
+      healthy
+        ? "[cmux] pane reachable — listening"
+        : "WARNING: the Claude pane is no longer reachable in cmux (closed?) — restart /voice-control:start in a live pane."
+    );
     this.emitStatus();
   }
 
@@ -190,7 +242,7 @@ export class VoiceDaemon {
 
   private connectBridge(): void {
     if (this.stopped) return;
-    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.sessionId, this.init.token, "daemon");
+    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon");
     const ws = new WebSocket(url);
     this.ws = ws;
 
@@ -282,17 +334,26 @@ export class VoiceDaemon {
     this.emitStatus();
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(next)}`);
     const ok = await cmuxSubmit(next, this.init.surface);
-    this.cmuxHealthy = ok;
     console.error(`[inject] cmuxSubmit ok=${ok}`);
-    if (!ok) {
-      this.inFlight = undefined;
-      this.sendToBrowser({
-        type: "error",
-        message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
-      });
-      this.emitStatus();
-      void this.pump(); // try the next queued prompt
+    if (ok) {
+      // A successful inject positively proves the pane is alive — clear any stale
+      // "not listening" without waiting for the next health tick.
+      if (!this.cmuxHealthy) {
+        this.cmuxHealthy = true;
+        this.emitStatus();
+      }
+      return;
     }
+    this.inFlight = undefined;
+    // Don't hard-fail "listening" on one send: re-probe (only a positive pane-gone
+    // verdict flips it). A transient send error stays optimistic and just retries.
+    void this.refreshCmuxHealth();
+    this.sendToBrowser({
+      type: "error",
+      message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
+    });
+    this.emitStatus();
+    void this.pump(); // try the next queued prompt
   }
 
   // Esc the running turn and clear our in-flight marker. The cancelled turn's reply (if
@@ -369,6 +430,7 @@ export class VoiceDaemon {
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.healthTimer) clearInterval(this.healthTimer);
     // Tell the bridge to drop the session so a leaked URL can't reconnect. Best-effort:
     // if the socket is already gone the session is inert anyway (no daemon to relay to).
     this.send({ channel: "control", event: { type: "terminate" } });

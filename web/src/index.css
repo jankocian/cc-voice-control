@@ -1,0 +1,250 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* ============================================================================
+   VOICE-CONTROL DESIGN SYSTEM
+   Warm, light, premium voice-assistant aesthetic. Cream canvas, soft diffuse
+   shadows, very rounded geometry, two accents: coral/orange + lavender/violet.
+
+   Everything below is a TOKEN. Components only use utilities that resolve to
+   these tokens (bg-coral, text-ink, rounded-bubble, shadow-card, …). No magic
+   numbers and no inline styles in components — if a value is needed, add a token.
+   ========================================================================= */
+
+@theme {
+  /* ---- Surfaces ---------------------------------------------------------- */
+  --color-canvas: #faf6f1; /* app background (cream) */
+  --color-canvas-deep: #f3ece3; /* recessed wells / scroll bg */
+  --color-surface: #ffffff; /* cards, bars, buttons */
+  --color-hairline: #efe9e1; /* 1px separators / borders */
+
+  /* ---- Ink (text) -------------------------------------------------------- */
+  --color-ink: #211f33; /* primary text */
+  --color-ink-soft: #6e6b7e; /* secondary text */
+  --color-ink-faint: #a6a2b4; /* tertiary / placeholder */
+
+  /* ---- Accents ----------------------------------------------------------- */
+  --color-coral: #fb7a45; /* primary accent (orange) */
+  --color-coral-ink: #c64f1f; /* coral text on coral-soft */
+  --color-coral-soft: #ffe9dc; /* user bubble fill */
+  --color-violet: #8e7df0; /* secondary accent (lavender) */
+  --color-violet-ink: #5b4cb8; /* violet text on violet-soft */
+  --color-violet-soft: #ece7fb; /* agent bubble fill */
+
+  /* ---- Status ------------------------------------------------------------ */
+  --color-success: #2fbf6c;
+  --color-danger: #ff4438;
+  --color-warning: #f5a623;
+
+  /* ---- Radii ------------------------------------------------------------- */
+  --radius-control: 16px; /* mic / pill controls (square-ish) */
+  --radius-bubble: 20px; /* chat bubbles */
+  --radius-card: 28px; /* hero card / large panels */
+  --radius-full: 9999px;
+
+  /* ---- Shadows ----------------------------------------------------------- */
+  --shadow-card: 0 12px 32px -16px rgba(45, 33, 22, 0.18);
+  --shadow-soft: 0 2px 12px -6px rgba(45, 33, 22, 0.1);
+  --shadow-lift: 0 18px 44px -20px rgba(45, 33, 22, 0.26);
+  --shadow-mic: 0 14px 30px -12px rgba(251, 122, 69, 0.5);
+
+  /* ---- Typography -------------------------------------------------------- */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ---- Keyframes (visualizer + status) ----------------------------------- */
+  --animate-pulse-ring: pulse-ring 2.6s ease-in-out infinite;
+  --animate-dot-bounce: dot-bounce 1.2s ease-in-out infinite;
+  --animate-bar: bar-pulse 1s ease-in-out infinite;
+  --animate-bar-soft: bar-soft 1.5s ease-in-out infinite;
+  --animate-rise: rise 0.32s var(--ease-soft) both;
+
+  @keyframes pulse-ring {
+    0%,
+    100% {
+      transform: scale(1);
+      opacity: 0.9;
+    }
+    50% {
+      transform: scale(1.06);
+      opacity: 1;
+    }
+  }
+  @keyframes dot-bounce {
+    0%,
+    80%,
+    100% {
+      transform: translateY(0);
+      opacity: 0.45;
+    }
+    40% {
+      transform: translateY(-30%);
+      opacity: 1;
+    }
+  }
+  @keyframes bar-pulse {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+  /* The "ready / waiting for you" wave — alive but calm. Bigger amplitude than a
+     breathe, plus an opacity shimmer; a staggered per-bar delay (see BARS.soft in
+     StatusVisual) turns the row into a gentle travelling ripple. */
+  @keyframes bar-soft {
+    0%,
+    100% {
+      transform: scaleY(0.34);
+      opacity: 0.5;
+    }
+    50% {
+      transform: scaleY(0.92);
+      opacity: 1;
+    }
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/* ============================================================================
+   shadcn / Base UI semantic token bridge.
+   Maps shadcn's contract onto our palette so any shadcn/Base-UI component
+   (Button, Slider, etc.) inherits the warm light look automatically.
+   ========================================================================= */
+:root {
+  --radius: 1rem; /* shadcn --radius (16px control) */
+
+  --background: var(--color-canvas);
+  --foreground: var(--color-ink);
+
+  --card: var(--color-surface);
+  --card-foreground: var(--color-ink);
+
+  --popover: var(--color-surface);
+  --popover-foreground: var(--color-ink);
+
+  --primary: var(--color-coral);
+  --primary-foreground: #ffffff;
+
+  --secondary: var(--color-violet-soft);
+  --secondary-foreground: var(--color-violet-ink);
+
+  --muted: var(--color-canvas-deep);
+  --muted-foreground: var(--color-ink-soft);
+
+  --accent: var(--color-coral-soft);
+  --accent-foreground: var(--color-coral-ink);
+
+  --destructive: var(--color-danger);
+  --destructive-foreground: #ffffff;
+
+  --border: var(--color-hairline);
+  --input: var(--color-hairline);
+  --ring: var(--color-coral);
+}
+
+/* Expose the shadcn semantic vars to Tailwind utilities (bg-background, etc.). */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 12px);
+}
+
+/* ============================================================================
+   Base layer
+   ========================================================================= */
+@layer base {
+  * {
+    border-color: var(--color-hairline);
+  }
+
+  html {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    /* Truly full-height on iOS: dvh tracks Safari's dynamic toolbar / address bar so
+       the frame fills the *visible* viewport, instead of a static 100vh that gets
+       clipped under the chrome (messages cut off at the bottom). 100vh is the
+       fallback for engines without dvh. The app frame owns scrolling (overflow
+       hidden here) — its inner <main> scrolls — so there's no page-level rubber band. */
+    height: 100vh;
+    /* biome-ignore lint/suspicious/noDuplicateProperties: intentional 100vh → 100dvh progressive-enhancement fallback */
+    height: 100dvh;
+    overflow: hidden;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  #app {
+    height: 100%;
+  }
+
+  button {
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Honour reduced-motion: kill the decorative visualizer animations. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+/* ============================================================================
+   Safe-area utilities (iOS notch / home indicator). env() can't live in a design
+   token, so these classes are its single home; components reference the utility.
+   ========================================================================= */
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@utility px-safe {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}

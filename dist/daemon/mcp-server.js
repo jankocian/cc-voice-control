@@ -4565,7 +4565,7 @@ var require_qrcode = __commonJS((exports, module) => {
 });
 
 // src/daemon/mcp-server.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2 } from "node:fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, statSync, truncateSync } from "node:fs";
 import { join as join2 } from "node:path";
 
 // src/daemon/config.ts
@@ -18852,41 +18852,36 @@ config(en_default());
 // src/shared/bridge-contract.ts
 var BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 var BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
-var BRIDGE_TOKEN_QUERY_PARAM = "token";
 var BRIDGE_ROLE_QUERY_PARAM = "role";
-function toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token) {
+function toBridgeBrowserSessionUrl(bridgeUrl, secret) {
   const url2 = new URL(bridgeUrl);
-  url2.pathname = toBridgeBrowserSessionPath(sessionId);
-  writeBridgeAuthQuery(url2.searchParams, token);
+  url2.pathname = toBridgeBrowserSessionPath(secret);
   return url2.toString();
 }
-function toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role) {
+function toBridgeWebSocketUrl(bridgeUrl, secret, role) {
   const url2 = new URL(bridgeUrl);
   url2.protocol = toBridgeWebSocketProtocol(url2.protocol);
-  url2.pathname = toBridgeWebSocketPath(sessionId);
-  writeBridgeAuthQuery(url2.searchParams, token, role);
+  url2.pathname = toBridgeWebSocketPath(secret);
+  writeBridgeAuthQuery(url2.searchParams, role);
   return url2.toString();
 }
-function toBridgeBrowserSessionPath(sessionId) {
-  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSessionId(sessionId)}`;
+function toBridgeBrowserSessionPath(secret) {
+  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
-function toBridgeWebSocketPath(sessionId) {
-  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSessionId(sessionId)}`;
+function toBridgeWebSocketPath(secret) {
+  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSecret(secret)}`;
 }
-function writeBridgeAuthQuery(searchParams, token, role) {
-  if (!token)
-    throw new Error("token is required");
-  searchParams.set(BRIDGE_TOKEN_QUERY_PARAM, token);
+function writeBridgeAuthQuery(searchParams, role) {
   if (role)
     searchParams.set(BRIDGE_ROLE_QUERY_PARAM, role);
 }
 function toBridgeWebSocketProtocol(protocol) {
   return protocol === "https:" || protocol === "wss:" ? "wss:" : "ws:";
 }
-function encodeSessionId(sessionId) {
-  if (!sessionId)
-    throw new Error("sessionId is required");
-  return encodeURIComponent(sessionId);
+function encodeSecret(secret) {
+  if (!secret)
+    throw new Error("secret is required");
+  return encodeURIComponent(secret);
 }
 
 // src/daemon/config.ts
@@ -18936,11 +18931,11 @@ async function loadConfig(explicitPath) {
   const raw = await readFile(chosen, "utf8");
   return ConfigSchema.parse(JSON.parse(raw));
 }
-function toWebSocketUrl(bridgeUrl, sessionId, token, role) {
-  return toBridgeWebSocketUrl(bridgeUrl, sessionId, token, role);
+function toWebSocketUrl(bridgeUrl, secret, role) {
+  return toBridgeWebSocketUrl(bridgeUrl, secret, role);
 }
-function toBrowserUrl(bridgeUrl, sessionId, token) {
-  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, token);
+function toBrowserUrl(bridgeUrl, secret) {
+  return toBridgeBrowserSessionUrl(bridgeUrl, secret);
 }
 
 // src/daemon/reconcile.ts
@@ -18956,7 +18951,7 @@ async function reconcile(actions) {
 }
 
 // src/daemon/voice-daemon.ts
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 
@@ -18973,12 +18968,12 @@ var wrapper_default = import_websocket.default;
 
 // src/daemon/cmux.ts
 import { spawn } from "node:child_process";
-var CMUX_BIN = process.env.CMUX_BIN || "cmux";
+var CMUX_BIN = process.env.CMUX_BIN || process.env.CMUX_BUNDLED_CLI_PATH || "cmux";
 var SOCKET_PATH = process.env.CMUX_SOCKET_PATH;
-var WORKSPACE_ID = process.env.CMUX_WORKSPACE_ID;
 function cmuxEnv() {
   const env = { ...process.env };
   delete env.CMUX_SOCKET;
+  delete env.CMUX_WORKSPACE_ID;
   return env;
 }
 var CMUX_TIMEOUT_MS = 8000;
@@ -19016,27 +19011,31 @@ function runCmux(args) {
     });
   });
 }
-function target(surface) {
-  const args = [];
-  if (WORKSPACE_ID)
-    args.push("--workspace", WORKSPACE_ID);
-  if (surface)
-    args.push("--surface", surface);
-  return args;
+function cmuxTarget(surface) {
+  return surface ? ["--surface", surface] : [];
 }
 async function cmuxPing() {
   const r = await runCmux(["ping"]);
   return r.ok && /PONG/.test(r.stdout);
 }
+async function cmuxHealth(surface) {
+  if (!surface)
+    return { socketUp: await cmuxPing(), surfaceAlive: null };
+  const reach = await runCmux(["read-screen", "--surface", surface, "--lines", "1"]);
+  if (reach.ok)
+    return { socketUp: true, surfaceAlive: true };
+  const socketUp = await cmuxPing();
+  return { socketUp, surfaceAlive: socketUp ? false : null };
+}
 async function cmuxSubmit(text, surface) {
-  const typed = await runCmux(["send", ...target(surface), "--", text]);
+  const typed = await runCmux(["send", ...cmuxTarget(surface), "--", text]);
   if (!typed.ok)
     return false;
-  const submitted = await runCmux(["send-key", ...target(surface), "enter"]);
+  const submitted = await runCmux(["send-key", ...cmuxTarget(surface), "enter"]);
   return submitted.ok;
 }
 async function cmuxInterrupt(surface) {
-  const r = await runCmux(["send-key", ...target(surface), "escape"]);
+  const r = await runCmux(["send-key", ...cmuxTarget(surface), "escape"]);
   return r.ok;
 }
 
@@ -19127,6 +19126,7 @@ function renderQr(text, margin = 2) {
 
 // src/daemon/voice-daemon.ts
 var RECONNECT_DELAY_MS = 1500;
+var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 2500;
 function selectMissedReply(lastReply, lastSeenReplyId) {
   if (!lastReply || lastReply.requestId === lastSeenReplyId)
@@ -19140,10 +19140,10 @@ function selectMissedReply(lastReply, lastSeenReplyId) {
 }
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
-  const sessionId = randomUUID();
-  const token = randomBytes(32).toString("base64url");
-  const browserUrl = toBrowserUrl(config2.bridgeUrl, sessionId, token);
-  return { config: config2, surface, sessionId, token, browserUrl };
+  const secret = randomBytes(16).toString("base64url");
+  const sessionId = createHash("sha256").update(secret).digest("base64url").slice(0, 12);
+  const browserUrl = toBrowserUrl(config2.bridgeUrl, secret);
+  return { config: config2, surface, secret, sessionId, browserUrl };
 }
 
 class VoiceDaemon {
@@ -19152,7 +19152,9 @@ class VoiceDaemon {
   httpServer;
   port = 0;
   cmuxHealthy = true;
+  cmuxReachable = true;
   reconnectTimer;
+  healthTimer;
   stopped = false;
   inFlight;
   queue = [];
@@ -19169,12 +19171,23 @@ class VoiceDaemon {
     this.connectBridge();
     console.error(`voice-remote ready. cmux surface=${this.init.surface ?? "(none — CMUX_SURFACE_ID was not set!)"} hookPort=${this.port}`);
     console.error(`Phone URL: ${this.init.browserUrl}`);
-    this.checkCmuxHealth();
+    this.startCmuxMonitor();
   }
-  async checkCmuxHealth() {
-    this.cmuxHealthy = await cmuxPing();
-    if (!this.cmuxHealthy)
-      console.error("WARNING: cmux control socket is unreachable — injection will fail until cmux is running.");
+  startCmuxMonitor() {
+    this.refreshCmuxHealth();
+    this.healthTimer = setInterval(() => void this.refreshCmuxHealth(), CMUX_HEALTH_INTERVAL_MS);
+  }
+  async refreshCmuxHealth() {
+    const health = await cmuxHealth(this.init.surface);
+    if (health.socketUp !== this.cmuxReachable) {
+      this.cmuxReachable = health.socketUp;
+      console.error(health.socketUp ? "[cmux] control socket reachable again" : "WARNING: cmux control socket unreachable this tick — staying optimistic (injection will surface any real failure).");
+    }
+    const healthy = health.surfaceAlive !== false;
+    if (healthy === this.cmuxHealthy)
+      return;
+    this.cmuxHealthy = healthy;
+    console.error(healthy ? "[cmux] pane reachable — listening" : "WARNING: the Claude pane is no longer reachable in cmux (closed?) — restart /voice-control:start in a live pane.");
     this.emitStatus();
   }
   startHookListener() {
@@ -19222,7 +19235,7 @@ class VoiceDaemon {
   connectBridge() {
     if (this.stopped)
       return;
-    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.sessionId, this.init.token, "daemon");
+    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon");
     const ws = new wrapper_default(url2);
     this.ws = ws;
     ws.on("open", () => this.emitStatus());
@@ -19304,17 +19317,22 @@ class VoiceDaemon {
     this.emitStatus();
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(next)}`);
     const ok = await cmuxSubmit(next, this.init.surface);
-    this.cmuxHealthy = ok;
     console.error(`[inject] cmuxSubmit ok=${ok}`);
-    if (!ok) {
-      this.inFlight = undefined;
-      this.sendToBrowser({
-        type: "error",
-        message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
-      });
-      this.emitStatus();
-      this.pump();
+    if (ok) {
+      if (!this.cmuxHealthy) {
+        this.cmuxHealthy = true;
+        this.emitStatus();
+      }
+      return;
     }
+    this.inFlight = undefined;
+    this.refreshCmuxHealth();
+    this.sendToBrowser({
+      type: "error",
+      message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
+    });
+    this.emitStatus();
+    this.pump();
   }
   async interrupt() {
     await cmuxInterrupt(this.init.surface);
@@ -19377,6 +19395,8 @@ class VoiceDaemon {
     this.stopped = true;
     if (this.reconnectTimer)
       clearTimeout(this.reconnectTimer);
+    if (this.healthTimer)
+      clearInterval(this.healthTimer);
     this.send({ channel: "control", event: { type: "terminate" } });
     try {
       this.ws?.close();
@@ -19393,6 +19413,19 @@ function capForSpeech(text) {
 }
 
 // src/daemon/mcp-server.ts
+mkdirSync2(stateDir(), { recursive: true });
+var LOG_FILE = join2(stateDir(), "daemon.log");
+var LOG_MAX_BYTES = 1e6;
+var baseError = console.error.bind(console);
+console.error = (...args) => {
+  baseError(...args);
+  try {
+    if (existsSync2(LOG_FILE) && statSync(LOG_FILE).size > LOG_MAX_BYTES)
+      truncateSync(LOG_FILE, 0);
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${args.map((a) => String(a)).join(" ")}
+`);
+  } catch {}
+};
 console.log = (...args) => console.error(...args);
 var ACTIVE_FLAG = join2(stateDir(), "active");
 var daemon;
@@ -19483,7 +19516,6 @@ function shutdown() {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
-mkdirSync2(stateDir(), { recursive: true });
 setInterval(() => void pollFlag(), 1000);
 pollFlag();
 console.error("[mcp] voice-control server up; waiting for /voice-control:start");

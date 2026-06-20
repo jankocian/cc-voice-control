@@ -1,6 +1,6 @@
 {
   "name": "cc-voice-control",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Voice remote for an interactive Claude Code session: phone push-to-talk, a Cloudflare bridge, and a local daemon that types transcripts into your cmux Claude pane and speaks replies back via OpenAI.",
   "type": "module",
   "scripts": {
@@ -9,8 +9,10 @@
     "test": "vitest run",
     "lint": "biome ci .",
     "format": "biome check --write .",
-    "dev:worker": "wrangler dev --config worker/wrangler.toml",
-    "deploy:worker": "wrangler deploy --config worker/wrangler.toml"
+    "build:web": "cd web && bun install && vite build",
+    "dev:web": "cd web && bun install && vite",
+    "dev:worker": "bun run build:web && wrangler dev --config worker/wrangler.toml",
+    "deploy:worker": "bun run build:web && wrangler deploy --config worker/wrangler.toml"
   },
   "keywords": [
     "claude-code",
