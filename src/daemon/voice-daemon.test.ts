@@ -24,7 +24,13 @@ describe("VoiceDaemon.ensureRuntimePublished", () => {
 
   function daemon() {
     return new VoiceDaemon({
-      config: { elevenlabsApiKey: "k", bridgeUrl: "https://voice.example.com" },
+      config: {
+        openaiApiKey: "k",
+        openaiVoice: "marin",
+        ttsModel: "gpt-4o-mini-tts",
+        sttModel: "gpt-4o-mini-transcribe",
+        bridgeUrl: "https://voice.example.com"
+      },
       surface: "SURF",
       secret: "sek",
       sessionId: "sid",

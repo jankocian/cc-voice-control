@@ -11,7 +11,7 @@ import type {
 } from "../shared/protocol.js";
 import { cmuxHealth, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
 import { qrPath, runtimePath, stateDir, toBrowserUrl, toWebSocketUrl, type VoiceRemoteConfig } from "./config.js";
-import { synthesizeSpeech, transcribeAudio } from "./elevenlabs.js";
+import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 
 // Reconnect backoff for transient bridge drops (network blips, worker redeploys).
@@ -20,7 +20,7 @@ const RECONNECT_DELAY_MS = 1500;
 // How often the daemon re-resolves its cmux pane so `listening` self-heals (a moved
 // pane / transient cmux hiccup recovers automatically instead of latching false).
 const CMUX_HEALTH_INTERVAL_MS = 5000;
-// Hard cap on spoken text so a huge reply can't blow past ElevenLabs limits.
+// Hard cap on spoken text so a huge reply can't blow past the TTS input limit.
 const MAX_SPEECH_CHARS = 2500;
 
 export type DaemonInit = {
@@ -73,9 +73,9 @@ export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
 /**
  * Voice daemon for the cmux-hosted interactive Claude Code session.
  *
- * Phone speaks → ElevenLabs STT → `cmux send` types it into the live Claude pane
+ * Phone speaks → OpenAI STT → `cmux send` types it into the live Claude pane
  * as a real user message. The plugin Stop hook POSTs Claude's reply back here →
- * ElevenLabs TTS → phone. It is the real interactive session — no turn-hijack.
+ * OpenAI TTS → phone. It is the real interactive session — no turn-hijack.
  *
  * Critically, this runs *inside Claude Code's process tree* (hosted by the plugin
  * MCP server), so it keeps cmux's socket trust AND dies with the Claude session: a
@@ -390,7 +390,6 @@ export class VoiceDaemon {
   }
 
   private async speak(requestId: string, text: string): Promise<void> {
-    if (!this.init.config.voiceId) return;
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (this.lastReply?.requestId === requestId) this.lastReply.audio = { audioBase64, mimeType };
