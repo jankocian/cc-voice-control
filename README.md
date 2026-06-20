@@ -96,7 +96,7 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
 - `src/daemon/standalone.ts` — the daemon entry point: starts the session, traps SIGTERM/SIGINT for clean shutdown, and self-reaps if orphaned.
 - `src/daemon/voice-daemon.ts` — the session: bridge client, STT/TTS, cmux injection.
 - `src/daemon/{cmux,openai,config}.ts` — cmux CLI, OpenAI calls, config loading.
-- `hooks/` — the `Stop` hook (returns each turn's final reply) and the `SessionStart` hook (resets thread history on `/clear` · `/compact`).
+- `hooks/` — `Stop` (returns each turn's final reply), `SessionStart` (resets thread history on `/clear` · `/compact`), and `UserPromptSubmit` (marks the session "working" for the phone status).
 - `skills/` — `start` / `stop` / `status` / `spawn` (open a new voice-controlled session in another workspace).
 - `src/shared/` — the wire protocol and bridge URL contract (shared by daemon + worker).
 - `worker/` — the Cloudflare bridge and the phone page.
