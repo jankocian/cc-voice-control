@@ -18918,7 +18918,7 @@ function configCandidates() {
   candidates.push(join(stateDir(), "config.json"));
   return candidates;
 }
-var SETUP_EXAMPLE = '{ "openaiApiKey": "sk-...", "bridgeUrl": "https://...workers.dev" }';
+var SETUP_EXAMPLE = '{ "openaiApiKey": "sk-..." }';
 function setupMessage(configPath, exists) {
   const action = exists ? `add your OpenAI API key to ${configPath}` : `create ${configPath}`;
   return [
