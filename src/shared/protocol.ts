@@ -55,7 +55,9 @@ export type BrowserToDaemonEvent =
 
 export type DaemonToBrowserEvent =
   | { type: "session_status"; state: SessionState; memory: { currentTask?: string } }
-  | { type: "transcript"; requestId: string; seq: number; timestamp: number; text: string }
+  // `mirrored` marks a user message the daemon echoed from a TERMINAL-typed turn (not sent from the
+  // phone) — the phone shows it in history but suppresses the "Sent ✓" flash / recording reset.
+  | { type: "transcript"; requestId: string; seq: number; timestamp: number; text: string; mirrored?: boolean }
   | { type: "claude_reply"; requestId: string; seq: number; timestamp: number; text: string }
   // `replay` marks a reply re-sent on reconnect: the phone shows it for tap-to-play
   // instead of auto-playing it (a reply the user already missed should not start talking).

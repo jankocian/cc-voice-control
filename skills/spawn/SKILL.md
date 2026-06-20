@@ -17,13 +17,18 @@ R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
 PORT=$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$R" 2>/dev/null)
 [ -z "$PORT" ] && { echo "no-daemon"; exit 0; }
 DIR=$(cd TARGET_DIR 2>/dev/null && pwd) || { echo "bad-path"; exit 0; }
-curl -s -X POST "http://127.0.0.1:$PORT/spawn" -H 'content-type: application/json' -d "{\"cwd\":\"$DIR\"}"; echo
+OUT=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT/spawn" -H 'content-type: application/json' -d "{\"cwd\":\"$DIR\"}")
+CODE=$(printf '%s' "$OUT" | tail -1)
+[ "$CODE" = "404" ] && { echo "stale-daemon"; exit 0; }
+printf '%s' "$OUT" | sed '$d'; echo
 ```
 
 Report back to the user:
 
 - `{"ok":true,"ref":"workspace:N"}` → a new voice-controlled session is opening at that path; it
   will appear as a new thread on their phone in a few seconds (same QR — no re-scan).
+- `stale-daemon` → the voice daemon running in this pane predates the spawn feature. Tell them to
+  restart it once: `/voice-control:stop` then `/voice-control:start`, then try again.
 - `no-daemon` → voice isn't running in this pane; tell them to run `/voice-control:start` first.
 - `bad-path` → the directory doesn't exist; ask for a valid path.
 - `{"ok":false}` or any other output → cmux couldn't open the workspace; report it.

@@ -69,6 +69,12 @@ export function permissionModeArg(mode?: string): string {
   return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
 }
 
+// A finished turn whose user prompt is a slash command (`/voice-control:start`, the spawn skill, any
+// `/…`) is a plugin/CLI command, not conversation — kept out of the phone's mirrored history.
+export function isSlashCommand(prompt: string): boolean {
+  return prompt.trimStart().startsWith("/");
+}
+
 export type DaemonInit = {
   config: VoiceRemoteConfig;
   surface?: string;
@@ -455,16 +461,8 @@ export class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    // Record the user turn in the ring (seq + timestamp assigned there) and echo the live
-    // transcript carrying those same fields so the phone can reconcile it against history.
-    const entry = this.history.add("user", randomUUID(), transcript);
-    this.sendToBrowser({
-      type: "transcript",
-      requestId: entry.requestId,
-      seq: entry.seq,
-      timestamp: entry.timestamp,
-      text: transcript
-    });
+    // Record + echo the user turn so the phone shows it and can reconcile it against history.
+    this.emitUserTurn(transcript);
     if (mode === "interrupt") await this.interruptWith(transcript);
     else this.enqueue(transcript);
   }
@@ -525,27 +523,59 @@ export class VoiceDaemon {
     void this.pump();
   }
 
-  // Stop hook delivered a finished turn. Speak it only if it's the turn we injected;
-  // turns typed directly in the terminal carry a prompt we never queued, so we stay quiet.
+  // Add a user turn to the ring and echo it live so the phone shows it (and can reconcile it against
+  // history). Used for both a voice transcript and a mirrored terminal-typed message.
+  private emitUserTurn(text: string, mirrored = false): void {
+    const entry = this.history.add("user", randomUUID(), text);
+    this.sendToBrowser({
+      type: "transcript",
+      requestId: entry.requestId,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      text,
+      mirrored
+    });
+  }
+
+  // Add a Claude reply to the ring and echo it live; returns its requestId so the caller can attach
+  // synthesized audio (voice turns auto-speak; mirrored terminal replies stay text-only).
+  private emitClaudeTurn(text: string): string {
+    const entry = this.history.add("claude", randomUUID(), text);
+    this.sendToBrowser({
+      type: "claude_reply",
+      requestId: entry.requestId,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      text
+    });
+    return entry.requestId;
+  }
+
+  // Stop hook delivered a finished turn. A turn WE injected (matches inFlight) is the voice path:
+  // record it + speak it. Any other finished turn is the user typing directly in the terminal —
+  // mirror it to the phone as text so the web shows the full conversation, but don't speak it.
   private onClaudeReply(prompt: string, text: string): void {
-    if (this.inFlight === undefined || prompt !== this.inFlight) return;
-    console.error(`[reply] matched in-flight turn, ${text.length} chars`);
-    this.inFlight = undefined;
-    if (text) {
-      // Record the reply in the ring (seq + timestamp assigned there) and emit the live
-      // event carrying them so the phone reconciles it against history.
-      const entry = this.history.add("claude", randomUUID(), text);
-      this.sendToBrowser({
-        type: "claude_reply",
-        requestId: entry.requestId,
-        seq: entry.seq,
-        timestamp: entry.timestamp,
-        text
-      });
-      void this.speak(entry.requestId, text);
+    if (this.inFlight !== undefined && prompt === this.inFlight) {
+      console.error(`[reply] matched in-flight turn, ${text.length} chars`);
+      this.inFlight = undefined;
+      if (text) void this.speak(this.emitClaudeTurn(text), text);
+      this.emitStatus();
+      void this.pump();
+      return;
     }
-    this.emitStatus();
-    void this.pump();
+    this.mirrorTerminalTurn(prompt, text);
+  }
+
+  // Mirror a terminal-typed turn (user prompt + Claude reply) to the phone as text, so a session the
+  // user drives partly by voice and partly by keyboard reads as ONE conversation on the web. Text
+  // only (the user is at the keyboard, not listening, and synthesizing every typed turn is wasteful).
+  // Skipped: the plugin's own slash-command turns (/voice-control:start, the spawn skill, …) — those
+  // aren't conversation, just noise on the phone.
+  private mirrorTerminalTurn(prompt: string, text: string): void {
+    if (!text || isSlashCommand(prompt)) return;
+    console.error(`[reply] mirrored terminal turn, ${text.length} chars`);
+    if (prompt) this.emitUserTurn(prompt, true);
+    this.emitClaudeTurn(text);
   }
 
   private async speak(requestId: string, text: string): Promise<void> {
