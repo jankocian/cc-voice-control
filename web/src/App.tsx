@@ -90,7 +90,12 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           );
           return;
         case "transcript":
-          if (threadId === activeThreadIdRef.current) setTranscribingThreadId(null);
+          // A mirrored turn is one the user TYPED in the terminal (not sent from the phone), so it
+          // doesn't touch the phone's recording state or flash "Sent ✓" — it just joins the history.
+          if (!event.mirrored && threadId === activeThreadIdRef.current) {
+            setTranscribingThreadId(null);
+            showFlash("Sent to Claude Code ✓");
+          }
           updateThreadMessages(setMessagesByThread, threadId, (prev) =>
             reconcileAndPrune(
               prev,
@@ -99,7 +104,6 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
             )
           );
           threads.noteActivity(threadId);
-          if (threadId === activeThreadIdRef.current) showFlash("Sent to Claude Code ✓");
           return;
         case "claude_reply": {
           const message = makeMessage("Claude Code", event.text, event.requestId, {
