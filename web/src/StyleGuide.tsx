@@ -43,10 +43,15 @@ const SHADOWS = [
   { name: "shadow-mic", cls: "shadow-mic" }
 ];
 
+// Fixed clock so the time-graded offline cases render reproducibly.
+const STYLE_NOW = 1_700_000_000_000;
+
 function makeStatus(over: Partial<StatusInputs>) {
   return deriveStatus({
     connected: true,
     daemonConnected: true,
+    daemonLastSeenAt: null,
+    now: STYLE_NOW,
     recording: false,
     transcribing: false,
     speaking: false,
@@ -61,6 +66,16 @@ function makeStatus(over: Partial<StatusInputs>) {
 const STATUS_CASES = [
   { label: "connecting", status: makeStatus({ connected: false }), elapsed: 0 },
   { label: "waiting-for-daemon", status: makeStatus({ daemonConnected: false }), elapsed: 0 },
+  {
+    label: "reconnecting",
+    status: makeStatus({ daemonConnected: false, daemonLastSeenAt: STYLE_NOW - 5_000 }),
+    elapsed: 0
+  },
+  {
+    label: "session-offline",
+    status: makeStatus({ daemonConnected: false, daemonLastSeenAt: STYLE_NOW - 14 * 60 * 60 * 1000 }),
+    elapsed: 0
+  },
   { label: "ready (idle)", status: makeStatus({}), elapsed: 0 },
   { label: "recording", status: makeStatus({ recording: true }), elapsed: 0 },
   { label: "sending", status: makeStatus({ transcribing: true }), elapsed: 0 },

@@ -40,6 +40,10 @@ export type Bridge = {
   connected: boolean;
   daemonConnected: boolean;
   browserConnected: boolean;
+  // Epoch-ms time the daemon was last seen by the worker (null = never, or unknown
+  // because the socket is currently down). Lets the UI grade "no daemon" by elapsed
+  // time — a 2s reconnect vs. a session that ended overnight.
+  daemonLastSeenAt: number | null;
   runtime: BridgeRuntime;
   bridgeReady: () => boolean;
   sendDaemon: (command: DaemonCommand) => boolean;
@@ -53,6 +57,9 @@ export function useBridge(options: UseBridgeOptions): Bridge {
   const [connected, setConnected] = useState(false);
   const [daemonConnected, setDaemonConnected] = useState(false);
   const [browserConnected, setBrowserConnected] = useState(false);
+  // Last value carried on a bridge_presence event; reset to null on socket close so a
+  // fresh connect re-derives it from the worker's storage (the DO is the source of truth).
+  const [daemonLastSeenAt, setDaemonLastSeenAt] = useState<number | null>(null);
   const [runtime, setRuntime] = useState<BridgeRuntime>({
     state: "idle",
     currentTask: undefined,
@@ -103,6 +110,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
           const nextDaemon = event.daemonConnected === true;
           setDaemon(nextDaemon);
           setBrowserConnected(event.browserConnected === true);
+          setDaemonLastSeenAt(event.daemonLastSeenAt ?? null);
           // The daemon emits status only on change; on (re)connect ask for the current
           // status + the retained thread (it answers a `sync` with a `history` event).
           if (nextDaemon && !wasConnected) {
@@ -160,6 +168,9 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         setConnected(false);
         setDaemon(false);
         setBrowserConnected(false);
+        // Drop the cached last-seen: while our own socket is down we don't know the
+        // session's state. The next connect's bridge_presence re-derives it from the DO.
+        setDaemonLastSeenAt(null);
         if (stopped) return;
         reconnectTimer = window.setTimeout(connect, RECONNECT_MS);
       });
@@ -192,5 +203,5 @@ export function useBridge(options: UseBridgeOptions): Bridge {
   // re-creating sendDaemon. (onSendFailed is read from the ref by callers.)
   void onSendFailedRef;
 
-  return { connected, daemonConnected, browserConnected, runtime, bridgeReady, sendDaemon };
+  return { connected, daemonConnected, browserConnected, daemonLastSeenAt, runtime, bridgeReady, sendDaemon };
 }
