@@ -4571,7 +4571,7 @@ import { join as join2 } from "node:path";
 // src/daemon/config.ts
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // node_modules/zod/v4/classic/external.js
@@ -18893,10 +18893,6 @@ var ConfigSchema = exports_external.object({
   sttModel: exports_external.string().min(1).default("gpt-4o-mini-transcribe"),
   ttsInstructions: exports_external.string().min(1).optional(),
   language: exports_external.string().min(1).optional(),
-  elevenlabsApiKey: exports_external.string().min(1).optional(),
-  voiceId: exports_external.string().min(1).optional(),
-  ttsModelId: exports_external.string().min(1).optional(),
-  sttModelId: exports_external.string().min(1).optional(),
   bridgeUrl: exports_external.string().url().default("https://voice-control.nee.rs")
 });
 function stateDir() {
@@ -18908,21 +18904,16 @@ function runtimePath() {
 function qrPath() {
   return join(stateDir(), "qr.txt");
 }
-var LEGACY_CONFIG_PATH = join(homedir(), ".config", "voice-remote", "config.json");
 function recommendedConfigPath() {
   if (process.env.VOICE_REMOTE_CONFIG)
     return process.env.VOICE_REMOTE_CONFIG;
-  if (process.env.CLAUDE_PLUGIN_DATA)
-    return join(process.env.CLAUDE_PLUGIN_DATA, "config.json");
-  return LEGACY_CONFIG_PATH;
+  return join(stateDir(), "config.json");
 }
 function configCandidates() {
   const candidates = [];
   if (process.env.VOICE_REMOTE_CONFIG)
     candidates.push(process.env.VOICE_REMOTE_CONFIG);
-  if (process.env.CLAUDE_PLUGIN_DATA)
-    candidates.push(join(process.env.CLAUDE_PLUGIN_DATA, "config.json"));
-  candidates.push(LEGACY_CONFIG_PATH);
+  candidates.push(join(stateDir(), "config.json"));
   return candidates;
 }
 var SETUP_EXAMPLE = '{ "openaiApiKey": "sk-...", "bridgeUrl": "https://...workers.dev" }';
