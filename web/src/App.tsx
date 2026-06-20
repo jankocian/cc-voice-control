@@ -1,19 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BottomTabBar } from "./components/BottomTabBar";
 import { Hero } from "./components/Hero";
-import { MessageThread } from "./components/MessageThread";
 import { MiniControls } from "./components/MiniControls";
+import { type PagerThread, ThreadPager } from "./components/ThreadPager";
+import { type ThreadRow, ThreadSwitcher } from "./components/ThreadSwitcher";
 import { TopBar } from "./components/TopBar";
-import { type BridgeContentEvent, useBridge } from "./hooks/useBridge";
+import { type BridgeContentEvent, type BridgeRuntime, useBridge } from "./hooks/useBridge";
 import { useElapsed, useNow } from "./hooks/useElapsed";
 import { useFlash } from "./hooks/useFlash";
 import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
+import { useThreads } from "./hooks/useThreads";
 import { useWakeLock } from "./hooks/useWakeLock";
 import { FEATURES } from "./lib/features";
 import { type Message, makeMessage, messageFromHistory, reconcileMessages } from "./lib/messages";
+import type { RosterThread, ThreadId } from "./lib/protocol";
 import type { SessionCredentials } from "./lib/session";
-import { deriveStatus } from "./lib/status";
+import { deriveStatus, gradeThread } from "./lib/status";
 
 const RECORDER_ERROR_TEXT: Record<RecorderError, string> = {
   "not-supported": "This browser cannot record audio",
@@ -22,24 +25,32 @@ const RECORDER_ERROR_TEXT: Record<RecorderError, string> = {
   "read-failed": "Could not read the recording"
 };
 
+// A thread that has never sent a session_status yet falls back to its roster snapshot for the
+// runtime (the daemon folds state/listening into the roster too). currentTask only arrives via
+// session_status, so it's undefined until the first one.
+const DEFAULT_RUNTIME: BridgeRuntime = { state: "idle", currentTask: undefined, listening: true };
+
 export function App({ credentials }: { credentials: SessionCredentials }) {
   const { flash, show: showFlash } = useFlash();
 
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [transcribing, setTranscribing] = useState(false);
+  // ---- per-thread state ------------------------------------------------------
+  // Messages + the latest session_status runtime are kept per thread; the roster (presence,
+  // labels, unread, active) lives in useThreads. The shared mic/player act on the active thread.
+  const [messagesByThread, setMessagesByThread] = useState<Map<ThreadId, Message[]>>(new Map());
+  const [runtimeByThread, setRuntimeByThread] = useState<Map<ThreadId, BridgeRuntime>>(new Map());
+  // The thread whose mic turn is in flight (transcribing) — one at a time, since the mic is shared.
+  const [transcribingThreadId, setTranscribingThreadId] = useState<ThreadId | null>(null);
 
-  // The mode the *next* finished clip should submit with. "queue" for a normal
-  // push-to-talk turn; "interrupt" when the user tapped Interrupt while the agent
-  // works (also reused for Steer — see the working-state handlers below).
+  const threads = useThreads();
+  const { activeThreadId } = threads;
+
   const nextModeRef = useRef<"queue" | "interrupt">("queue");
-
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Scroll container + a sentinel at the end of the hero: once the hero scrolls out
-  // of view we reveal a condensed, sticky control bar (<MiniControls>) so the mic /
-  // stop stay reachable while reading the message history.
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const heroSentinelRef = useRef<HTMLDivElement>(null);
+  // The active page's scroll root + hero sentinel are lifted out of the pager so the condensed
+  // bar's IntersectionObserver always watches whichever thread is on screen.
+  const [scrollRoot, setScrollRoot] = useState<HTMLDivElement | null>(null);
+  const [heroSentinel, setHeroSentinel] = useState<HTMLDivElement | null>(null);
   const [condensed, setCondensed] = useState(false);
 
   useWakeLock();
@@ -48,100 +59,143 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const recordingRef = useRef(false);
   const getRecording = useCallback(() => recordingRef.current, []);
 
-  // Audio-on-demand: tapping play on a history row calls back here to fetch its bytes.
-  // sendDaemon comes from the bridge below (declared after playback), so we read it lazily
-  // through a ref to break the playback↔bridge cycle.
-  const sendDaemonRef = useRef<((command: { type: "get_audio"; requestId: string }) => boolean) | null>(null);
+  // Audio-on-demand: tapping play on a history row fetches its bytes from the ACTIVE thread's
+  // daemon (the row being read belongs to the on-screen thread). Read active threadId lazily.
+  const activeThreadIdRef = useRef<ThreadId | null>(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
+  const sendDaemonRef = useRef<
+    ((threadId: ThreadId, command: { type: "get_audio"; requestId: string }) => boolean) | null
+  >(null);
   const onRequestAudio = useCallback((requestId: string) => {
-    sendDaemonRef.current?.({ type: "get_audio", requestId });
+    const threadId = activeThreadIdRef.current;
+    if (threadId) sendDaemonRef.current?.(threadId, { type: "get_audio", requestId });
   }, []);
 
   const playback = usePlayback({ getRecording, onRequestAudio });
   const { dropAudio, attachAudio, markPlayable, stopPlayback, playEntry, replayEntry, seekEntry } = playback;
 
-  // ---- bridge ----------------------------------------------------------------
+  // ---- bridge: route every tagged event to its thread ------------------------
   const handleContentEvent = useCallback(
-    (event: BridgeContentEvent) => {
+    (threadId: ThreadId, event: BridgeContentEvent) => {
       switch (event.type) {
+        case "session_status":
+          setRuntimeByThread((prev) =>
+            new Map(prev).set(threadId, {
+              listening: event.state.listening === true,
+              state: event.state.state,
+              currentTask: event.memory?.currentTask
+            })
+          );
+          return;
         case "transcript":
-          setTranscribing(false);
-          setMessages((prev) =>
+          if (threadId === activeThreadIdRef.current) setTranscribingThreadId(null);
+          updateThreadMessages(setMessagesByThread, threadId, (prev) =>
             reconcileAndPrune(
               prev,
               [makeMessage("You", event.text, event.requestId, { seq: event.seq, timestamp: event.timestamp })],
               dropAudio
             )
           );
-          showFlash("Sent to Claude Code ✓");
+          threads.noteActivity(threadId);
+          if (threadId === activeThreadIdRef.current) showFlash("Sent to Claude Code ✓");
           return;
         case "claude_reply": {
           const message = makeMessage("Claude Code", event.text, event.requestId, {
             seq: event.seq,
             timestamp: event.timestamp
           });
-          setMessages((prev) => reconcileAndPrune(prev, [message], dropAudio));
+          updateThreadMessages(setMessagesByThread, threadId, (prev) => reconcileAndPrune(prev, [message], dropAudio));
+          threads.noteActivity(threadId);
           return;
         }
         case "history": {
           // Reconnect / refresh / 2nd browser: restore the retained thread. Merge by seq and
           // mark fetchable replies playable (tap-to-play before their bytes are requested).
+          // markPlayable is keyed by requestId (globally unique), so flagging another thread's
+          // history rows here never bleeds into the active thread's player.
           const restored = event.turns.map(messageFromHistory);
           markPlayable(event.turns.filter((t) => t.hasAudio).map((t) => t.requestId));
-          setMessages((prev) => reconcileAndPrune(prev, restored, dropAudio));
+          updateThreadMessages(setMessagesByThread, threadId, (prev) => reconcileAndPrune(prev, restored, dropAudio));
           return;
         }
         case "tts_audio":
-          attachAudio(event.requestId, event.audioBase64, event.mimeType, event.replay === true);
+          // Only auto-play a fresh reply for the thread the user is looking at; a reply on a
+          // background thread waits for a tap (the user switches to it to hear it). A replay is
+          // already gated to tap-to-play inside attachAudio.
+          attachAudio(
+            event.requestId,
+            event.audioBase64,
+            event.mimeType,
+            event.replay === true || threadId !== activeThreadIdRef.current
+          );
           return;
         case "error":
-          setTranscribing(false);
+          if (threadId === activeThreadIdRef.current) setTranscribingThreadId(null);
           // The only error carrying a requestId is a `get_audio` miss (that reply's audio was
-          // evicted from the daemon ring). Drop the row so it stops rendering a dead, re-missing
-          // play button and any pending tap-to-play is cleared.
+          // evicted from the daemon ring). Drop the row so it stops rendering a dead play button.
           if (event.requestId) dropAudio(event.requestId);
-          showFlash(event.message);
+          if (threadId === activeThreadIdRef.current) showFlash(event.message);
           return;
       }
     },
-    [attachAudio, dropAudio, markPlayable, showFlash]
+    [attachAudio, dropAudio, markPlayable, showFlash, threads]
   );
 
   const bridge = useBridge({
     secret: credentials.secret,
-    onEvent: handleContentEvent
+    onEvent: handleContentEvent,
+    onRoster: threads.applyRosterEvent
   });
-  const { connected, daemonConnected, daemonLastSeenAt, runtime, bridgeReady, sendDaemon } = bridge;
+  const { connected, bridgeReady, sendDaemon } = bridge;
 
-  // Tick a wall clock only while the socket is open but the daemon is absent — exactly when
-  // the status grades reconnecting→offline by elapsed time and "Last active X ago" updates.
-  // When the daemon is connected (healthy) or the socket is still connecting, this stays
-  // frozen (no timer) — neither path consults `now`.
-  const now = useNow(connected && !daemonConnected);
-
-  // Publish sendDaemon to the lazy ref the audio-on-demand callback reads (breaks the
-  // playback↔bridge declaration cycle without re-creating either on every render).
   sendDaemonRef.current = sendDaemon;
+
+  // The active thread's roster entry + runtime drive the hero. Presence (connected/lastSeenAt)
+  // comes from the roster; the runtime (state/listening/currentTask) from its session_status,
+  // falling back to the roster snapshot before the first status arrives.
+  const active = useMemo(
+    () => threads.threads.find((t) => t.threadId === activeThreadId),
+    [threads.threads, activeThreadId]
+  );
+  const activeRuntime =
+    (activeThreadId && runtimeByThread.get(activeThreadId)) || rosterRuntime(active) || DEFAULT_RUNTIME;
+
+  // Tick a wall clock only while the socket is open but the active thread has no daemon — exactly
+  // when the status grades reconnecting→offline by elapsed time and "Last active X ago" updates.
+  const activeConnected = active?.connected === true;
+  const now = useNow(connected && !activeConnected);
 
   // A dropped socket loses any in-flight send — re-enable the mic.
   useEffect(() => {
-    if (!connected) setTranscribing(false);
+    if (!connected) setTranscribingThreadId(null);
   }, [connected]);
 
-  // ---- recorder --------------------------------------------------------------
+  // Focus a thread (pill / dropdown / swipe settle). Stop the previous thread's audio first so it
+  // doesn't keep playing under the new view — the shared player is a singleton across threads.
+  const switchThread = useCallback(
+    (threadId: ThreadId) => {
+      stopPlayback();
+      threads.setActive(threadId);
+    },
+    [stopPlayback, threads]
+  );
+
+  // ---- recorder (shared singleton, acts on the active thread) -----------------
   const sendAudio = useCallback(
     (clip: RecordedClip, mode: "queue" | "interrupt") => {
-      const ok = sendDaemon({ type: "submit_audio", audioBase64: clip.audioBase64, mimeType: clip.mimeType, mode });
-      if (!ok) {
+      const threadId = activeThreadIdRef.current;
+      if (
+        !threadId ||
+        !sendDaemon(threadId, { type: "submit_audio", audioBase64: clip.audioBase64, mimeType: clip.mimeType, mode })
+      ) {
         showFlash("Lost the connection before sending");
         return;
       }
-      setTranscribing(true);
+      setTranscribingThreadId(threadId);
     },
     [sendDaemon, showFlash]
   );
 
-  // Submit with the mode chosen when recording started (queue by default; interrupt
-  // when Interrupt/Steer kicked off the recording during a working turn).
   const onClip = useCallback(
     (clip: RecordedClip) => {
       sendAudio(clip, nextModeRef.current);
@@ -160,11 +214,12 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   });
   recordingRef.current = recorder.recording;
 
-  // Start a recording with a target submit mode. Returns false if not ready.
+  const transcribing = transcribingThreadId !== null && transcribingThreadId === activeThreadId;
+
   const startRecording = useCallback(
     (mode: "queue" | "interrupt") => {
       if (transcribing) return;
-      if (!bridgeReady()) {
+      if (!bridgeReady(activeThreadIdRef.current)) {
         showFlash("Not connected to Claude Code yet");
         return;
       }
@@ -174,35 +229,36 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [transcribing, bridgeReady, recorder, showFlash]
   );
 
-  // Idle mic: start a normal push-to-talk turn (queue mode).
   const onMic = useCallback(() => startRecording("queue"), [startRecording]);
-
-  // While recording, the center FAB is a red stop-square: stop capture and send.
   const onStopRecording = useCallback(() => recorder.stop(), [recorder]);
-
-  // Cancel (✕) while recording: abort capture without sending anything.
   const onCancel = useCallback(() => recorder.cancel(), [recorder]);
 
-  // ---- working-state controls ------------------------------------------------
+  // ---- working-state controls (act on the active thread) ----------------------
   const sendControl = useCallback(
-    (command: { type: "summary_request" } | { type: "status_request" } | { type: "stop_task" }) => {
-      if (!sendDaemon(command)) showFlash(bridgeReady() ? "Couldn't reach Claude Code" : "Not connected yet");
+    (command: { type: "status_request" } | { type: "stop_task" }) => {
+      const threadId = activeThreadIdRef.current;
+      if (!threadId || !sendDaemon(threadId, command)) {
+        showFlash(bridgeReady(activeThreadIdRef.current) ? "Couldn't reach Claude Code" : "Not connected yet");
+      }
     },
     [sendDaemon, bridgeReady, showFlash]
   );
 
-  // Interrupt: record a message that interrupts the running turn (Esc + run now).
   const onInterrupt = useCallback(() => startRecording("interrupt"), [startRecording]);
-
-  // Steer (the working-state center mic): record a guiding message queued behind
-  // the running turn.
-  // TODO: there is no dedicated "steer" event in the bridge protocol
-  // (src/shared/protocol.ts). Queue-mode submit is the closest existing behaviour;
-  // wire a real steering event here if/when the daemon gains one.
   const onSteer = useCallback(() => startRecording("queue"), [startRecording]);
-
-  // Stop the running task (the working, non-recording UI has no clip in flight).
   const onStopTask = useCallback(() => sendControl({ type: "stop_task" }), [sendControl]);
+
+  // ---- spawn a new thread -----------------------------------------------------
+  // The "+" affordance emits spawn_thread on the ACTIVE thread's daemon (it has the cmux trust
+  // to open another pane). v1 is minimal: no cwd input, no voice grammar (out of scope).
+  const onSpawn = useCallback(() => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId || !sendDaemon(threadId, { type: "spawn_thread" })) {
+      showFlash("Start voice in a pane first");
+      return;
+    }
+    showFlash("Opening a new session…");
+  }, [sendDaemon, showFlash]);
 
   // ---- teardown (pagehide) ---------------------------------------------------
   useEffect(() => {
@@ -211,8 +267,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     return () => window.removeEventListener("pagehide", onPageHide);
   }, [recorder]);
 
-  // Bless the audio element on the first user gesture so replies autoplay reliably
-  // (browser autoplay policy / iOS Safari block programmatic play() otherwise).
+  // Bless the audio element on the first user gesture so replies autoplay reliably.
   const { unlock } = playback;
   useEffect(() => {
     const onFirstTap = () => unlock();
@@ -220,77 +275,134 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     return () => window.removeEventListener("pointerdown", onFirstTap);
   }, [unlock]);
 
-  // Reveal the condensed controls when the hero (its sentinel) leaves the viewport.
+  // Reveal the condensed controls when the active page's hero (its sentinel) leaves the viewport.
+  // Re-runs when the active scroll root / sentinel change (i.e. when the active thread switches).
   useEffect(() => {
-    const root = scrollRef.current;
-    const target = heroSentinelRef.current;
-    if (!root || !target) return;
-    const obs = new IntersectionObserver(([entry]) => setCondensed(!entry.isIntersecting), { root, threshold: 0 });
-    obs.observe(target);
+    if (!scrollRoot || !heroSentinel) return;
+    setCondensed(false);
+    const obs = new IntersectionObserver(([entry]) => setCondensed(!entry.isIntersecting), {
+      root: scrollRoot,
+      threshold: 0
+    });
+    obs.observe(heroSentinel);
     return () => obs.disconnect();
-  }, []);
+  }, [scrollRoot, heroSentinel]);
 
   // ---- derive view -----------------------------------------------------------
   const status = deriveStatus({
     connected,
-    daemonConnected,
-    daemonLastSeenAt,
+    // Per-thread presence: the active thread's roster `connected`/`lastSeenAt` feed #10 verbatim.
+    daemonConnected: activeConnected,
+    daemonLastSeenAt: active?.lastSeenAt ?? null,
     now,
     recording: recorder.recording,
     transcribing,
     speaking: playback.speaking,
-    runtimeState: runtime.state,
-    currentTask: runtime.currentTask,
-    listening: runtime.listening,
+    runtimeState: activeRuntime.state,
+    currentTask: activeRuntime.currentTask,
+    listening: activeRuntime.listening,
     flash
   });
 
   const elapsed = useElapsed(status.dataState === "working");
-
   const working = status.dataState === "working";
+
+  // Switcher rows: each roster thread with its unread badge + #10-graded dot tone.
+  const switcherRows: ThreadRow[] = useMemo(
+    () =>
+      threads.threads.map((thread) => ({
+        thread,
+        unread: threads.unread.get(thread.threadId) ?? 0,
+        tone: gradeThread({ connected: thread.connected, state: thread.state, listening: thread.listening })
+      })),
+    [threads.threads, threads.unread]
+  );
+
+  // Pager pages: each thread with its (newest-first) messages. Empty until its history/turns land.
+  const pagerThreads: PagerThread[] = useMemo(
+    () =>
+      threads.threads.map((thread) => ({
+        threadId: thread.threadId,
+        messages: messagesByThread.get(thread.threadId) ?? EMPTY_MESSAGES
+      })),
+    [threads.threads, messagesByThread]
+  );
+
+  const threadPlayback = {
+    playingId: playback.playingId,
+    loadedId: playback.loadedId,
+    position: playback.position,
+    duration: playback.duration,
+    playableIds: playback.playableIds,
+    onPlay: playEntry,
+    onReplay: replayEntry,
+    onSeek: seekEntry
+  };
+
+  // The shared hero is ONE instance (one mic/canvas/controls), pinned over the top of the pager
+  // and acting on the active thread. Each pager page reserves a spacer of its measured height so a
+  // thread's messages start below it and scroll up under it (preserving the scroll-away → condensed
+  // behaviour), while every thread keeps its own vertical scroll position.
+  const heroRef = useRef<HTMLDivElement>(null);
+  const [heroHeight, setHeroHeight] = useState(0);
+  useEffect(() => {
+    const node = heroRef.current;
+    if (!node) return;
+    const measure = () => setHeroHeight(node.offsetHeight);
+    measure();
+    const obs = new ResizeObserver(measure);
+    obs.observe(node);
+    return () => obs.disconnect();
+  }, []);
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
-      <TopBar online={status.dataState !== "offline"} />
+      <TopBar online={status.dataState !== "offline"}>
+        {FEATURES.threadTitle && (
+          <ThreadSwitcher
+            rows={switcherRows}
+            activeThreadId={activeThreadId}
+            onSelect={switchThread}
+            onSpawn={onSpawn}
+          />
+        )}
+      </TopBar>
 
       <div className="relative min-h-0 flex-1">
-        <main ref={scrollRef} className="flex h-full flex-col overflow-y-auto pb-safe">
-          <Hero
-            status={status}
-            elapsed={elapsed}
-            flash={flash}
-            recording={recorder.recording}
-            visualizerActive={recorder.visualizerActive}
-            canvasRef={canvasRef}
-            speedLabel={playback.formattedRate}
-            onCycleSpeed={playback.cycleSpeed}
-            onMic={onMic}
-            onSteer={onSteer}
-            onInterrupt={onInterrupt}
-            onStopRecording={onStopRecording}
-            onCancel={onCancel}
-            onStopTask={onStopTask}
-          />
+        <ThreadPager
+          threads={pagerThreads}
+          activeThreadId={activeThreadId}
+          heroHeight={heroHeight}
+          playback={threadPlayback}
+          onActivate={switchThread}
+          activeScrollRootRef={setScrollRoot}
+          activeSentinelRef={setHeroSentinel}
+        />
 
-          {/* Sentinel: when this leaves the top, the condensed bar appears. */}
-          <div ref={heroSentinelRef} aria-hidden="true" className="h-px w-full shrink-0" />
+        {/* The single shared hero, pinned over the top of the pager so it sits on whichever thread
+            is active. One mic/canvas/control cluster; its status is the active thread's. */}
+        <div ref={heroRef} className="pointer-events-none absolute inset-x-0 top-0 z-10">
+          <div className="pointer-events-auto">
+            <Hero
+              status={status}
+              elapsed={elapsed}
+              flash={flash}
+              recording={recorder.recording}
+              visualizerActive={recorder.visualizerActive}
+              canvasRef={canvasRef}
+              speedLabel={playback.formattedRate}
+              onCycleSpeed={playback.cycleSpeed}
+              onMic={onMic}
+              onSteer={onSteer}
+              onInterrupt={onInterrupt}
+              onStopRecording={onStopRecording}
+              onCancel={onCancel}
+              onStopTask={onStopTask}
+            />
+          </div>
+        </div>
 
-          <MessageThread
-            messages={messages}
-            playback={{
-              playingId: playback.playingId,
-              loadedId: playback.loadedId,
-              position: playback.position,
-              duration: playback.duration,
-              playableIds: playback.playableIds,
-              onPlay: playEntry,
-              onReplay: replayEntry,
-              onSeek: seekEntry
-            }}
-          />
-        </main>
-
-        {/* Condensed, sticky controls — slides in once the hero scrolls away. */}
+        {/* Condensed, sticky controls — slides in once the active page's hero scrolls away. */}
         <MiniControls
           status={status}
           elapsed={elapsed}
@@ -306,14 +418,37 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
         />
       </div>
 
-      {FEATURES.threadNav && <BottomTabBar />}
+      {/* The bottom "New" tab is a second spawn affordance (off until FEATURES.threadNav). */}
+      {FEATURES.threadNav && <BottomTabBar onNewThread={onSpawn} />}
     </div>
   );
 }
 
-// Reconcile incoming rows into the thread (merge/dedup/order by seq), then drop cached
-// audio for any row that fell out of the capped window — preserving the vanilla client's
-// bounded-memory pruning now that reconcileMessages owns the MAX_LOG cap.
+// A stable empty array so threads with no messages yet don't churn the pager memo.
+const EMPTY_MESSAGES: Message[] = [];
+
+// Fall back to a thread's roster snapshot (state/listening) for its runtime before its first
+// session_status arrives. currentTask is only on session_status, so it stays undefined here.
+function rosterRuntime(thread: RosterThread | undefined): BridgeRuntime | undefined {
+  if (!thread) return undefined;
+  return { state: thread.state, listening: thread.listening, currentTask: undefined };
+}
+
+// Apply a message-list update to one thread in the per-thread Map (immutably, so React re-renders).
+function updateThreadMessages(
+  setMap: React.Dispatch<React.SetStateAction<Map<ThreadId, Message[]>>>,
+  threadId: ThreadId,
+  update: (prev: Message[]) => Message[]
+): void {
+  setMap((prev) => {
+    const next = new Map(prev);
+    next.set(threadId, update(prev.get(threadId) ?? []));
+    return next;
+  });
+}
+
+// Reconcile incoming rows into the thread (merge/dedup/order by seq), then drop cached audio for
+// any row that fell out of the capped window — preserving the bounded-memory pruning.
 function reconcileAndPrune(prev: Message[], incoming: Message[], dropAudio: (requestId: string) => void): Message[] {
   const next = reconcileMessages(prev, incoming);
   const kept = new Set(next.map((m) => m.requestId).filter((id): id is string => id !== undefined));

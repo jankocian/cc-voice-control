@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveStatus, humanizeAgo, RECONNECT_GRACE_MS, type StatusInputs } from "./status";
+import { deriveStatus, gradeThread, humanizeAgo, RECONNECT_GRACE_MS, type StatusInputs } from "./status";
 
 // A healthy-but-no-daemon baseline: socket OPEN, daemon absent. The three new gradings
 // differ only in `daemonLastSeenAt` vs `now`, so each case overrides just those.
@@ -66,6 +66,24 @@ describe("deriveStatus — no-daemon grading by elapsed time", () => {
   it("a closed socket short-circuits to 'connecting' before any grading", () => {
     const status = deriveStatus(noDaemon({ connected: false, daemonLastSeenAt: NOW - 14 * 60 * 60 * 1000 }));
     expect(status.key).toBe("connecting");
+  });
+});
+
+describe("gradeThread — the per-thread switcher dot (#10 reused per thread)", () => {
+  it("a connected, idle thread is success (green)", () => {
+    expect(gradeThread({ connected: true, state: "idle", listening: true })).toBe("success");
+  });
+
+  it("a connected, working thread is coral", () => {
+    expect(gradeThread({ connected: true, state: "working", listening: true })).toBe("coral");
+  });
+
+  it("a disconnected thread is faint regardless of its last state", () => {
+    expect(gradeThread({ connected: false, state: "working", listening: true })).toBe("faint");
+  });
+
+  it("a connected thread whose pane is unreachable is faint (not actionable)", () => {
+    expect(gradeThread({ connected: true, state: "idle", listening: false })).toBe("faint");
   });
 });
 
