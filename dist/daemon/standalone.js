@@ -19521,7 +19521,7 @@ class VoiceDaemon {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/reply" && route !== "/reset") {
+        if (route !== "/reply" && route !== "/reset" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -19529,6 +19529,10 @@ class VoiceDaemon {
         let body = "";
         req.on("data", (chunk) => body += chunk);
         req.on("end", () => {
+          if (route === "/spawn") {
+            this.handleSpawnRequest(body, res);
+            return;
+          }
           res.statusCode = 204;
           res.end();
           if (route === "/reset") {
@@ -19625,9 +19629,13 @@ class VoiceDaemon {
       case "get_audio":
         this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
-      case "spawn_thread":
-        await this.spawnThread(event.cwd);
+      case "spawn_thread": {
+        const result = await this.spawnThread(event.cwd);
+        if (!result.ok) {
+          this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+        }
         return;
+      }
       default:
         return;
     }
@@ -19635,11 +19643,21 @@ class VoiceDaemon {
   async spawnThread(cwd) {
     const command = this.buildSpawnCommand();
     const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
-    if (ref) {
+    if (ref)
       console.error(`[spawn] new workspace ${ref} :: ${command}`);
-      return;
-    }
-    this.sendToBrowser({ type: "error", message: "Couldn't open a new session (cmux new-workspace failed)." });
+    return { ok: Boolean(ref), ref };
+  }
+  async handleSpawnRequest(body, res) {
+    let cwd;
+    try {
+      const parsed = JSON.parse(body || "{}");
+      if (typeof parsed.cwd === "string" && parsed.cwd.trim())
+        cwd = parsed.cwd.trim();
+    } catch {}
+    const result = await this.spawnThread(cwd);
+    res.statusCode = result.ok ? 200 : 500;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(result));
   }
   buildSpawnCommand() {
     return `claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
