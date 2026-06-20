@@ -19083,6 +19083,71 @@ async function cmuxInterrupt(surface) {
   return r.ok;
 }
 
+// src/daemon/history-ring.ts
+var MAX_ENTRIES_PER_REPLY = 4;
+
+class HistoryRing {
+  maxReplies;
+  now;
+  entries = [];
+  nextSeq = 1;
+  constructor(maxReplies, now = Date.now) {
+    this.maxReplies = maxReplies;
+    this.now = now;
+  }
+  add(role, requestId, text) {
+    const entry = { seq: this.nextSeq++, timestamp: this.now(), requestId, role, text };
+    this.entries.push(entry);
+    this.evict();
+    return entry;
+  }
+  attachAudio(requestId, audio) {
+    const entry = this.entries.find((e) => e.requestId === requestId && e.role === "claude");
+    if (entry)
+      entry.audio = audio;
+  }
+  get(requestId) {
+    return this.entries.find((e) => e.requestId === requestId);
+  }
+  snapshot() {
+    return this.entries;
+  }
+  evict() {
+    const replySeqs = this.entries.filter((e) => e.role === "claude").map((e) => e.seq);
+    if (replySeqs.length > this.maxReplies) {
+      const cutoff = replySeqs[replySeqs.length - this.maxReplies - 1];
+      let write = 0;
+      for (const entry of this.entries) {
+        if (entry.seq > cutoff)
+          this.entries[write++] = entry;
+      }
+      this.entries.length = write;
+    }
+    const maxEntries = this.maxReplies * MAX_ENTRIES_PER_REPLY;
+    if (this.entries.length > maxEntries) {
+      this.entries.splice(0, this.entries.length - maxEntries);
+    }
+  }
+}
+function buildHistoryEvent(ring) {
+  const turns = ring.snapshot().map((e) => ({
+    seq: e.seq,
+    timestamp: e.timestamp,
+    requestId: e.requestId,
+    role: e.role,
+    text: e.text,
+    hasAudio: e.audio !== undefined
+  }));
+  return { type: "history", turns };
+}
+function selectAudioReply(ring, requestId) {
+  const entry = ring.get(requestId);
+  if (entry?.audio) {
+    return { type: "tts_audio", requestId, replay: true, ...entry.audio };
+  }
+  return { type: "error", requestId, message: "Audio for that reply is no longer available." };
+}
+
 // src/daemon/openai.ts
 var DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
 var DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
@@ -19247,16 +19312,7 @@ function renderQr(text, margin = 2) {
 var RECONNECT_DELAY_MS = 1500;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 40000;
-function selectMissedReply(lastReply, lastSeenReplyId) {
-  if (!lastReply || lastReply.requestId === lastSeenReplyId)
-    return [];
-  const events = [
-    { type: "claude_reply", requestId: lastReply.requestId, text: lastReply.text }
-  ];
-  if (lastReply.audio)
-    events.push({ type: "tts_audio", requestId: lastReply.requestId, replay: true, ...lastReply.audio });
-  return events;
-}
+var HISTORY_REPLIES = 7;
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
   const secret = randomBytes(16).toString("base64url");
@@ -19277,7 +19333,7 @@ class VoiceDaemon {
   stopped = false;
   inFlight;
   queue = [];
-  lastReply;
+  history = new HistoryRing(HISTORY_REPLIES);
   constructor(init) {
     this.init = init;
   }
@@ -19397,8 +19453,10 @@ class VoiceDaemon {
         return;
       case "sync":
         this.emitStatus();
-        for (const missed of selectMissedReply(this.lastReply, event.lastSeenReplyId))
-          this.sendToBrowser(missed);
+        this.sendToBrowser(buildHistoryEvent(this.history));
+        return;
+      case "get_audio":
+        this.sendToBrowser(selectAudioReply(this.history, event.requestId));
         return;
       default:
         return;
@@ -19416,7 +19474,14 @@ class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    this.sendToBrowser({ type: "transcript", requestId: randomUUID(), text: transcript });
+    const entry = this.history.add("user", randomUUID(), transcript);
+    this.sendToBrowser({
+      type: "transcript",
+      requestId: entry.requestId,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      text: transcript
+    });
     if (mode === "interrupt")
       await this.interruptWith(transcript);
     else
@@ -19471,10 +19536,15 @@ class VoiceDaemon {
     console.error(`[reply] matched in-flight turn, ${text.length} chars`);
     this.inFlight = undefined;
     if (text) {
-      const requestId = randomUUID();
-      this.lastReply = { requestId, text };
-      this.sendToBrowser({ type: "claude_reply", requestId, text });
-      this.speak(requestId, text);
+      const entry = this.history.add("claude", randomUUID(), text);
+      this.sendToBrowser({
+        type: "claude_reply",
+        requestId: entry.requestId,
+        seq: entry.seq,
+        timestamp: entry.timestamp,
+        text
+      });
+      this.speak(entry.requestId, text);
     }
     this.emitStatus();
     this.pump();
@@ -19482,8 +19552,7 @@ class VoiceDaemon {
   async speak(requestId, text) {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
-      if (this.lastReply?.requestId === requestId)
-        this.lastReply.audio = { audioBase64, mimeType };
+      this.history.attachAudio(requestId, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
     } catch {}
   }
