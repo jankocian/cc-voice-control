@@ -31,6 +31,16 @@ Replace ElevenLabs with OpenAI for both directions — it's significantly cheape
 - [ ] Remove the now-unused ElevenLabs SDK assets, CSP origins (jsdelivr / livekit / elevenlabs), and config.
 - [ ] Update docs (`docs/`) + the local-run notes to reflect the new provider + keys.
 
+**Research notes:** Full write-up in [`docs/research/openai-tts-stt.md`](docs/research/openai-tts-stt.md)
+(verified vs live OpenAI docs, 2026-06-19). Recommend **TTS `gpt-4o-mini-tts`** (steerable via an
+`instructions` param; 13 voices, default **`marin`**, fallback `alloy`) returning **`mp3`/`audio/mpeg`**
+— a byte-identical contract to today, so no browser/CSP change. **STT `gpt-4o-mini-transcribe`**
+(`POST /v1/audio/transcriptions`, accepts our `webm`/`mp4` uploads). Both functions mirror
+`elevenlabs.ts` (`transcribeAudio`, `synthesizeSpeech`) → new `src/daemon/openai.ts`; config swaps
+`elevenlabsApiKey`/`voiceId` for `openaiApiKey`/`voice`. **Cost ≈ 6–15× cheaper end-to-end** (TTS
+driven), e.g. ~$10/mo vs ~$60–180/mo at 1k turns. Voice picker: persisted config default + per-session
+`set_voice` over the bridge.
+
 ---
 
 ## 2. QR code to open the remote ✅
