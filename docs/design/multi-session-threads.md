@@ -42,12 +42,12 @@ threads using **CSS scroll-snap** (no ponytail / no swipe lib). Per-`threadId` s
 (`Map<ThreadId, …>`); hero + thread scope to the active thread; reuse #10's offline grading
 per-thread.
 
-**Spawn by voice (v1).** A `spawn_thread { cwd?, direction? }` browser→daemon event → the receiving
-daemon runs `cmux new-pane --cwd <cwd> --command 'claude'` (the `--cwd`/`--command` flags are
-**confirmed** in the upstream CLI ref), then types `/voice-control:start`. The new daemon reads the
-same `session.json` → joins the same DO as a new thread → **same QR**. Two sharp edges remain
-(resolving the new surface id, and timing the `/voice-control:start` keystroke), both with probes in
-§11. v1 is justified **if §11-B/§11-C pass**; the design ships without spawn (slices 1–4) regardless.
+**Spawn by voice — DEFERRED from v1 (see §0.6-C).** The idea: a `spawn_thread` event → the receiving
+daemon opens a new cmux workspace running `claude` + `/voice-control:start`, joining the same session
+(same QR). Cut from v1 after testing: a `--plugin-dir`-loaded plugin isn't present in a freshly
+spawned `claude` (so `/voice-control:start` never runs), and the positional-prompt auto-submit is
+unverified. The CORE multi-thread (open a 2nd pane yourself + `/voice-control:start`) ships without
+it; §9 keeps the follow-up plan + fix path.
 
 **Security (decided — §6).** Ship **one stable machine secret + revoke-on-exit + a worker
 rate-limit**, *not* rotating sub-tokens. Rationale: a wrong secret already lands on an empty DO
