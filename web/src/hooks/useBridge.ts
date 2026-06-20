@@ -5,17 +5,19 @@ import { buildWebSocketUrl } from "../lib/session";
 // Content events the bridge forwards to the app (presence + status are owned here).
 export type BridgeContentEvent = Extract<
   DaemonToBrowserEvent,
-  { type: "transcript" } | { type: "claude_reply" } | { type: "tts_audio" } | { type: "error" }
+  { type: "transcript" } | { type: "claude_reply" } | { type: "tts_audio" } | { type: "history" } | { type: "error" }
 >;
 
 // Everything the daemon would need a requestId for, minus the requestId itself
-// (the hook mints it, exactly like the vanilla `sendDaemon`).
+// (the hook mints it, exactly like the vanilla `sendDaemon`). `get_audio` already carries
+// its own requestId (the reply being fetched), so the hook leaves it untouched.
 type DaemonCommand =
   | { type: "submit_audio"; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
   | { type: "status_request" }
   | { type: "summary_request" }
   | { type: "stop_task" }
-  | { type: "sync"; lastSeenReplyId?: string };
+  | { type: "sync" }
+  | { type: "get_audio"; requestId: string };
 
 export type BridgeRuntime = {
   state: SessionRuntimeState;
@@ -27,11 +29,8 @@ export type UseBridgeOptions = {
   // The single capability secret from the URL path (/s/<secret>); used to build the
   // /ws/<secret>?role=browser bridge socket URL.
   secret: string;
-  // Called for transcript / claude_reply / tts_audio / error events.
+  // Called for transcript / claude_reply / tts_audio / history / error events.
   onEvent: (event: BridgeContentEvent) => void;
-  // The requestId of the most recent reply already shown, sent on (re)connect so
-  // the daemon can replay one missed while the phone was away.
-  getLastReplyId: () => string | null;
   // Fired when a daemon command can't be sent (socket gone / not ready).
   onSendFailed?: () => void;
 };
@@ -49,7 +48,7 @@ export type Bridge = {
 const RECONNECT_MS = 1500;
 
 export function useBridge(options: UseBridgeOptions): Bridge {
-  const { secret, onEvent, getLastReplyId, onSendFailed } = options;
+  const { secret, onEvent, onSendFailed } = options;
 
   const [connected, setConnected] = useState(false);
   const [daemonConnected, setDaemonConnected] = useState(false);
@@ -65,10 +64,8 @@ export function useBridge(options: UseBridgeOptions): Bridge {
 
   // Keep the latest callbacks/values in refs so the effect mounts once.
   const onEventRef = useRef(onEvent);
-  const getLastReplyIdRef = useRef(getLastReplyId);
   const onSendFailedRef = useRef(onSendFailed);
   onEventRef.current = onEvent;
-  getLastReplyIdRef.current = getLastReplyId;
   onSendFailedRef.current = onSendFailed;
 
   const bridgeReady = useCallback((): boolean => {
@@ -106,16 +103,13 @@ export function useBridge(options: UseBridgeOptions): Bridge {
           const nextDaemon = event.daemonConnected === true;
           setDaemon(nextDaemon);
           setBrowserConnected(event.browserConnected === true);
-          // The daemon emits status only on change; on (re)connect ask for current
-          // status and tell it the latest reply we have so it can replay a missed one.
+          // The daemon emits status only on change; on (re)connect ask for the current
+          // status + the retained thread (it answers a `sync` with a `history` event).
           if (nextDaemon && !wasConnected) {
-            const lastSeenReplyId = getLastReplyIdRef.current();
             const socket = socketRef.current;
             if (socket && socket.readyState === WebSocket.OPEN) {
               const requestId = crypto.randomUUID();
-              const sync = lastSeenReplyId
-                ? { type: "sync" as const, requestId, lastSeenReplyId }
-                : { type: "sync" as const, requestId };
+              const sync = { type: "sync" as const, requestId };
               try {
                 socket.send(JSON.stringify({ channel: "daemon", event: sync } satisfies BridgeEnvelope));
               } catch {
@@ -135,6 +129,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         case "transcript":
         case "claude_reply":
         case "tts_audio":
+        case "history":
         case "error":
           onEventRef.current(event);
           return;

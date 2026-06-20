@@ -11,7 +11,7 @@ import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
 import { useWakeLock } from "./hooks/useWakeLock";
 import { FEATURES } from "./lib/features";
-import { MAX_LOG, type Message, makeMessage } from "./lib/messages";
+import { type Message, makeMessage, messageFromHistory, reconcileMessages } from "./lib/messages";
 import type { SessionCredentials } from "./lib/session";
 import { deriveStatus } from "./lib/status";
 
@@ -33,10 +33,6 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   // works (also reused for Steer — see the working-state handlers below).
   const nextModeRef = useRef<"queue" | "interrupt">("queue");
 
-  // The requestId of the most recent reply rendered; sent on sync so the daemon
-  // can replay one the phone missed. Held in a ref so useBridge reads it lazily.
-  const lastReplyIdRef = useRef<string | null>(null);
-
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Scroll container + a sentinel at the end of the hero: once the hero scrolls out
@@ -52,8 +48,16 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const recordingRef = useRef(false);
   const getRecording = useCallback(() => recordingRef.current, []);
 
-  const playback = usePlayback({ getRecording });
-  const { dropAudio, attachAudio, stopPlayback, playEntry, replayEntry, seekEntry } = playback;
+  // Audio-on-demand: tapping play on a history row calls back here to fetch its bytes.
+  // sendDaemon comes from the bridge below (declared after playback), so we read it lazily
+  // through a ref to break the playback↔bridge cycle.
+  const sendDaemonRef = useRef<((command: { type: "get_audio"; requestId: string }) => boolean) | null>(null);
+  const onRequestAudio = useCallback((requestId: string) => {
+    sendDaemonRef.current?.({ type: "get_audio", requestId });
+  }, []);
+
+  const playback = usePlayback({ getRecording, onRequestAudio });
+  const { dropAudio, attachAudio, markPlayable, stopPlayback, playEntry, replayEntry, seekEntry } = playback;
 
   // ---- bridge ----------------------------------------------------------------
   const handleContentEvent = useCallback(
@@ -61,13 +65,29 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       switch (event.type) {
         case "transcript":
           setTranscribing(false);
-          setMessages((prev) => pruneAndAdd(prev, makeMessage("You", event.text), dropAudio));
+          setMessages((prev) =>
+            reconcileAndPrune(
+              prev,
+              [makeMessage("You", event.text, event.requestId, { seq: event.seq, timestamp: event.timestamp })],
+              dropAudio
+            )
+          );
           showFlash("Sent to Claude Code ✓");
           return;
         case "claude_reply": {
-          const message = makeMessage("Claude Code", event.text, event.requestId);
-          if (event.requestId) lastReplyIdRef.current = event.requestId;
-          setMessages((prev) => pruneAndAdd(prev, message, dropAudio));
+          const message = makeMessage("Claude Code", event.text, event.requestId, {
+            seq: event.seq,
+            timestamp: event.timestamp
+          });
+          setMessages((prev) => reconcileAndPrune(prev, [message], dropAudio));
+          return;
+        }
+        case "history": {
+          // Reconnect / refresh / 2nd browser: restore the retained thread. Merge by seq and
+          // mark fetchable replies playable (tap-to-play before their bytes are requested).
+          const restored = event.turns.map(messageFromHistory);
+          markPlayable(event.turns.filter((t) => t.hasAudio).map((t) => t.requestId));
+          setMessages((prev) => reconcileAndPrune(prev, restored, dropAudio));
           return;
         }
         case "tts_audio":
@@ -75,21 +95,26 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           return;
         case "error":
           setTranscribing(false);
+          // The only error carrying a requestId is a `get_audio` miss (that reply's audio was
+          // evicted from the daemon ring). Drop the row so it stops rendering a dead, re-missing
+          // play button and any pending tap-to-play is cleared.
+          if (event.requestId) dropAudio(event.requestId);
           showFlash(event.message);
           return;
       }
     },
-    [attachAudio, dropAudio, showFlash]
+    [attachAudio, dropAudio, markPlayable, showFlash]
   );
-
-  const getLastReplyId = useCallback(() => lastReplyIdRef.current, []);
 
   const bridge = useBridge({
     secret: credentials.secret,
-    onEvent: handleContentEvent,
-    getLastReplyId
+    onEvent: handleContentEvent
   });
   const { connected, daemonConnected, runtime, bridgeReady, sendDaemon } = bridge;
+
+  // Publish sendDaemon to the lazy ref the audio-on-demand callback reads (breaks the
+  // playback↔bridge declaration cycle without re-creating either on every render).
+  sendDaemonRef.current = sendDaemon;
 
   // A dropped socket loses any in-flight send — re-enable the mic.
   useEffect(() => {
@@ -278,13 +303,14 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   );
 }
 
-// Prepend (newest first) then prune to MAX_LOG, dropping cached audio for evicted
-// rows. Mirrors the vanilla addLog + pruneLog (bounded memory).
-function pruneAndAdd(prev: Message[], message: Message, dropAudio: (requestId: string) => void): Message[] {
-  const next = [message, ...prev];
-  while (next.length > MAX_LOG) {
-    const removed = next.pop();
-    if (removed?.requestId) dropAudio(removed.requestId);
+// Reconcile incoming rows into the thread (merge/dedup/order by seq), then drop cached
+// audio for any row that fell out of the capped window — preserving the vanilla client's
+// bounded-memory pruning now that reconcileMessages owns the MAX_LOG cap.
+function reconcileAndPrune(prev: Message[], incoming: Message[], dropAudio: (requestId: string) => void): Message[] {
+  const next = reconcileMessages(prev, incoming);
+  const kept = new Set(next.map((m) => m.requestId).filter((id): id is string => id !== undefined));
+  for (const message of prev) {
+    if (message.requestId && !kept.has(message.requestId)) dropAudio(message.requestId);
   }
   return next;
 }
