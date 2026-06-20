@@ -33,7 +33,13 @@ export type DaemonToBrowserEvent =
   // `replay` marks a reply re-sent on reconnect: the phone shows it for tap-to-play
   // instead of auto-playing it (a reply the user already missed should not start talking).
   | { type: "tts_audio"; requestId: string; audioBase64: string; mimeType: string; replay?: boolean }
-  | { type: "bridge_presence"; daemonConnected: boolean; browserConnected: boolean }
+  // `daemonLastSeenAt` is the epoch-ms time a daemon socket last closed for this
+  // session (null = a daemon was never seen). It lets the phone distinguish a brief
+  // reconnect from a session that ended hours ago: `daemonConnected` is a pure boolean
+  // with no time dimension, so the browser grades the "no daemon" state by elapsed time.
+  // A clean `/stop` wipes the DO storage, so a terminated session reports null — only an
+  // ungraceful drop (laptop sleep/off) leaves a timestamp behind.
+  | { type: "bridge_presence"; daemonConnected: boolean; browserConnected: boolean; daemonLastSeenAt: number | null }
   | { type: "error"; requestId?: string; message: string };
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.

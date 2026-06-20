@@ -5,7 +5,7 @@ import { MessageThread } from "./components/MessageThread";
 import { MiniControls } from "./components/MiniControls";
 import { TopBar } from "./components/TopBar";
 import { type BridgeContentEvent, useBridge } from "./hooks/useBridge";
-import { useElapsed } from "./hooks/useElapsed";
+import { useElapsed, useNow } from "./hooks/useElapsed";
 import { useFlash } from "./hooks/useFlash";
 import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
@@ -89,7 +89,13 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     onEvent: handleContentEvent,
     getLastReplyId
   });
-  const { connected, daemonConnected, runtime, bridgeReady, sendDaemon } = bridge;
+  const { connected, daemonConnected, daemonLastSeenAt, runtime, bridgeReady, sendDaemon } = bridge;
+
+  // Tick a wall clock only while the socket is open but the daemon is absent — exactly when
+  // the status grades reconnecting→offline by elapsed time and "Last active X ago" updates.
+  // When the daemon is connected (healthy) or the socket is still connecting, this stays
+  // frozen (no timer) — neither path consults `now`.
+  const now = useNow(connected && !daemonConnected);
 
   // A dropped socket loses any in-flight send — re-enable the mic.
   useEffect(() => {
@@ -203,6 +209,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const status = deriveStatus({
     connected,
     daemonConnected,
+    daemonLastSeenAt,
+    now,
     recording: recorder.recording,
     transcribing,
     speaking: playback.speaking,
