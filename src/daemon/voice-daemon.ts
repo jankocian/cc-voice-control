@@ -404,7 +404,12 @@ export class VoiceDaemon {
   private async spawnThread(cwd?: string): Promise<{ ok: boolean; ref?: string }> {
     const command = this.buildSpawnCommand();
     const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
-    if (ref) console.error(`[spawn] new workspace ${ref} :: ${command}`);
+    if (ref) {
+      console.error(`[spawn] new workspace ${ref} :: ${command}`);
+      // Tell the phone to follow the spawn into its new thread (works for the "+" AND the
+      // /voice-control:spawn skill — both land here, so the phone follows either way).
+      this.sendToBrowser({ type: "spawn_pending" });
+    }
     return { ok: Boolean(ref), ref };
   }
 
