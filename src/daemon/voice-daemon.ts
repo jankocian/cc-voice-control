@@ -20,8 +20,11 @@ const RECONNECT_DELAY_MS = 1500;
 // How often the daemon re-resolves its cmux pane so `listening` self-heals (a moved
 // pane / transient cmux hiccup recovers automatically instead of latching false).
 const CMUX_HEALTH_INTERVAL_MS = 5000;
-// Hard cap on spoken text so a huge reply can't blow past the TTS input limit.
-const MAX_SPEECH_CHARS = 2500;
+// Replies are no longer truncated for speech: synthesizeSpeech chunks anything past the
+// per-call TTS input limit on sentence boundaries and concatenates the audio. This is a
+// pure safety ceiling — far above any normal coding reply — to bound the number of TTS
+// calls (and so cost/latency) if some runaway output arrives. ~40k chars ≈ 10 chunks.
+const MAX_SPEECH_CHARS = 40_000;
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
@@ -449,6 +452,10 @@ export class VoiceDaemon {
   }
 }
 
+// Safety ceiling only. Normal (even long) coding replies pass through untouched and are
+// chunked by synthesizeSpeech; this just caps a pathological runaway output so it can't
+// fan out into an unbounded number of TTS calls. The threshold is high enough that real
+// replies are never truncated.
 function capForSpeech(text: string): string {
   return text.length > MAX_SPEECH_CHARS ? `${text.slice(0, MAX_SPEECH_CHARS)}…` : text;
 }

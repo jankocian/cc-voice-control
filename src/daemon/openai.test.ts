@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VoiceRemoteConfig } from "./config.js";
-import { synthesizeSpeech, transcribeAudio } from "./openai.js";
+import { MAX_TTS_INPUT_CHARS, splitForTts, synthesizeSpeech, transcribeAudio } from "./openai.js";
 
 const baseConfig: VoiceRemoteConfig = {
   openaiApiKey: "sk-test",
@@ -104,5 +104,121 @@ describe("synthesizeSpeech", () => {
       vi.fn(async () => new Response("nope", { status: 500 }))
     );
     await expect(synthesizeSpeech(baseConfig, "hi")).rejects.toThrow(/OpenAI text-to-speech failed \(500\): nope/);
+  });
+
+  it("makes exactly one call for a reply within the per-call limit", async () => {
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await synthesizeSpeech(baseConfig, "A".repeat(MAX_TTS_INPUT_CHARS));
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("chunks a long reply into N calls and concatenates the mp3 buffers in order", async () => {
+    // Two sentences, each at the limit, force exactly two chunks.
+    const sentence = `${"A".repeat(MAX_TTS_INPUT_CHARS - 2)}. `;
+    const text = sentence + sentence;
+    expect(text.length).toBeGreaterThan(MAX_TTS_INPUT_CHARS);
+
+    // Distinct mp3 byte sequences per call so we can assert ordering of the concatenation.
+    let call = 0;
+    const payloads = [new Uint8Array([0xaa, 0xbb]), new Uint8Array([0xcc, 0xdd, 0xee])];
+    const fetchMock = vi.fn(async () => new Response(payloads[call++], { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await synthesizeSpeech(baseConfig, text, "cedar");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Concatenation is the chunks in call order.
+    const expected = Buffer.concat([Buffer.from(payloads[0]), Buffer.from(payloads[1])]);
+    expect(result.audioBase64).toBe(expected.toString("base64"));
+    expect(result.mimeType).toBe("audio/mpeg");
+
+    // The voice override is carried on every chunk.
+    for (const callArgs of fetchMock.mock.calls) {
+      const body = JSON.parse((callArgs[1] as RequestInit).body as string);
+      expect(body.voice).toBe("cedar");
+      expect(body.input.length).toBeLessThanOrEqual(MAX_TTS_INPUT_CHARS);
+    }
+  });
+
+  it("makes two calls when the reply is one character over the per-call limit", async () => {
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // A single terminator-less run of limit+1 chars hard-splits into [limit, 1] → 2 calls.
+    await synthesizeSpeech(baseConfig, "A".repeat(MAX_TTS_INPUT_CHARS + 1));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("speaks the partial audio when a later chunk fails instead of dropping the whole reply", async () => {
+    const sentence = `${"A".repeat(MAX_TTS_INPUT_CHARS - 2)}. `;
+    const text = sentence + sentence; // two chunks
+
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? new Response(new Uint8Array([0xaa, 0xbb]), { status: 200 })
+        : new Response("rate limited", { status: 429 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await synthesizeSpeech(baseConfig, text);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Only the first chunk's bytes survive — partial speech beats the silence we'd get if a
+    // single late failure threw away every already-synthesized chunk.
+    expect(result.audioBase64).toBe(Buffer.from([0xaa, 0xbb]).toString("base64"));
+  });
+
+  it("throws when the very first chunk fails (nothing synthesized to fall back to)", async () => {
+    const sentence = `${"A".repeat(MAX_TTS_INPUT_CHARS - 2)}. `;
+    const text = sentence + sentence;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("nope", { status: 500 }))
+    );
+    await expect(synthesizeSpeech(baseConfig, text)).rejects.toThrow(/OpenAI text-to-speech failed \(500\)/);
+  });
+});
+
+describe("splitForTts", () => {
+  it("returns a single trimmed chunk for text under the limit", () => {
+    expect(splitForTts("Hello world.", 100)).toEqual(["Hello world."]);
+    expect(splitForTts("  padded.  ", 100)).toEqual(["padded."]);
+  });
+
+  it("returns nothing for empty or whitespace-only input", () => {
+    expect(splitForTts("", 100)).toEqual([]);
+    expect(splitForTts("   \n\t ", 100)).toEqual([]);
+  });
+
+  it("splits multi-sentence text on boundaries into ≤limit chunks with no characters lost", () => {
+    // Three ~40-char sentences; a 90-char limit packs two per chunk then one.
+    const a = `${"a".repeat(38)}. `;
+    const b = `${"b".repeat(38)}! `;
+    const c = `${"c".repeat(38)}?`;
+    const text = a + b + c;
+    const chunks = splitForTts(text, 90);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(90);
+    // Reassembling the trimmed chunks reproduces the trimmed source modulo edge whitespace.
+    expect(chunks.join(" ")).toBe(text.trim());
+    // Every original letter survives in order.
+    expect(chunks.join("").replace(/[^abc]/g, "")).toBe(text.replace(/[^abc]/g, ""));
+  });
+
+  it("hard-splits a single sentence longer than the limit", () => {
+    const text = "x".repeat(250);
+    const chunks = splitForTts(text, 100);
+    expect(chunks).toEqual(["x".repeat(100), "x".repeat(100), "x".repeat(50)]);
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("breaks on paragraph/newline boundaries too", () => {
+    const text = `${"p".repeat(60)}\n\n${"q".repeat(60)}`;
+    const chunks = splitForTts(text, 70);
+    expect(chunks.length).toBe(2);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(70);
   });
 });
