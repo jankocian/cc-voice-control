@@ -20,6 +20,7 @@ export type BridgeContentEvent = Extract<
   | { type: "history" }
   | { type: "error" }
   | { type: "session_status" }
+  | { type: "spawn_pending" }
 >;
 
 // Everything the daemon would need a requestId for, minus the requestId itself (the hook mints

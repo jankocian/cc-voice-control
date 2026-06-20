@@ -61,6 +61,10 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   // daemon (the row being read belongs to the on-screen thread). Read active threadId lazily.
   const activeThreadIdRef = useRef<ThreadId | null>(activeThreadId);
   activeThreadIdRef.current = activeThreadId;
+  // Spawn-follow state: armed when the daemon signals `spawn_pending`; `seenThreadsRef` tracks every
+  // threadId seen so we can detect the fresh one. (Declared here so handleContentEvent can arm it.)
+  const seenThreadsRef = useRef<Set<ThreadId>>(new Set());
+  const activateOnSpawnRef = useRef(false);
   const sendDaemonRef = useRef<
     ((threadId: ThreadId, command: { type: "get_audio"; requestId: string }) => boolean) | null
   >(null);
@@ -127,6 +131,15 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
             event.replay === true || threadId !== activeThreadIdRef.current
           );
           return;
+        case "spawn_pending":
+          // A daemon (any thread — the "+" or the spawn skill) just opened a new session. Arm the
+          // follow so the phone switches to the new thread the moment it joins (see the effect
+          // below). Self-clears after a grace window so a much-later unrelated join can't steal focus.
+          activateOnSpawnRef.current = true;
+          window.setTimeout(() => {
+            activateOnSpawnRef.current = false;
+          }, SPAWN_FOLLOW_TIMEOUT_MS);
+          return;
         case "error":
           if (threadId === activeThreadIdRef.current) setTranscribingThreadId(null);
           // The only error carrying a requestId is a `get_audio` miss (that reply's audio was
@@ -192,12 +205,10 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [stopPlayback, threads]
   );
 
-  // After the user taps "+", follow the spawn: focus the new thread as soon as its daemon joins the
-  // roster, so the phone lands in the session they just opened. We track every threadId seen so far;
-  // the first fresh one that appears while a spawn is pending wins focus. The pending flag self-clears
-  // after a grace window so an unrelated pane opening much later never steals focus.
-  const seenThreadsRef = useRef<Set<ThreadId>>(new Set());
-  const activateOnSpawnRef = useRef(false);
+  // Follow a spawn into its new thread: when `activateOnSpawnRef` is armed (the daemon signalled
+  // spawn_pending), the moment a fresh threadId appears in the roster we focus it, so the phone lands
+  // in the session just opened. `seenThreadsRef` tracks every threadId seen so an unrelated later
+  // join never wins the focus.
   useEffect(() => {
     const current = threads.threads.map((t) => t.threadId);
     const fresh = current.filter((id) => !seenThreadsRef.current.has(id));
@@ -286,11 +297,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       showFlash("Start voice in a pane first");
       return;
     }
-    // Follow the spawn into its new thread once it joins (see the seenThreads effect).
-    activateOnSpawnRef.current = true;
-    window.setTimeout(() => {
-      activateOnSpawnRef.current = false;
-    }, SPAWN_FOLLOW_TIMEOUT_MS);
+    // The daemon arms the follow (spawn_pending) once the workspace actually opens — so the phone
+    // follows a real spawn, not a failed one, and the same path also covers the spawn skill.
     showFlash("Opening a new session…");
   }, [sendDaemon, showFlash]);
 

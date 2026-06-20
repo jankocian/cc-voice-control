@@ -64,6 +64,9 @@ export type DaemonToBrowserEvent =
   // phone reconciles these (text-only) turns to restore history after a refresh / on a
   // 2nd browser, then fetches audio per row on demand.
   | { type: "history"; turns: HistoryTurn[] }
+  // This daemon just spawned a new thread (phone "+" OR the /voice-control:spawn skill). The phone
+  // uses it to FOLLOW the spawn — focus the new thread as soon as it joins the roster.
+  | { type: "spawn_pending" }
   | { type: "error"; requestId?: string; message: string };
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.
