@@ -66,9 +66,11 @@ export type DaemonToBrowserEvent =
   // phone reconciles these (text-only) turns to restore history after a refresh / on a
   // 2nd browser, then fetches audio per row on demand.
   | { type: "history"; turns: HistoryTurn[] }
-  // This daemon just spawned a new thread (phone "+" OR the /voice-control:spawn skill). The phone
-  // uses it to FOLLOW the spawn — focus the new thread as soon as it joins the roster.
-  | { type: "spawn_pending" }
+  // This daemon just spawned a new thread (phone "+" OR the /voice-control:spawn skill). `spawnId`
+  // is a one-shot correlation key carried end-to-end (spawn command env → child daemon → its first
+  // thread_register → the thread_joined delta), so the phone follows the EXACT new thread — never a
+  // ghost or an unrelated reconnect.
+  | { type: "spawn_pending"; spawnId: string }
   | { type: "error"; requestId?: string; message: string };
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.
@@ -101,6 +103,9 @@ export type ThreadInfo = {
   label: ThreadLabel;
   state: SessionRuntimeState;
   listening: boolean; // the daemon can reach its cmux pane
+  // Present ONLY in a spawned daemon's FIRST register: the spawn correlation id it was launched with
+  // (VOICE_SPAWN_ID). Lets the phone follow the exact thread it spawned. Cleared after first register.
+  spawnId?: string;
 };
 
 // A roster entry the DO sends to browsers: the thread's last-registered info plus live

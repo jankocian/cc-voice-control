@@ -173,6 +173,11 @@ export class VoiceDaemon {
   // it — until then a spawn omits the flag and falls back to the user's own default mode.
   private inheritedPermissionMode?: string;
 
+  // If THIS daemon was spawned by another (phone "+" / spawn skill), it was launched with a
+  // VOICE_SPAWN_ID env var. We send it once, in our FIRST thread_register, so the phone can follow
+  // the exact thread it asked for (then clear it — refreshes don't carry it).
+  private pendingSpawnId = process.env.VOICE_SPAWN_ID;
+
   // The durable conversation thread: the last HISTORY_REPLIES Claude replies (with audio)
   // plus their parent user messages. A reconnecting phone is caught up from this via a
   // `history` event, and reply audio is served from it on demand (`get_audio`). Replaces
@@ -439,13 +444,14 @@ export class VoiceDaemon {
   // one). Returns the new workspace ref; the spawned pane's own daemon registers itself once it
   // connects. Callers decide how to surface a failure (phone error, or the /spawn HTTP response).
   private async spawnThread(cwd?: string): Promise<{ ok: boolean; ref?: string }> {
-    const command = this.buildSpawnCommand();
+    const spawnId = randomUUID();
+    const command = this.buildSpawnCommand(spawnId);
     const ref = await spawnWorkspace({ cwd: cwd ?? process.cwd(), command });
     if (ref) {
       console.error(`[spawn] new workspace ${ref} :: ${command}`);
-      // Tell the phone to follow the spawn into its new thread (works for the "+" AND the
-      // /voice-control:spawn skill — both land here, so the phone follows either way).
-      this.sendToBrowser({ type: "spawn_pending" });
+      // Tell the phone to follow this exact spawn (the new daemon echoes the same spawnId in its
+      // first register). Works for the "+" AND the /voice-control:spawn skill — both land here.
+      this.sendToBrowser({ type: "spawn_pending", spawnId });
     }
     return { ok: Boolean(ref), ref };
   }
@@ -468,16 +474,18 @@ export class VoiceDaemon {
   }
 
   // The command a spawned cmux workspace runs to join this session as a new thread.
+  //   VOICE_SPAWN_ID=<id>     a one-shot correlation id the new daemon echoes in its first register
+  //                           so the phone follows THIS exact thread (read through claude → the start
+  //                           skill's background task). cmux runs --command in a shell, so the env
+  //                           prefix takes effect.
   //   --plugin-dir <root>     dev-only (see PLUGIN_DIR_ARG); installed plugins are global → omitted.
-  //   --permission-mode <m>   mirrors the spawning session's LIVE mode (from the Stop hook) so the
-  //                           new session has the SAME permissions the user already granted — never
-  //                           silently elevated, never silently dropped. Omitted until a turn has
-  //                           reported a mode, in which case the spawn uses the user's own default.
+  //   --permission-mode <m>   mirrors the spawning session's LIVE mode (from the turn-open hook) so
+  //                           the new session has the SAME permissions the user already granted.
   //   /voice-control:start    a positional slash command — auto-submits + runs on startup (verified).
   // cmux must focus the new workspace (spawnWorkspace passes --focus true) to start the command; the
   // workspace uses the spawning pane's cwd (already trusted), so there's no first-run trust gate.
-  private buildSpawnCommand(): string {
-    return `claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
+  private buildSpawnCommand(spawnId: string): string {
+    return `VOICE_SPAWN_ID=${spawnId} claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
   }
 
   private async handleAudio(audioBase64: string, mimeType: string, mode: InjectMode): Promise<void> {
@@ -681,7 +689,8 @@ export class VoiceDaemon {
       threadId: this.init.threadId,
       label: this.label,
       state: this.isWorking() ? "working" : "idle",
-      listening: this.cmuxHealthy
+      listening: this.cmuxHealthy,
+      spawnId: this.pendingSpawnId
     };
   }
 
@@ -696,6 +705,7 @@ export class VoiceDaemon {
   // dedups by threadId and broadcasts a roster delta; sending it again is the refresh path.
   private registerThread(): void {
     this.send({ channel: "registry", event: { type: "thread_register", info: this.buildThreadInfo() } });
+    this.pendingSpawnId = undefined; // one-shot: only the FIRST register carries the spawn id
   }
 
   // Recompute the label (repo·branch·cwd · cmux title) and re-register only if it changed, so

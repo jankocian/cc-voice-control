@@ -24,30 +24,49 @@ describe("storedFromInfo", () => {
 });
 
 describe("buildRoster — the snapshot a (re)connecting browser receives", () => {
+  const NOW = 1_700_000_000_000;
+  const recent = NOW - 60_000; // 1 min ago — offline but within the ghost TTL
+  const ancient = NOW - 31 * 60 * 1000; // 31 min ago — a ghost (past GHOST_TTL_MS)
+
   it("stamps live `connected` per thread from the presence predicate", () => {
-    // Thread A has a live daemon socket; thread B's daemon dropped 3 min ago (offline).
+    // Thread A has a live daemon socket; thread B's daemon dropped a minute ago (offline, not yet a ghost).
     const map = new Map<string, StoredThread>([
       [rosterKey("a"), stored(labelA, null)],
-      [rosterKey("b"), stored(labelB, 1_000)]
+      [rosterKey("b"), stored(labelB, recent)]
     ]);
     const connected = new Set(["a"]);
-    const roster = buildRoster(map, (id) => connected.has(id));
+    const roster = buildRoster(map, (id) => connected.has(id), NOW);
 
     expect(roster).toEqual([
       { threadId: "a", label: labelA, state: "idle", listening: true, lastSeenAt: null, connected: true },
-      { threadId: "b", label: labelB, state: "idle", listening: true, lastSeenAt: 1_000, connected: false }
+      { threadId: "b", label: labelB, state: "idle", listening: true, lastSeenAt: recent, connected: false }
     ]);
   });
 
-  it("includes offline threads (stored but no live socket) so the phone can grade them per #10", () => {
-    const map = new Map<string, StoredThread>([[rosterKey("gone"), stored(labelA, 42)]]);
-    const roster = buildRoster(map, () => false);
+  it("includes recently-offline threads (stored, no live socket) so the phone can grade them per #10", () => {
+    const map = new Map<string, StoredThread>([[rosterKey("gone"), stored(labelA, recent)]]);
+    const roster = buildRoster(map, () => false, NOW);
     expect(roster).toHaveLength(1);
-    expect(roster[0]).toMatchObject({ threadId: "gone", connected: false, lastSeenAt: 42 });
+    expect(roster[0]).toMatchObject({ threadId: "gone", connected: false, lastSeenAt: recent });
+  });
+
+  it("DROPS ghosts (offline longer than the TTL) so a restart-heavy session doesn't pile up dead entries", () => {
+    const map = new Map<string, StoredThread>([
+      [rosterKey("live"), stored(labelA, null)],
+      [rosterKey("ghost"), stored(labelB, ancient)]
+    ]);
+    const roster = buildRoster(map, (id) => id === "live", NOW);
+    expect(roster.map((t) => t.threadId)).toEqual(["live"]);
+  });
+
+  it("keeps a still-connected thread even if its stored lastSeenAt is ancient (it's live now)", () => {
+    const map = new Map<string, StoredThread>([[rosterKey("back"), stored(labelA, ancient)]]);
+    const roster = buildRoster(map, () => true, NOW);
+    expect(roster).toHaveLength(1);
   });
 
   it("returns an empty roster when no threads are stored", () => {
-    expect(buildRoster(new Map(), () => true)).toEqual([]);
+    expect(buildRoster(new Map(), () => true, NOW)).toEqual([]);
   });
 });
 
