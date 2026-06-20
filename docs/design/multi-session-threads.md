@@ -353,8 +353,8 @@ revoke-on-exit + rate-limit (simpler) vs rotating sub-tokens** and **pick**. We 
    - This makes "one URL forever" false in the dangerous sense: the URL is only useful while *you*
      have a live pane. Exactly the user's requirement.
    - Note the **secret string itself doesn't change** (so no re-scan), but its *session* is gone; a
-     fresh `/voice-control:start` re-creates the session under the same secret. If the user wants a
-     leaked-URL kill switch even while panes are live, that's **rotation** (§6.4).
+     fresh `/voice-control:start` re-creates the session under the same secret. To kill a leak while
+     panes are live, `/voice-control:stop` them — the session dies with the last daemon.
 3. **Worker rate-limit gateway (anti-guessing + anti-DoS).** Add Cloudflare's native **Rate Limiting
    binding** in `wrangler.toml`:
 
@@ -362,7 +362,7 @@ revoke-on-exit + rate-limit (simpler) vs rotating sub-tokens** and **pick**. We 
    [[ratelimits]]
    name = "WS_CONNECT"
    namespace_id = "1001"
-   simple = { limit = 30, period = 60 }   # period must be 10 or 60
+   simple = { limit = 60, period = 60 }   # period must be 10 or 60
    ```
 
    In the **top-level Worker `fetch`** (not the DO — the binding is documented for the Worker fetch
@@ -395,15 +395,12 @@ defense-in-depth option. We **defer** it because:
 - We **don't burn the bridge to it**: `threadToken?` is reserved on the daemon-channel envelope (§3),
   so v2 can add per-thread sub-tokens with no wire break.
 
-### 6.4 Rotation — only when fully idle (so an active user never re-scans)
-A `/voice-control:rotate` skill (and/or an auto-rotate) mints a **new** secret in `session.json`,
-**but only when the session is empty** (no live daemon anywhere) — i.e. it's a "the URL leaked, burn
-it" action you run when nothing is connected, or it auto-fires after revoke-on-exit's `deleteAll()`.
-Rotating while panes are live would force a re-scan and kill active threads, so we **don't** do that
-automatically. Manual `/voice-control:rotate` while live is allowed but warns "this re-issues your QR;
-all phones must re-scan." This satisfies "rotate without forcing an active user to re-scan": **rotate
-on idle = zero re-scan for active use**; explicit rotate = opt-in re-scan when you *want* to kill a
-leak.
+### 6.4 Rotation — DROPPED (revoke-on-exit + `/stop` is enough)
+Earlier drafts shipped a `/voice-control:rotate` skill to mint a new secret on demand. **Dropped per
+user feedback** — nobody hand-rotates a hash, and it's redundant: revoke-on-exit already kills a
+leaked URL the moment the last pane disconnects, and `/voice-control:stop` triggers that on demand.
+So "kill a leak" = stop your panes; there is no dedicated rotate command. (`threadToken?` stays
+reserved on the wire — §6.3 — for a future per-thread sub-token if one is ever needed.)
 
 ### 6.5 Keep today's hard protections (unchanged)
 - Hash-routed DO (`idFromName(sha256(secret))`) — a leaked/guessed URL only ever reaches *this*
@@ -413,7 +410,7 @@ leak.
 - Secret never on the wire as a value — URL path only; the daemon hashes it. [REPO]
 - `session.json` is **0600** like `config.json` (config.ts already enforces 0600 on config). Document
   the trade-off plainly: "this one URL drives every Claude pane on the machine; it goes dead when no
-  pane is connected; rotate to kill a live leak."
+  pane is connected; /stop your panes to kill a live leak."
 
 ---
 

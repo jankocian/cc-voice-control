@@ -52,15 +52,13 @@ the **same** URL as a separate **thread** — so you scan once and switch betwee
 phone. The secret never travels over the wire as a value: it lives only in the URL path, and the
 bridge routes by its hash.
 
-Because that one URL can type into **every** Claude pane on the machine, two protections keep a
+Because that one URL can type into **every** Claude pane on the machine, **revoke-on-exit** keeps a
 leaked URL from being dangerous:
 
-- **Revoke-on-exit.** The session is only live while at least one pane's daemon is connected.
-  When the last one disconnects, the bridge waits a short grace (to ride out a laptop sleep /
-  Wi-Fi flap) and then **wipes the session** — a URL screenshotted yesterday is dead today unless
-  a pane is currently connected. The secret string is unchanged, but its session is gone; the
-  next `/voice-control:start` re-creates it.
-- **`/voice-control:rotate`.** To kill a leak **immediately**, rotate the secret. This re-issues
-  the QR (every phone must re-scan), so it's only done when **no pane is connected** — an active
-  session is never forced to re-scan. Running it while voice is live warns and requires explicit
-  confirmation.
+- The session is only live while at least one pane's daemon is connected. When the last one
+  disconnects, the bridge waits a short grace (to ride out a laptop sleep / Wi-Fi flap) and then
+  **wipes the session** — a URL screenshotted yesterday is dead today unless a pane is currently
+  connected. The secret string is unchanged, but its session is gone; the next
+  `/voice-control:start` re-creates it.
+- To kill a leak immediately, `/voice-control:stop` your pane(s): the session goes dead as soon as
+  the last daemon disconnects, so the leaked URL stops working.
