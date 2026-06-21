@@ -1,12 +1,12 @@
-import { type RefObject, useCallback, useEffect, useMemo, useState } from "react";
+import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PagerThread } from "../components/ThreadPager";
-import { type Message, makeMessage, messageFromHistory } from "../lib/messages";
+import { type Message, messageFromHistory } from "../lib/messages";
 import type { RosterThread, ThreadId } from "../lib/protocol";
 import {
+  buildThreadAndPrune,
   DEFAULT_RUNTIME,
   EMPTY_MESSAGES,
   pruneThreadMap,
-  reconcileAndPrune,
   rosterRuntime,
   updateThreadMessages
 } from "../lib/thread-messages";
@@ -43,6 +43,9 @@ export function useThreadMessages({
   const [runtimeByThread, setRuntimeByThread] = useState<Map<ThreadId, BridgeRuntime>>(new Map());
   // The thread whose mic turn is in flight (transcribing) — one at a time, since the mic is shared.
   const [transcribingThreadId, setTranscribingThreadId] = useState<ThreadId | null>(null);
+  // Mirror it in a ref so the stable content handler can read it without becoming a dependency.
+  const transcribingRef = useRef<ThreadId | null>(null);
+  transcribingRef.current = transcribingThreadId;
 
   const { dropAudio, attachAudio, markPlayable } = playback;
 
@@ -58,38 +61,25 @@ export function useThreadMessages({
             })
           );
           return;
-        case "transcript":
-          // A mirrored turn is one the user TYPED in the terminal (not sent from the phone), so it
-          // doesn't touch the phone's recording state or flash "Sent ✓" — it just joins the history.
-          if (!event.mirrored && threadId === activeThreadIdRef.current) {
-            setTranscribingThreadId(null);
-            showFlash("Sent to Claude Code ✓");
-          }
-          updateThreadMessages(setMessagesByThread, threadId, (prev) =>
-            reconcileAndPrune(
-              prev,
-              [makeMessage("You", event.text, event.requestId, { seq: event.seq, timestamp: event.timestamp })],
-              dropAudio
-            )
-          );
-          noteActivity(threadId);
-          return;
-        case "claude_reply": {
-          const message = makeMessage("Claude Code", event.text, event.requestId, {
-            seq: event.seq,
-            timestamp: event.timestamp
-          });
-          updateThreadMessages(setMessagesByThread, threadId, (prev) => reconcileAndPrune(prev, [message], dropAudio));
-          noteActivity(threadId);
-          return;
-        }
         case "history": {
-          // Reconnect / refresh / 2nd browser: restore the retained thread. Merge by seq and mark
-          // fetchable replies playable (tap-to-play before their bytes are requested). markPlayable is
-          // keyed by requestId (globally unique), so flagging another thread's rows never bleeds here.
+          // The daemon's projected thread — the SINGLE source of transcript content. It re-projects on
+          // every turn event (and on sync), so this snapshot is the complete, ordered, deduped thread; we
+          // replace with it (and mark fetchable replies tap-to-play). markPlayable is keyed by native
+          // uuid (globally unique), so flagging another thread's rows never bleeds here.
           const restored = event.turns.map(messageFromHistory);
           markPlayable(event.turns.filter((t) => t.hasAudio).map((t) => t.requestId));
-          updateThreadMessages(setMessagesByThread, threadId, (prev) => reconcileAndPrune(prev, restored, dropAudio));
+          // The mic turn lands when the user's spoken message appears as the newest row: clear the
+          // "transcribing…" indicator + confirm it reached Claude. A terminal-typed turn (we weren't
+          // transcribing) or an incoming reply (newest row is Claude's) correctly does neither.
+          if (transcribingRef.current === threadId && event.turns.length > 0) {
+            const newest = event.turns.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
+            if (newest.role === "user") {
+              setTranscribingThreadId(null);
+              showFlash("Sent to Claude Code ✓");
+            }
+          }
+          updateThreadMessages(setMessagesByThread, threadId, (prev) => buildThreadAndPrune(restored, prev, dropAudio));
+          noteActivity(threadId);
           return;
         }
         case "tts_audio":

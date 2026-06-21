@@ -1,84 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { type Message, makeMessage, messageFromHistory, reconcileMessages } from "./messages";
+import { buildThread, messageFromHistory } from "./messages";
 import type { HistoryTurn } from "./protocol";
 
-// A daemon-originated row (transcript / claude_reply / history) carries seq + timestamp.
-function turn(seq: number, role: "user" | "claude", text: string, hasAudio = false): HistoryTurn {
-  return { seq, timestamp: 1000 + seq, requestId: `r${seq}`, role, text, hasAudio };
+// A projected history turn: native uuid (requestId) + native timestamp.
+function turn(uuid: string, timestamp: number, role: "user" | "claude", text: string, hasAudio = false): HistoryTurn {
+  return { requestId: uuid, timestamp, role, text, hasAudio };
 }
 
-describe("reconcileMessages", () => {
-  it("orders the thread newest-first by seq", () => {
-    const a = makeMessage("You", "first", "r1", { seq: 1, timestamp: 1001 });
-    const b = makeMessage("Claude Code", "second", "r2", { seq: 2, timestamp: 1002 });
-    const c = makeMessage("You", "third", "r3", { seq: 3, timestamp: 1003 });
-    const out = reconcileMessages([], [a, c, b]);
-    expect(out.map((m) => m.requestId)).toEqual(["r3", "r2", "r1"]);
-  });
-
-  it("dedups a turn echoed live then seen again in a history snapshot (by seq)", () => {
-    // Live claude_reply, then a reconnect history that includes the same turn.
-    const live = makeMessage("Claude Code", "answer", "r2", { seq: 2, timestamp: 1002 });
-    const restored = [turn(1, "user", "q"), turn(2, "claude", "answer")].map(messageFromHistory);
-    const out = reconcileMessages([live], restored);
-    expect(out.map((m) => m.requestId)).toEqual(["r2", "r1"]);
-    // Exactly one row for seq 2 (no duplicate).
-    expect(out.filter((m) => m.seq === 2)).toHaveLength(1);
-  });
-
-  it("lets a later occurrence upgrade hasAudio (history teaches a live row it is fetchable)", () => {
-    const live = makeMessage("Claude Code", "answer", "r2", { seq: 2, timestamp: 1002 });
-    expect(live.hasAudio).toBeUndefined();
-    const restored = messageFromHistory(turn(2, "claude", "answer", true));
-    const out = reconcileMessages([live], [restored]);
-    expect(out.find((m) => m.seq === 2)?.hasAudio).toBe(true);
-  });
-
-  it("dedups by requestId for seq-less rows", () => {
-    const first: Message = { id: "x", kind: "claude", requestId: "rx", title: "", body: "one", time: "" };
-    const again: Message = { id: "x2", kind: "claude", requestId: "rx", title: "", body: "two", time: "" };
-    const out = reconcileMessages([first], [again]);
-    const matches = out.filter((m) => m.requestId === "rx");
-    expect(matches).toHaveLength(1);
-    expect(matches[0].body).toBe("two"); // later occurrence wins
-  });
-
-  it("restores a full thread on reconnect, merging with anything already present", () => {
-    // Phone already saw turns 5 & 6 live; reconnect history carries the last few turns.
-    const live = [
-      makeMessage("You", "q3", "r5", { seq: 5, timestamp: 1005 }),
-      makeMessage("Claude Code", "a3", "r6", { seq: 6, timestamp: 1006 })
-    ];
-    const restored = [
-      turn(3, "user", "q2"),
-      turn(4, "claude", "a2", true),
-      turn(5, "user", "q3"),
-      turn(6, "claude", "a3", true)
-    ].map(messageFromHistory);
-    const out = reconcileMessages(live, restored);
-    expect(out.map((m) => m.requestId)).toEqual(["r6", "r5", "r4", "r3"]);
-  });
-
-  it("caps the thread at the MAX_LOG window", () => {
-    const incoming = Array.from({ length: 80 }, (_, i) =>
-      makeMessage("Claude Code", `a${i}`, `r${i}`, { seq: i, timestamp: 1000 + i })
+describe("buildThread", () => {
+  it("orders the snapshot newest-first by native timestamp", () => {
+    const out = buildThread(
+      [turn("a", 1001, "user", "first"), turn("c", 1003, "user", "third"), turn("b", 1002, "claude", "second")].map(
+        messageFromHistory
+      )
     );
-    const out = reconcileMessages([], incoming);
+    expect(out.map((m) => m.requestId)).toEqual(["c", "b", "a"]);
+  });
+
+  it("dedupes by native uuid (a turn re-sent in a later snapshot never duplicates)", () => {
+    const out = buildThread(
+      [turn("u", 1001, "user", "q"), turn("r", 1002, "claude", "answer"), turn("r", 1002, "claude", "answer")].map(
+        messageFromHistory
+      )
+    );
+    expect(out.filter((m) => m.requestId === "r")).toHaveLength(1);
+  });
+
+  it("orders correctly across a daemon RESTART (native timestamps are monotonic; the old seq reset)", () => {
+    // The phone still holds the previous session's turns (high timestamps); the restarted daemon's first
+    // turns have LATER wall-clock timestamps, so they sort on top — never buried, the restart-misorder bug.
+    const beforeRestart = [turn("old1", 5000, "user", "earlier"), turn("old2", 5001, "claude", "earlier reply")];
+    const afterRestart = [turn("new1", 9000, "user", "new message"), turn("new2", 9001, "claude", "new reply")];
+    const out = buildThread([...beforeRestart, ...afterRestart].map(messageFromHistory));
+    expect(out.map((m) => m.requestId)).toEqual(["new2", "new1", "old2", "old1"]);
+  });
+
+  it("caps the thread at the MAX_LOG window, keeping the newest", () => {
+    const turns = Array.from({ length: 80 }, (_, i) => turn(`r${i}`, 1000 + i, "claude", `a${i}`));
+    const out = buildThread(turns.map(messageFromHistory));
     expect(out).toHaveLength(60);
-    // Newest 60 survive (seq 79..20); the oldest are dropped.
-    expect(out[0].seq).toBe(79);
-    expect(out[out.length - 1].seq).toBe(20);
+    expect(out[0].requestId).toBe("r79");
+    expect(out[out.length - 1].requestId).toBe("r20");
   });
 });
 
 describe("messageFromHistory", () => {
-  it("maps a user turn to a 'you' row and a claude turn to a 'claude' row, carrying meta", () => {
-    const user = messageFromHistory(turn(1, "user", "hi"));
-    const claude = messageFromHistory(turn(2, "claude", "hello", true));
+  it("maps a user turn to a 'you' row and a claude turn to a 'claude' row, carrying native id + meta", () => {
+    const user = messageFromHistory(turn("u", 1000, "user", "hi"));
+    const claude = messageFromHistory(turn("a", 1001, "claude", "hello", true));
     expect(user.kind).toBe("you");
+    expect(user.id).toBe("u"); // native uuid is the render key
     expect(claude.kind).toBe("claude");
-    expect(claude.requestId).toBe("r2");
-    expect(claude.seq).toBe(2);
+    expect(claude.requestId).toBe("a");
+    expect(claude.timestamp).toBe(1001);
     expect(claude.hasAudio).toBe(true);
     expect(user.hasAudio).toBe(false);
   });

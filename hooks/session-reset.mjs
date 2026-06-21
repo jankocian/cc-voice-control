@@ -5,9 +5,9 @@
  * `/clear` and `/compact` start a brand-new topic in the SAME pane (same CMUX_SURFACE_ID, same
  * daemon process), so the daemon's voice history would otherwise still show the old conversation.
  * SessionStart fires with `source` ∈ {startup, resume, clear, compact}; on `clear`/`compact` we POST
- * to THIS pane's daemon at /reset so it wipes its history ring and pushes an empty `history` to the
- * phone. `startup` is a fresh process (nothing to clear) and `resume` deliberately keeps history, so
- * both are ignored. If the daemon isn't running, this is a no-op. It never blocks.
+ * to THIS pane's daemon at /reset so it hides the prior topic (raises its projection floor) and pushes
+ * an empty `history` to the phone. `startup` is a fresh process (nothing to clear) and `resume`
+ * deliberately keeps history, so both are ignored. If the daemon isn't running, this is a no-op. Never blocks.
  */
 import { postDaemon, readDaemonRuntime, readStdin } from "./lib/daemon-client.mjs";
 

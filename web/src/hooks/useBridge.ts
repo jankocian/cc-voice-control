@@ -14,8 +14,6 @@ import { buildWebSocketUrl } from "../lib/session";
 // runtime map keyed by threadId instead of a special-cased presence path.
 export type BridgeContentEvent = Extract<
   DaemonToBrowserEvent,
-  | { type: "transcript" }
-  | { type: "claude_reply" }
   | { type: "tts_audio" }
   | { type: "history" }
   | { type: "error" }
@@ -45,8 +43,8 @@ export type UseBridgeOptions = {
   // The single capability secret from the URL path (/s/<secret>); used to build the
   // /ws/<secret>?role=browser bridge socket URL.
   secret: string;
-  // Called for transcript / claude_reply / tts_audio / history / error / session_status events,
-  // tagged with the thread (from the envelope) so the app files each under the right thread.
+  // Called for history / tts_audio / error / session_status / spawn_pending events, tagged with the
+  // thread (from the envelope) so the app files each under the right thread.
   onEvent: (threadId: ThreadId, event: BridgeContentEvent) => void;
   // Called for roster snapshot + join/leave deltas so the app maintains the thread list.
   onRoster: (event: RosterEvent) => void;

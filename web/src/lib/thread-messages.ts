@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 import type { BridgeRuntime } from "../hooks/useBridge";
-import { type Message, reconcileMessages } from "./messages";
+import { buildThread, type Message } from "./messages";
 import type { RosterThread, ThreadId } from "./protocol";
 
 // A thread with no session_status yet falls back to its roster snapshot for the runtime; currentTask
@@ -29,17 +29,18 @@ export function updateThreadMessages(
   });
 }
 
-// Reconcile incoming rows into the thread (merge/dedup/order by seq), then drop cached audio for any
-// row that fell out of the capped window — preserving the bounded-memory pruning.
-export function reconcileAndPrune(
-  prev: Message[],
+// The daemon's `history` snapshot is the authoritative thread, so we replace with it (ordered + capped by
+// buildThread), then drop cached audio for any row that fell out of the window — preserving the
+// bounded-memory pruning.
+export function buildThreadAndPrune(
   incoming: Message[],
+  prev: Message[],
   dropAudio: (requestId: string) => void
 ): Message[] {
-  const next = reconcileMessages(prev, incoming);
-  const kept = new Set(next.map((m) => m.requestId).filter((id): id is string => id !== undefined));
+  const next = buildThread(incoming);
+  const kept = new Set(next.map((m) => m.requestId));
   for (const message of prev) {
-    if (message.requestId && !kept.has(message.requestId)) dropAudio(message.requestId);
+    if (!kept.has(message.requestId)) dropAudio(message.requestId);
   }
   return next;
 }
