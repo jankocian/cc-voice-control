@@ -11,29 +11,31 @@ describe("VoiceDaemon runtime publication", () => {
   let homeDir: string;
   let previousDataDir: string | undefined;
   let previousHome: string | undefined;
+  let previousUserProfile: string | undefined;
   let previousCmuxBin: string | undefined;
 
   beforeEach(() => {
     previousDataDir = process.env.CLAUDE_PLUGIN_DATA;
     previousHome = process.env.HOME;
+    previousUserProfile = process.env.USERPROFILE;
     previousCmuxBin = process.env.CMUX_BIN;
     dataDir = mkdtempSync(join(tmpdir(), "voice-control-test-"));
-    // The per-thread runtime file lives under $HOME (fixed, plugin-data-independent), so isolate HOME.
+    // The per-thread runtime file lives under $HOME (fixed, plugin-data-independent), so isolate it.
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows — set both.
     homeDir = mkdtempSync(join(tmpdir(), "voice-control-home-"));
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
     process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
     // Point cmux at a harmless binary so the health monitor's spawn never touches a real
     // cmux socket during the test (its result is fire-and-forget; we don't assert on it).
     process.env.CMUX_BIN = "true";
   });
 
   afterEach(() => {
-    if (previousDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
-    else process.env.CLAUDE_PLUGIN_DATA = previousDataDir;
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousCmuxBin === undefined) delete process.env.CMUX_BIN;
-    else process.env.CMUX_BIN = previousCmuxBin;
+    restoreEnv("CLAUDE_PLUGIN_DATA", previousDataDir);
+    restoreEnv("HOME", previousHome);
+    restoreEnv("USERPROFILE", previousUserProfile);
+    restoreEnv("CMUX_BIN", previousCmuxBin);
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   });
@@ -80,3 +82,8 @@ describe("VoiceDaemon runtime publication", () => {
     expect(existsSync(qr)).toBe(true);
   });
 });
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}

@@ -131,25 +131,34 @@ describe("loadOrCreateSession (one machine secret, shared by every pane)", () =>
 describe("threadRuntimePath (per-pane IPC file at a fixed, plugin-data-independent path)", () => {
   const ORIGINAL_DATA = process.env.CLAUDE_PLUGIN_DATA;
   const ORIGINAL_HOME = process.env.HOME;
+  const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
+  const FAKE_HOME = join(tmpdir(), "fake-home");
   beforeEach(() => {
-    process.env.HOME = "/tmp/fake-home";
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows — set both so the test never
+    // touches the developer's real home dir.
+    process.env.HOME = FAKE_HOME;
+    process.env.USERPROFILE = FAKE_HOME;
     process.env.CLAUDE_PLUGIN_DATA = "/tmp/voice-state";
   });
   afterEach(() => {
-    if (ORIGINAL_DATA === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
-    else process.env.CLAUDE_PLUGIN_DATA = ORIGINAL_DATA;
-    if (ORIGINAL_HOME === undefined) delete process.env.HOME;
-    else process.env.HOME = ORIGINAL_HOME;
+    restore("CLAUDE_PLUGIN_DATA", ORIGINAL_DATA);
+    restore("HOME", ORIGINAL_HOME);
+    restore("USERPROFILE", ORIGINAL_USERPROFILE);
   });
 
   it("keys the runtime file by surface id under $HOME/.cache — NOT under CLAUDE_PLUGIN_DATA", () => {
     // The fix: hooks can inherit a different CLAUDE_PLUGIN_DATA than the daemon (Codex companion), so
     // the IPC file must NOT depend on it. It lives at a fixed $HOME path both processes share.
-    expect(threadRuntimePath("surface-abc")).toBe("/tmp/fake-home/.cache/cc-voice-control/runtime/surface-abc.json");
-    expect(threadRuntimePath("surface-abc")).not.toContain("/tmp/voice-state");
+    expect(threadRuntimePath("surface-abc")).toBe(join(FAKE_HOME, ".cache/cc-voice-control/runtime/surface-abc.json"));
+    expect(threadRuntimePath("surface-abc")).not.toContain("voice-state");
   });
 
   it("falls back to a stable sentinel name when launched outside cmux (no surface)", () => {
-    expect(threadRuntimePath(undefined)).toBe("/tmp/fake-home/.cache/cc-voice-control/runtime/default.json");
+    expect(threadRuntimePath(undefined)).toBe(join(FAKE_HOME, ".cache/cc-voice-control/runtime/default.json"));
   });
 });
+
+function restore(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
