@@ -67,7 +67,7 @@ describe("TurnCoordinator", () => {
     expect(h.coord.currentVoicePrompt).toBe("hello there");
 
     h.coord.turnOpened("hello there"); // exact content → classified voice
-    h.coord.turnClosed("hi!", "u1");
+    h.coord.turnClosed("hello there", "hi!", "u1");
     await tick();
     expect(h.spoken).toEqual(["hi!"]);
     expect(h.mirrored).toEqual([]);
@@ -82,7 +82,7 @@ describe("TurnCoordinator", () => {
     await tick();
     expect(h.injected).toEqual([]); // gated — Claude is mid-turn
 
-    h.coord.turnClosed("ready", "u1"); // plugin turn closes (ignored) → pane idle
+    h.coord.turnClosed("/voice-control:start", "ready", "u1"); // plugin turn closes (ignored) → idle
     await tick();
     expect(h.injected).toEqual(["do the thing"]);
   });
@@ -90,7 +90,7 @@ describe("TurnCoordinator", () => {
   it("mirrors a typed terminal turn (show the real prompt + speak the reply)", () => {
     const h = harness();
     h.coord.turnOpened("refactor the parser");
-    h.coord.turnClosed("done", "u1");
+    h.coord.turnClosed("refactor the parser", "done", "u1");
     expect(h.mirrored).toEqual([{ prompt: "refactor the parser", reply: "done" }]);
     expect(h.spoken).toEqual([]);
   });
@@ -98,14 +98,14 @@ describe("TurnCoordinator", () => {
   it("ignores a plugin (slash-command) turn", () => {
     const h = harness();
     h.coord.turnOpened("/clear");
-    h.coord.turnClosed("cleared", "u1");
+    h.coord.turnClosed("/clear", "cleared", "u1");
     expect(h.spoken).toEqual([]);
     expect(h.mirrored).toEqual([]);
   });
 
   it("ignores a reply with no open turn (daemon started mid-turn)", () => {
     const h = harness();
-    h.coord.turnClosed("stray reply", "u1");
+    h.coord.turnClosed("whatever", "stray reply", "u1");
     expect(h.spoken).toEqual([]);
     expect(h.mirrored).toEqual([]);
   });
@@ -113,21 +113,46 @@ describe("TurnCoordinator", () => {
   it("dedups a double-fired Stop by reply uuid", () => {
     const h = harness();
     h.coord.turnOpened("fix it");
-    h.coord.turnClosed("fixed", "u1");
-    h.coord.turnClosed("fixed", "u1"); // same uuid → ignored
+    h.coord.turnClosed("fix it", "fixed", "u1");
+    h.coord.turnClosed("fix it", "fixed", "u1"); // same uuid → ignored
     expect(h.mirrored).toEqual([{ prompt: "fix it", reply: "fixed" }]);
   });
 
-  it("pairs replies to the OLDEST open turn (FIFO)", () => {
+  it("pairs each reply to its OWN turn by prompt identity", () => {
     const h = harness();
     h.coord.turnOpened("first");
     h.coord.turnOpened("second");
-    h.coord.turnClosed("r1", "u1");
-    h.coord.turnClosed("r2", "u2");
+    h.coord.turnClosed("first", "r1", "u1"); // Claude answers a pane's turns in order
+    h.coord.turnClosed("second", "r2", "u2");
     expect(h.mirrored).toEqual([
       { prompt: "first", reply: "r1" },
       { prompt: "second", reply: "r2" }
     ]);
+  });
+
+  it("pairs by identity + self-heals when a /turn-close is dropped (the off-by-one bug)", () => {
+    const h = harness();
+    // Three typed turns; the FIRST never gets its close (dropped — the real failure).
+    h.coord.turnOpened("turn A");
+    h.coord.turnOpened("turn B");
+    h.coord.turnClosed("turn B", "reply B", "uB"); // B's reply arrives; A's close was lost
+    // B pairs with B (NOT A); A is reaped (its reply was already lost) so it can't shift later turns.
+    expect(h.mirrored).toEqual([{ prompt: "turn B", reply: "reply B" }]);
+
+    h.coord.turnOpened("turn C");
+    h.coord.turnClosed("turn C", "reply C", "uC");
+    expect(h.mirrored).toEqual([
+      { prompt: "turn B", reply: "reply B" },
+      { prompt: "turn C", reply: "reply C" } // C pairs with C — NOT shifted by the lost A
+    ]);
+    expect(h.coord.isWorking()).toBe(false); // A reaped → the working lamp self-healed
+  });
+
+  it("falls back to the oldest open turn when the prompt can't be extracted (empty)", () => {
+    const h = harness();
+    h.coord.turnOpened("only turn");
+    h.coord.turnClosed("", "the reply", "u1"); // empty prompt → fall back to the oldest open turn
+    expect(h.mirrored).toEqual([{ prompt: "only turn", reply: "the reply" }]);
   });
 
   it("interrupt() drops the running turn, goes idle, and ignores its late Stop", async () => {
@@ -136,7 +161,7 @@ describe("TurnCoordinator", () => {
     expect(h.coord.isWorking()).toBe(true);
     h.coord.interrupt();
     expect(h.coord.isWorking()).toBe(false);
-    h.coord.turnClosed("cancelled", "u1"); // late Stop for the dropped turn
+    h.coord.turnClosed("long task", "cancelled", "u1"); // late Stop for the dropped turn
     await tick();
     expect(h.spoken).toEqual([]);
     expect(h.mirrored).toEqual([]);
@@ -157,7 +182,7 @@ describe("TurnCoordinator", () => {
     await tick();
     h.coord.reset();
     expect(h.coord.isWorking()).toBe(false);
-    h.coord.turnClosed("late", "u1"); // nothing open → ignored
+    h.coord.turnClosed("busy", "late", "u1"); // nothing open → ignored
     await tick();
     expect(h.injected).toEqual([]); // the queued prompt was dropped by reset
     expect(h.spoken).toEqual([]);
@@ -205,22 +230,22 @@ describe("TurnCoordinator", () => {
   it("evicts the oldest reply uuid past the cap so the dedup set can't grow unbounded", () => {
     const h = harness();
     // Fill the dedup set with 100 unique uuids via orphan closes (uuids recorded, nothing to mirror).
-    for (let i = 0; i < 100; i++) h.coord.turnClosed(`r${i}`, `u${i}`);
+    for (let i = 0; i < 100; i++) h.coord.turnClosed("", `r${i}`, `u${i}`);
     expect(h.mirrored.length).toBe(0);
 
     // A recent uuid still dedups: a duplicate Stop must NOT consume an open turn.
     h.coord.turnOpened("kept");
-    h.coord.turnClosed("dup", "u99");
+    h.coord.turnClosed("kept", "dup", "u99");
     expect(h.mirrored.length).toBe(0);
 
     // The 101st unique uuid pushes the set over the cap → evicts the oldest (u0); this close is new,
     // so it consumes the still-open "kept" turn.
-    h.coord.turnClosed("r100", "u100");
+    h.coord.turnClosed("kept", "r100", "u100");
     expect(h.mirrored).toEqual([{ prompt: "kept", reply: "r100" }]);
 
     // u0 was evicted, so a Stop carrying it is no longer deduped → it acts on a fresh open turn.
     h.coord.turnOpened("after-evict");
-    h.coord.turnClosed("r0-again", "u0");
+    h.coord.turnClosed("after-evict", "r0-again", "u0");
     expect(h.mirrored).toContainEqual({ prompt: "after-evict", reply: "r0-again" });
   });
 
@@ -288,7 +313,7 @@ describe("TurnCoordinator", () => {
 
     // #2 is still a live VOICE injection: its turn opens + closes and is SPOKEN (not misclassified).
     coord.turnOpened("status");
-    coord.turnClosed("here's your status", "u1");
+    coord.turnClosed("status", "here's your status", "u1");
     await tick();
     expect(speaks).toBe(1);
   });
