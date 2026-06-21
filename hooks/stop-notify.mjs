@@ -68,8 +68,8 @@ function readTailRecords(path) {
     const size = fstatSync(fd).size;
     const start = Math.max(0, size - TAIL_BYTES);
     const buf = Buffer.alloc(size - start);
-    readSync(fd, buf, 0, buf.length, start);
-    const lines = buf.toString("utf8").split("\n");
+    const bytesRead = readSync(fd, buf, 0, buf.length, start);
+    const lines = buf.toString("utf8", 0, bytesRead).split("\n");
     if (start > 0) lines.shift(); // drop the partial first line when we began mid-file
     return lines
       .filter(Boolean)

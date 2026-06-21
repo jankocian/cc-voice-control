@@ -126,7 +126,9 @@ export class TurnCoordinator {
     }
     const removed = this.openTurns.splice(0, index + 1); // the match + every older, now-stale turn
     for (const t of removed) {
-      if (t.kind === "voice" && t.prompt === this.inFlight) {
+      // Trimmed compare — same normalization classify() uses — so a stray whitespace difference can't
+      // leave inFlight set and wedge the voice queue.
+      if (t.kind === "voice" && this.inFlight !== undefined && t.prompt.trim() === this.inFlight.trim()) {
         this.inFlight = undefined; // our injection completed (or its close was lost) → release the queue
         this.injectedAt = undefined;
       }
