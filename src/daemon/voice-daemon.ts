@@ -28,6 +28,7 @@ import { buildHistoryEvent, HistoryRing, selectAudioReply } from "./history-ring
 import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
+import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
 // Reconnect backoff for transient bridge drops (network blips, worker redeploys).
@@ -53,22 +54,8 @@ const PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 // In DEV the plugin is loaded with `--plugin-dir`, so a spawned `claude` must be pointed at it too —
 // Claude Code marks an `--plugin-dir` load with an `-inline` suffix on the plugin-data dir
-// (stateDir()). An INSTALLED plugin is global to every `claude`, so passing `--plugin-dir` would be
-// redundant/wrong: omit it. So the directory is added ONLY for an inline (dev) load.
-const PLUGIN_DIR_ARG = stateDir().endsWith("-inline") ? `--plugin-dir '${PLUGIN_ROOT}' ` : "";
-
-// The permission modes Claude Code accepts for `--permission-mode` (the same vocabulary it reports
-// in hook input as `permission_mode`). We pass the spawning session's live mode straight through so a
-// spawned thread inherits it EXACTLY. Allowlisted because the value is interpolated into the spawn
-// command — an unrecognized value is dropped (spawn falls back to the user's default) not passed on.
-const PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
-
-// Build the `--permission-mode` fragment for the spawn command (trailing space so it concatenates).
-// Allowlisted: a missing or unrecognized mode yields "" — the spawn falls back to the user's default
-// rather than interpolating an unknown value into the spawned command. Exported for tests.
-export function permissionModeArg(mode?: string): string {
-  return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
-}
+// (stateDir()). An INSTALLED plugin is global to every `claude`, so the flag is omitted (undefined).
+const SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
@@ -476,7 +463,11 @@ export class VoiceDaemon {
   // cmux must focus the new workspace (spawnWorkspace passes --focus true) to start the command; the
   // workspace uses the spawning pane's cwd (already trusted), so there's no first-run trust gate.
   private buildSpawnCommand(spawnId: string): string {
-    return `VOICE_SPAWN_ID=${spawnId} claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
+    return buildClaudeSpawnCommand({
+      spawnId,
+      pluginDir: SPAWN_PLUGIN_DIR,
+      permissionMode: this.inheritedPermissionMode
+    });
   }
 
   private async handleAudio(audioBase64: string, mimeType: string, mode: InjectMode): Promise<void> {
