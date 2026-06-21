@@ -4572,7 +4572,7 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/daemon/config.ts
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19012,7 +19012,13 @@ function loadOrCreateSession() {
   const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 384 });
-  renameSync(tmp, path);
+  try {
+    linkSync(tmp, path);
+  } catch {} finally {
+    try {
+      unlinkSync(tmp);
+    } catch {}
+  }
   const settled = readSessionFile(path) ?? session;
   return { secret: settled.secret, sessionId: settled.sessionId };
 }
@@ -19296,6 +19302,25 @@ function runGit(args) {
 // src/daemon/openai.ts
 var OPENAI_BASE = "https://api.openai.com/v1";
 var MAX_TTS_INPUT_CHARS = 4096;
+var OPENAI_TIMEOUT_MS = 30000;
+async function openaiFetch(url2, init) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  try {
+    return await fetch(url2, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function openaiError(label, status, body) {
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed?.error?.message)
+      detail = parsed.error.message;
+  } catch {}
+  return new Error(`${label} failed (${status}): ${detail}`);
+}
 function filenameForMime(mimeType) {
   if (mimeType.includes("mp4"))
     return "speech.mp4";
@@ -19317,19 +19342,19 @@ async function transcribeAudio(config2, audio, mimeType) {
   if (config2.language)
     form.append("language", config2.language);
   form.append("response_format", "text");
-  const response = await fetch(`${OPENAI_BASE}/audio/transcriptions`, {
+  const response = await openaiFetch(`${OPENAI_BASE}/audio/transcriptions`, {
     method: "POST",
     headers: { authorization: `Bearer ${config2.openaiApiKey}` },
     body: form
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`OpenAI speech-to-text failed (${response.status}): ${body}`);
+    throw openaiError("OpenAI speech-to-text", response.status, body);
   }
   return (await response.text()).trim();
 }
 async function synthesizeChunk(config2, text, voiceOverride) {
-  const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
+  const response = await openaiFetch(`${OPENAI_BASE}/audio/speech`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${config2.openaiApiKey}`,
@@ -19345,11 +19370,13 @@ async function synthesizeChunk(config2, text, voiceOverride) {
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`OpenAI text-to-speech failed (${response.status}): ${body}`);
+    throw openaiError("OpenAI text-to-speech", response.status, body);
   }
   return Buffer.from(await response.arrayBuffer());
 }
 async function synthesizeSpeech(config2, text, voiceOverride) {
+  if (!text.trim())
+    return { audioBase64: "", mimeType: "audio/mpeg" };
   if (text.length <= MAX_TTS_INPUT_CHARS) {
     const buffer = await synthesizeChunk(config2, text, voiceOverride);
     return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
@@ -19397,10 +19424,11 @@ function splitForTts(text, limit = MAX_TTS_INPUT_CHARS) {
   return chunks.map((c) => c.trim()).filter((c) => c.length > 0);
 }
 function hardSplit(text, limit) {
+  const safeLimit = Math.max(1, limit);
   const pieces = [];
   let i = 0;
   while (i < text.length) {
-    let end = Math.min(i + limit, text.length);
+    let end = Math.min(i + safeLimit, text.length);
     if (end < text.length && end - 1 > i) {
       const code = text.charCodeAt(end - 1);
       if (code >= 55296 && code <= 56319)
@@ -19465,6 +19493,7 @@ function isSlashCommand(prompt) {
   return prompt.trimStart().startsWith("/");
 }
 var TURN_TTL_MS = 20 * 60 * 1000;
+var REPLY_UUID_CAP = 100;
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
   const threadId = surface ?? randomUUID();
@@ -19488,6 +19517,7 @@ class VoiceDaemon {
   openTurns = [];
   injectedPending = [];
   seenReplyUuids = new Set;
+  injectedAt;
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
   history = new HistoryRing(HISTORY_REPLIES);
@@ -19670,10 +19700,16 @@ class VoiceDaemon {
       if (typeof parsed.cwd === "string" && parsed.cwd.trim())
         cwd = parsed.cwd.trim();
     } catch {}
-    const result = await this.spawnThread(cwd);
-    res.statusCode = result.ok ? 200 : 500;
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(result));
+    try {
+      const result = await this.spawnThread(cwd);
+      res.statusCode = result.ok ? 200 : 500;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(result));
+    } catch (error51) {
+      console.error(`[spawn] request failed: ${error51 instanceof Error ? error51.message : String(error51)}`);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ ok: false }));
+    }
   }
   buildSpawnCommand(spawnId) {
     return `VOICE_SPAWN_ID=${spawnId} claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
@@ -19701,6 +19737,7 @@ class VoiceDaemon {
     this.pump();
   }
   async pump() {
+    this.reapStaleTurns();
     if (this.inFlight !== undefined)
       return;
     if (this.openTurns.length > 0)
@@ -19709,6 +19746,8 @@ class VoiceDaemon {
     if (next === undefined)
       return;
     this.inFlight = next;
+    this.injectedAt = Date.now();
+    this.injectedPending.length = 0;
     this.injectedPending.push(next);
     this.emitStatus();
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(next)}`);
@@ -19786,6 +19825,11 @@ class VoiceDaemon {
       if (this.seenReplyUuids.has(replyUuid))
         return;
       this.seenReplyUuids.add(replyUuid);
+      if (this.seenReplyUuids.size > REPLY_UUID_CAP) {
+        const oldest = this.seenReplyUuids.values().next().value;
+        if (oldest !== undefined)
+          this.seenReplyUuids.delete(oldest);
+      }
     }
     const turn = this.openTurns.shift();
     if (!turn) {
@@ -19795,6 +19839,7 @@ class VoiceDaemon {
     if (turn.kind === "voice") {
       console.error(`[turn] voice reply, ${reply.length} chars`);
       this.inFlight = undefined;
+      this.injectedAt = undefined;
       if (reply)
         this.speak(this.emitClaudeTurn(reply), reply);
       this.pump();
@@ -19811,6 +19856,7 @@ class VoiceDaemon {
   }
   clearTurns() {
     this.inFlight = undefined;
+    this.injectedAt = undefined;
     this.openTurns.length = 0;
     this.injectedPending.length = 0;
   }
@@ -19818,9 +19864,17 @@ class VoiceDaemon {
     const cutoff = Date.now() - TURN_TTL_MS;
     while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
       const stale = this.openTurns.shift();
-      if (stale?.kind === "voice")
+      if (stale?.kind === "voice") {
         this.inFlight = undefined;
+        this.injectedAt = undefined;
+      }
       console.error("[turn] reaped a stale open turn");
+    }
+    if (this.inFlight !== undefined && this.injectedPending.length > 0 && this.injectedAt !== undefined && this.injectedAt < cutoff) {
+      console.error("[turn] reaped a stuck injection (no turn-open arrived)");
+      this.inFlight = undefined;
+      this.injectedAt = undefined;
+      this.injectedPending.length = 0;
     }
   }
   async speak(requestId, text) {
@@ -19847,7 +19901,13 @@ class VoiceDaemon {
     this.pendingSpawnId = undefined;
   }
   async refreshLabel() {
-    const next = await computeLabel(process.cwd(), this.init.surface, this.init.threadId);
+    let cwd;
+    try {
+      cwd = process.cwd();
+    } catch {
+      return;
+    }
+    const next = await computeLabel(cwd, this.init.surface, this.init.threadId);
     if (sameLabel(next, this.label))
       return;
     this.label = next;
@@ -19917,12 +19977,13 @@ function installLogTee() {
   };
 }
 var ORPHAN_GUARD_INTERVAL_MS = 5000;
-function shouldReap(ppidNow) {
-  return ppidNow === 1;
+var INITIAL_PPID = process.ppid;
+function shouldReap(ppidNow, initialPpid) {
+  return ppidNow === 1 && initialPpid !== 1;
 }
 function startOrphanGuard(stop) {
   const timer = setInterval(() => {
-    if (shouldReap(process.ppid))
+    if (shouldReap(process.ppid, INITIAL_PPID))
       stop("orphaned (reparented to launchd, PID 1)");
   }, ORPHAN_GUARD_INTERVAL_MS);
   timer.unref?.();
