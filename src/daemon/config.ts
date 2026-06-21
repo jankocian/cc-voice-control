@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -248,8 +248,20 @@ export function loadOrCreateSession(): MachineSession {
   const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 0o600 });
-  renameSync(tmp, path);
-  // Re-read so a racing pane's last-writer-wins secret is the one we (and it) return.
+  // linkSync is atomic AND exclusive (fails if the target exists), unlike rename which overwrites.
+  // So in a two-pane startup race the FIRST writer's secret wins and the loser falls through to
+  // re-read it — both panes converge on one secret (= one URL/QR), never two.
+  try {
+    linkSync(tmp, path);
+  } catch {
+    // lost the race → the winner's session.json is already on disk
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // tmp already gone
+    }
+  }
   const settled = readSessionFile(path) ?? session;
   return { secret: settled.secret, sessionId: settled.sessionId };
 }

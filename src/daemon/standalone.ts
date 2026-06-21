@@ -50,19 +50,24 @@ function installLogTee(): void {
 // How often the orphan guard re-checks the parent chain.
 const ORPHAN_GUARD_INTERVAL_MS = 5000;
 
+// Our parent PID at startup. Reaping keys on a CHANGE to PID 1, not PID 1 itself, so a container /
+// Codespaces daemon born under an init process (ppid 1 from the start) isn't reaped on the first tick.
+const INITIAL_PPID = process.ppid;
+
 /**
- * Pure decision for the orphan self-reap guard: should the daemon reap itself? A child whose
- * parent has exited is reparented to launchd (PID 1) on macOS/Linux — and a PID-1 child has
- * already lost cmux trust (it's no longer in the pane's process tree). That reparent is the
- * only way our Claude parent goes away, so `ppid === 1` is the whole signal.
+ * Pure decision for the orphan self-reap guard: should the daemon reap itself? A child whose parent
+ * has exited is reparented to launchd/init (PID 1) — and a PID-1 child has already lost cmux trust
+ * (it's no longer in the pane's process tree). That reparent is the only way our Claude parent goes
+ * away. But if PID 1 was already our parent at startup (a container's init), the reparent never
+ * happens and `ppid === 1` is normal — so we reap only when we were REPARENTED to 1.
  */
-export function shouldReap(ppidNow: number): boolean {
-  return ppidNow === 1;
+export function shouldReap(ppidNow: number, initialPpid: number): boolean {
+  return ppidNow === 1 && initialPpid !== 1;
 }
 
 function startOrphanGuard(stop: (reason: string) => void): void {
   const timer = setInterval(() => {
-    if (shouldReap(process.ppid)) stop("orphaned (reparented to launchd, PID 1)");
+    if (shouldReap(process.ppid, INITIAL_PPID)) stop("orphaned (reparented to launchd, PID 1)");
   }, ORPHAN_GUARD_INTERVAL_MS);
   // Don't let the guard keep the process alive on its own; the daemon's WS + HTTP + health
   // timer are the load-bearing handles. (No-op on platforms without unref, e.g. some shims.)

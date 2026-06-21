@@ -9,14 +9,15 @@ Open a new voice-controlled session. This pane's daemon spawns a fresh cmux work
 
 Decide the target directory from the user's request: the repo/path they named, or the current
 working directory if they didn't specify one. Then run the command below, replacing `TARGET_DIR`
-with that directory (you may use `~` or an absolute path; use `$PWD` for the current directory):
+with that directory as an ABSOLUTE path — use `$HOME/...` (NOT `~`, which won't expand inside the
+quotes) or `$PWD` for the current directory. It's quoted, so paths with spaces are fine.
 
 ```sh
 D="${CLAUDE_PLUGIN_DATA}"
 R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
 PORT=$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$R" 2>/dev/null)
 [ -z "$PORT" ] && { echo "no-daemon"; exit 0; }
-DIR=$(cd TARGET_DIR 2>/dev/null && pwd) || { echo "bad-path"; exit 0; }
+DIR=$(cd "TARGET_DIR" 2>/dev/null && pwd) || { echo "bad-path"; exit 0; }
 OUT=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT/spawn" -H 'content-type: application/json' -d "{\"cwd\":\"$DIR\"}")
 CODE=$(printf '%s' "$OUT" | tail -1)
 [ "$CODE" = "404" ] && { echo "stale-daemon"; exit 0; }

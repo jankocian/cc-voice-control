@@ -30,14 +30,34 @@ export function ThreadSwitcher({
   onSpawn: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const active = rows.find((r) => r.thread.threadId === activeThreadId) ?? rows[0];
   // Progressive disclosure: the dropdown only earns its place once a 2nd thread joins.
   const multi = rows.length > 1;
 
+  // Close the dropdown on an outside tap or Escape. The check is against the WHOLE switcher (rootRef),
+  // not just the menu — so a tap on the trigger pill closes via its own onClick rather than dismissing
+  // here AND re-toggling open (which reopened the menu instead of closing it).
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   if (!active) return null;
 
   return (
-    <div className="relative flex min-w-0 items-center justify-center gap-1">
+    <div ref={rootRef} className="relative flex min-w-0 items-center justify-center gap-1">
       <button
         type="button"
         disabled={!multi}
@@ -56,7 +76,10 @@ export function ThreadSwitcher({
           spawn_thread on the active thread's daemon. */}
       <button
         type="button"
-        onClick={onSpawn}
+        onClick={() => {
+          setOpen(false);
+          onSpawn();
+        }}
         aria-label="New session"
         className="grid size-8 shrink-0 place-items-center rounded-full text-ink-soft transition-colors duration-200 ease-soft hover:bg-surface/70 hover:text-ink active:scale-[0.98]"
       >
@@ -75,7 +98,6 @@ export function ThreadSwitcher({
             setOpen(false);
             onSpawn();
           }}
-          onDismiss={() => setOpen(false)}
         />
       )}
     </div>
@@ -86,37 +108,17 @@ function ThreadMenu({
   rows,
   activeThreadId,
   onSelect,
-  onSpawn,
-  onDismiss
+  onSpawn
 }: {
   rows: ThreadRow[];
   activeThreadId: ThreadId | null;
   onSelect: (threadId: ThreadId) => void;
   onSpawn: () => void;
-  onDismiss: () => void;
 }) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  // Dismiss on an outside tap or Escape. A pointerdown listener (not click) closes before the
-  // pill's own toggle would re-open it, and matches the rest of the app's gesture handling.
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) onDismiss();
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onDismiss();
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onDismiss]);
-
+  // Dismiss (outside tap / Escape) is owned by the parent ThreadSwitcher so it can check the trigger
+  // pill too; this is just the menu's presentation.
   return (
     <div
-      ref={menuRef}
       role="menu"
       className="absolute top-full z-30 mt-2 max-h-[60vh] w-72 max-w-[85vw] overflow-y-auto rounded-card border border-hairline bg-surface/95 p-1.5 shadow-soft backdrop-blur-md"
     >

@@ -88,6 +88,10 @@ type OpenTurn = { kind: TurnKind; prompt: string; openedAt: number };
 // only the unattended backstop.
 const TURN_TTL_MS = 20 * 60 * 1000;
 
+// Cap on the double-fired-Stop dedup set — a repeat fires within seconds, so only recent reply uuids
+// matter; bounding it keeps a long-running daemon from leaking memory.
+const REPLY_UUID_CAP = 100;
+
 export type DaemonInit = {
   config: VoiceRemoteConfig;
   surface?: string;
@@ -166,6 +170,9 @@ export class VoiceDaemon {
   private readonly openTurns: OpenTurn[] = [];
   private readonly injectedPending: string[] = [];
   private readonly seenReplyUuids = new Set<string>();
+  // When the current injection (inFlight) was typed — so a prompt that cmux sent but whose /turn-open
+  // never arrived can be reaped instead of blocking the queue forever.
+  private injectedAt?: number;
 
   // The spawning session's LIVE permission mode, forwarded by the Stop hook each turn. A spawned
   // thread is launched with `--permission-mode <this>` so it inherits the user's mode EXACTLY (a
@@ -467,10 +474,17 @@ export class VoiceDaemon {
     } catch {
       // malformed body → spawn at the daemon's own cwd
     }
-    const result = await this.spawnThread(cwd);
-    res.statusCode = result.ok ? 200 : 500;
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(result));
+    try {
+      const result = await this.spawnThread(cwd);
+      res.statusCode = result.ok ? 200 : 500;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      // Never leave the skill's request hanging (or reject an uncaught promise) if the spawn throws.
+      console.error(`[spawn] request failed: ${error instanceof Error ? error.message : String(error)}`);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ ok: false }));
+    }
   }
 
   // The command a spawned cmux workspace runs to join this session as a new thread.
@@ -517,11 +531,14 @@ export class VoiceDaemon {
   }
 
   private async pump(): Promise<void> {
+    this.reapStaleTurns(); // free the queue if a previous turn hung — else the idle-gate blocks forever
     if (this.inFlight !== undefined) return; // our own injection is still pending
     if (this.openTurns.length > 0) return; // Claude is mid-turn — wait for the pane to go idle
     const next = this.queue.shift();
     if (next === undefined) return;
     this.inFlight = next; // set before awaiting so a concurrent pump sees "busy"
+    this.injectedAt = Date.now();
+    this.injectedPending.length = 0; // any leftover never opened a turn (stale) — start clean
     this.injectedPending.push(next); // /turn-open recognises this turn as ours by exact content
     this.emitStatus();
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(next)}`);
@@ -624,6 +641,10 @@ export class VoiceDaemon {
     if (replyUuid) {
       if (this.seenReplyUuids.has(replyUuid)) return;
       this.seenReplyUuids.add(replyUuid);
+      if (this.seenReplyUuids.size > REPLY_UUID_CAP) {
+        const oldest = this.seenReplyUuids.values().next().value;
+        if (oldest !== undefined) this.seenReplyUuids.delete(oldest);
+      }
     }
     const turn = this.openTurns.shift();
     if (!turn) {
@@ -633,6 +654,7 @@ export class VoiceDaemon {
     if (turn.kind === "voice") {
       console.error(`[turn] voice reply, ${reply.length} chars`);
       this.inFlight = undefined; // our injection completed → release the next queued voice prompt
+      this.injectedAt = undefined;
       if (reply) void this.speak(this.emitClaudeTurn(reply), reply);
       void this.pump();
     } else if (turn.kind === "typed") {
@@ -652,19 +674,37 @@ export class VoiceDaemon {
   // the topic). A late Stop for a dropped turn lands on an empty queue and is ignored.
   private clearTurns(): void {
     this.inFlight = undefined;
+    this.injectedAt = undefined;
     this.openTurns.length = 0;
     this.injectedPending.length = 0;
   }
 
-  // Backstop: drop open turns older than TURN_TTL_MS (Claude crashed / an interrupt swallowed the
-  // Stop) so the idle-gate can release queued voice prompts. A reaped voice turn clears the injection
-  // lock. Only the front is stale-checked since openTurns is age-ordered (FIFO by openedAt).
+  // Backstop: drop turns stuck longer than TURN_TTL_MS so the idle-gate can release queued voice
+  // prompts. Two stuck shapes: (1) an OPEN turn that never closed (Claude crashed / an interrupt
+  // swallowed the Stop); (2) an INJECTED prompt whose /turn-open never arrived (cmux typed it but
+  // Claude never registered it — e.g. the UserPromptSubmit hook isn't installed). Reaping a voice
+  // turn or a stuck injection clears the injection lock. openTurns is age-ordered, so only its front
+  // needs checking. Called from pump() so a hung turn is cleared the next time a prompt is queued.
   private reapStaleTurns(): void {
     const cutoff = Date.now() - TURN_TTL_MS;
     while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
       const stale = this.openTurns.shift();
-      if (stale?.kind === "voice") this.inFlight = undefined;
+      if (stale?.kind === "voice") {
+        this.inFlight = undefined;
+        this.injectedAt = undefined;
+      }
       console.error("[turn] reaped a stale open turn");
+    }
+    if (
+      this.inFlight !== undefined &&
+      this.injectedPending.length > 0 &&
+      this.injectedAt !== undefined &&
+      this.injectedAt < cutoff
+    ) {
+      console.error("[turn] reaped a stuck injection (no turn-open arrived)");
+      this.inFlight = undefined;
+      this.injectedAt = undefined;
+      this.injectedPending.length = 0;
     }
   }
 
@@ -712,7 +752,15 @@ export class VoiceDaemon {
   // the cmux-health tick can call this every 5s without spamming the DO. Best-effort: a failed
   // compute keeps the last good label.
   private async refreshLabel(): Promise<void> {
-    const next = await computeLabel(process.cwd(), this.init.surface, this.init.threadId);
+    // process.cwd() throws if the daemon's working directory was deleted/unmounted; keep the last
+    // good label rather than rejecting this floating promise.
+    let cwd: string;
+    try {
+      cwd = process.cwd();
+    } catch {
+      return;
+    }
+    const next = await computeLabel(cwd, this.init.surface, this.init.threadId);
     if (sameLabel(next, this.label)) return;
     this.label = next;
     if (this.ws?.readyState === WebSocket.OPEN) this.registerThread();

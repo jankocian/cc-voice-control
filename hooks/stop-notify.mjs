@@ -79,9 +79,13 @@ function resolveReply(transcriptPath) {
     const finish = (reply) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       if (watcher) watcher.close();
       resolve(reply);
     };
+    // If the final message never lands (an errored/killed turn), stop watching so this hook process
+    // can't hang forever — the daemon reaps the still-open turn on its own.
+    const timer = setTimeout(() => finish(undefined), 10_000);
     try {
       watcher = watch(transcriptPath, () => {
         const r = read();
@@ -148,13 +152,16 @@ function post(port, body) {
         port,
         path: "/turn-close",
         method: "POST",
-        headers: { "content-type": "application/json", "content-length": data.length }
+        headers: { "content-type": "application/json", "content-length": data.length },
+        // Never let a frozen/zombie daemon hang the Stop event: bail fast (caller swallows the error).
+        timeout: 2000
       },
       (res) => {
         res.resume();
         res.on("end", resolve);
       }
     );
+    req.on("timeout", () => req.destroy());
     req.on("error", reject);
     req.write(data);
     req.end();

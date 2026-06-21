@@ -65,13 +65,16 @@ function post(port, body) {
         port,
         path: "/turn-open",
         method: "POST",
-        headers: { "content-type": "application/json", "content-length": data.length }
+        headers: { "content-type": "application/json", "content-length": data.length },
+        // Never let a frozen/zombie daemon hang the prompt: bail fast (caller swallows the error).
+        timeout: 2000
       },
       (res) => {
         res.resume();
         res.on("end", resolve);
       }
     );
+    req.on("timeout", () => req.destroy());
     req.on("error", reject);
     req.write(data);
     req.end();
