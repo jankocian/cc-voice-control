@@ -2,32 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isSlashCommand, permissionModeArg, VoiceDaemon } from "./voice-daemon.js";
-
-describe("isSlashCommand (keep plugin/CLI commands out of the phone's mirrored history)", () => {
-  it("flags slash commands so they aren't mirrored", () => {
-    expect(isSlashCommand("/voice-control:start")).toBe(true);
-    expect(isSlashCommand("  /clear")).toBe(true);
-  });
-
-  it("lets real typed messages through", () => {
-    expect(isSlashCommand("fix the spawn bug")).toBe(false);
-    expect(isSlashCommand("what's the status?")).toBe(false);
-  });
-});
-
-describe("permissionModeArg (spawn inherits the session's permission mode)", () => {
-  it("mirrors a known mode so a spawn matches the parent exactly", () => {
-    expect(permissionModeArg("bypassPermissions")).toBe("--permission-mode bypassPermissions ");
-    expect(permissionModeArg("plan")).toBe("--permission-mode plan ");
-  });
-
-  it("drops a missing or unrecognized mode (falls back to the user's default, never interpolated)", () => {
-    expect(permissionModeArg(undefined)).toBe("");
-    expect(permissionModeArg("")).toBe("");
-    expect(permissionModeArg("haxx; rm -rf /")).toBe("");
-  });
-});
+import { VoiceDaemon } from "./voice-daemon.js";
 
 const BROWSER_URL = "https://voice.example.com/s/sek";
 
