@@ -5,14 +5,14 @@ allowed-tools: Bash
 ---
 
 Report whether the voice remote is running **in this pane** and re-show its QR code + phone URL.
-Each pane runs its own daemon; this pane's per-pane runtime file at a fixed, plugin-data-independent
-path (`$HOME/.cache/cc-voice-control/runtime/<CMUX_SURFACE_ID>.json`, written by the daemon, removed on
-stop) is the source of truth, and its `pid` lets us confirm the task is actually alive. (The QR/URL is
-machine-level — the same for every pane.)
+Each pane runs its own daemon; this pane's per-pane runtime file
+(`runtime/<CMUX_SURFACE_ID>.json`, written by the daemon, removed on stop) is the source of
+truth, and its `pid` lets us confirm the task is actually alive. (The QR/URL is machine-level —
+the same for every pane.)
 
 ```sh
 D="${CLAUDE_PLUGIN_DATA}"
-R="$HOME/.cache/cc-voice-control/runtime/${CMUX_SURFACE_ID:-default}.json"
+R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
 if [ -f "$R" ]; then
   PID=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' "$R" 2>/dev/null)
   if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then echo "active"; else echo "stale"; fi
