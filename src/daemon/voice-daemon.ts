@@ -31,56 +31,40 @@ import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
-// Reconnect backoff for transient bridge drops (network blips, worker redeploys).
-// A terminal close (1008) is handled separately and does not reconnect.
+// Reconnect backoff for transient bridge drops (a terminal 1008 close is handled separately).
 const RECONNECT_DELAY_MS = 1500;
-// How often the daemon re-resolves its cmux pane so `listening` self-heals (a moved
-// pane / transient cmux hiccup recovers automatically instead of latching false).
+// How often the daemon re-resolves its cmux pane so `listening` self-heals.
 const CMUX_HEALTH_INTERVAL_MS = 5000;
-// Replies are no longer truncated for speech: synthesizeSpeech chunks anything past the
-// per-call TTS input limit on sentence boundaries and concatenates the audio. This is a
-// pure safety ceiling — far above any normal coding reply — to bound the number of TTS
-// calls (and so cost/latency) if some runaway output arrives. ~40k chars ≈ 10 chunks.
+// Safety ceiling on speech length (synthesizeSpeech chunks past the per-call TTS limit) so a runaway
+// reply can't fan out into unbounded TTS calls. Far above any real reply; ~40k ≈ 10 chunks.
 const MAX_SPEECH_CHARS = 40_000;
-// How many of the most recent Claude replies (with their parent user messages) the daemon
-// retains so a refreshed/2nd phone can restore the thread on reconnect. Tunable: bigger =
-// more scrollback survives a refresh, at the cost of holding more reply audio in memory.
+// Recent Claude replies (+ their user messages, with audio) retained so a refreshed/2nd phone restores
+// the thread on reconnect.
 const HISTORY_REPLIES = 7;
 
-// This module's plugin-load root, derived from its own location: bundled, the daemon runs at
-// <root>/dist/daemon/standalone.js; in dev at <root>/src/daemon/voice-daemon.ts — three dirs up is
-// <root> either way. Only used to point a spawned `claude` at a `--plugin-dir`-loaded plugin (below).
+// Plugin-load root, three dirs up from this module either way (dist/daemon or src/daemon). Only used
+// to point a spawned `claude` at a `--plugin-dir`-loaded (dev) plugin.
 const PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
-// In DEV the plugin is loaded with `--plugin-dir`, so a spawned `claude` must be pointed at it too —
-// Claude Code marks an `--plugin-dir` load with an `-inline` suffix on the plugin-data dir
-// (stateDir()). An INSTALLED plugin is global to every `claude`, so the flag is omitted (undefined).
+// Dev loads the plugin via `--plugin-dir` (Claude Code marks it with an `-inline` data dir); an
+// installed plugin is global, so the flag is omitted. Pass the dir only for an inline (dev) load.
 const SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 
 export type DaemonInit = {
   config: VoiceRemoteConfig;
   surface?: string;
-  // Non-secret, stable per pane: the thread's routing key (its CMUX_SURFACE_ID, or a
-  // per-process uuid outside cmux). Tags every event so the phone attributes it to one thread
-  // and a reconnecting pane re-registers to the SAME slot. NOT the session secret.
+  // Non-secret per-pane routing key (CMUX_SURFACE_ID, or a uuid outside cmux). Tags every event; a
+  // reconnecting pane re-registers to the SAME slot. NOT the session secret.
   threadId: ThreadId;
-  // The whole capability: one MACHINE-level secret (session.json) that both routes the
-  // session and authorizes joining it. Shared by every pane → every pane derives the same
-  // phone URL/QR. Carried in the URL path; never sent over the wire as a separate value.
+  // The MACHINE-level secret (session.json) that routes AND authorizes the session. Shared by every
+  // pane → identical phone URL/QR. Carried in the URL path, never sent as a separate value.
   secret: string;
-  // A short, non-secret label derived from `secret` (its hash). Safe to relay in status
-  // events and log; never the secret itself.
-  sessionId: string;
+  sessionId: string; // short, non-secret hash of `secret` — safe to relay/log
   browserUrl: string;
 };
 
-/**
- * Build the daemon init from config and the current cmux pane. The secret is the SHARED
- * machine secret (loadOrCreateSession), so every pane derives the same URL/QR (TODO #2).
- * `threadId = CMUX_SURFACE_ID` (already the cmux `--surface` target) so a re-quit pane
- * re-registers to the same thread; outside cmux we fall back to a per-process uuid (loses
- * dedup-on-reconnect, never collides).
- */
+/** Build the daemon init from config + the current cmux pane (threadId = CMUX_SURFACE_ID, or a uuid
+ *  outside cmux). The secret is the SHARED machine secret, so every pane derives the same URL/QR. */
 export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
   const surface = process.env.CMUX_SURFACE_ID;
   const threadId = surface ?? randomUUID();
@@ -90,29 +74,19 @@ export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
 }
 
 /**
- * Voice daemon for the cmux-hosted interactive Claude Code session.
- *
- * Phone speaks → OpenAI STT → `cmux send` types it into the live Claude pane
- * as a real user message. The plugin Stop hook POSTs Claude's reply back here →
- * OpenAI TTS → phone. It is the real interactive session — no turn-hijack.
- *
- * Critically, this runs *inside Claude Code's process tree* (hosted as a background
- * Bash task by `/voice-control:start`), so it keeps cmux's socket trust AND dies with
- * the Claude session: a detached/`nohup` process would be reparented to launchd and
- * would both lose cmux's trust and outlive the session.
- *
- * Logging goes to stderr (teed to ${stateDir}/daemon.log by the entry point); the
- * standalone entry reserves stdout for its short "voice active" banner.
+ * Voice daemon for the cmux-hosted Claude Code session. Phone speaks → STT → `cmux send` types it
+ * into the live pane; the Stop hook POSTs Claude's reply back → TTS → phone. The real interactive
+ * session, no turn-hijack. Runs INSIDE Claude Code's process tree (a background Bash task), so it
+ * keeps cmux's socket trust and dies with the session (a detached process would lose both). Logs to
+ * stderr (teed to ${stateDir}/daemon.log); the entry point reserves stdout for its banner.
  */
 export class VoiceDaemon {
   private readonly init: DaemonInit;
   private ws?: WebSocket;
   private httpServer?: Server;
   private port = 0;
-  // `cmuxHealthy` drives the phone's "listening" lamp; it starts optimistic (true)
-  // and only drops on a POSITIVE "pane gone" verdict (see refreshCmuxHealth).
-  // `cmuxReachable` tracks the socket separately, purely so we log its transitions
-  // without spamming and without ever locking the user out on an ambiguous blip.
+  // `cmuxHealthy` drives the "listening" lamp: optimistic (starts true), drops only on a POSITIVE
+  // "pane gone" verdict. `cmuxReachable` tracks the socket separately, just to log transitions.
   private cmuxHealthy = true;
   private cmuxReachable = true;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -124,26 +98,21 @@ export class VoiceDaemon {
   // cmux, speak/mirror a reply, re-emit status). See turn-coordinator.ts.
   private readonly turns: TurnCoordinator;
 
-  // The spawning session's LIVE permission mode, forwarded by the Stop hook each turn. A spawned
-  // thread is launched with `--permission-mode <this>` so it inherits the user's mode EXACTLY (a
-  // child `claude` does not inherit it via env/process tree). Undefined until the first turn reports
-  // it — until then a spawn omits the flag and falls back to the user's own default mode.
+  // The spawning session's LIVE permission mode (forwarded each turn by the turn-open hook). A spawn
+  // launches with `--permission-mode <this>` so it inherits the user's mode EXACTLY (env won't carry
+  // it). Undefined until the first turn → a spawn before then falls back to the user's default.
   private inheritedPermissionMode?: string;
 
-  // If THIS daemon was spawned by another (phone "+" / spawn skill), it was launched with a
-  // VOICE_SPAWN_ID env var. We send it once, in our FIRST thread_register, so the phone can follow
-  // the exact thread it asked for (then clear it — refreshes don't carry it).
+  // If THIS daemon was spawned (phone "+"/skill) it carries a VOICE_SPAWN_ID. Sent once in the FIRST
+  // thread_register so the phone follows the exact thread it asked for, then cleared.
   private pendingSpawnId = process.env.VOICE_SPAWN_ID;
 
-  // The durable conversation thread: the last HISTORY_REPLIES Claude replies (with audio)
-  // plus their parent user messages. A reconnecting phone is caught up from this via a
-  // `history` event, and reply audio is served from it on demand (`get_audio`). Replaces
-  // the single-reply retention that lost the whole thread on a refresh.
+  // The durable thread (last HISTORY_REPLIES replies + their user messages, with audio): catches up a
+  // reconnecting phone via a `history` event and serves reply audio on demand (`get_audio`).
   private readonly history = new HistoryRing(HISTORY_REPLIES);
 
-  // Last-computed thread label (repo·branch·cwd · cmux task title). Sent in thread_register
-  // on connect and refreshed on the cmux-health tick when the title changes (no extra timer).
-  // Starts with a cheap synchronous fallback so registration never blocks on git/cmux.
+  // Last-computed thread label (repo·branch·cwd · cmux title). Sent in thread_register and refreshed
+  // on the health tick when it changes; starts with a cheap sync fallback so registration never blocks.
   private label: ThreadInfo["label"];
 
   constructor(init: DaemonInit) {
@@ -181,17 +150,10 @@ export class VoiceDaemon {
 
   // ---- cmux liveness (optimistic + self-healing) ----------------------------
 
-  // Re-resolve the cmux pane on a timer so `listening` always reflects reality and
-  // self-heals. Two design rules learned the hard way:
-  //
-  //  1. OPTIMISTIC. We only declare "not listening" when cmux POSITIVELY confirms the
-  //     pane is gone (identify resolves but the surface no longer exists). A cmux
-  //     socket that's merely unreachable this tick (cold CLI, app momentarily busy)
-  //     keeps us listening — locking the user out on an ambiguous signal is the bug
-  //     that made a perfectly-alive pane read "Claude isn't listening". If cmux is
-  //     truly down, the next injection fails and tells the user *then*.
-  //  2. SELF-HEALING. The surface ref is stable across a workspace move, so a re-probe
-  //     re-validates it and recovers on its own — no restart, no user action.
+  // Re-resolve the cmux pane on a timer so `listening` self-heals. OPTIMISTIC: drop to "not listening"
+  // only on a POSITIVE pane-gone verdict — a merely-unreachable socket stays listening (locking out on
+  // an ambiguous blip was a real bug; a true outage surfaces on the next failed injection). SELF-HEALING:
+  // the surface ref survives a workspace move, so a re-probe recovers on its own.
   private startCmuxMonitor(): void {
     void this.refreshCmuxHealth();
     this.healthTimer = setInterval(() => void this.refreshCmuxHealth(), CMUX_HEALTH_INTERVAL_MS);
@@ -410,10 +372,8 @@ export class VoiceDaemon {
     }
   }
 
-  // Spawn a sibling thread via a new cmux workspace, inheriting this session's permission mode
-  // (buildSpawnCommand). cwd defaults to THIS daemon's cwd (a new session "next to" the current
-  // one). Returns the new workspace ref; the spawned pane's own daemon registers itself once it
-  // connects. Callers decide how to surface a failure (phone error, or the /spawn HTTP response).
+  // Spawn a sibling thread via a new cmux workspace (cwd defaults to this daemon's). The spawned pane's
+  // own daemon registers once it connects; callers surface a failure (phone error / the /spawn response).
   private async spawnThread(cwd?: string): Promise<{ ok: boolean; ref?: string }> {
     const spawnId = randomUUID();
     const command = this.buildSpawnCommand(spawnId);
@@ -451,17 +411,8 @@ export class VoiceDaemon {
     }
   }
 
-  // The command a spawned cmux workspace runs to join this session as a new thread.
-  //   VOICE_SPAWN_ID=<id>     a one-shot correlation id the new daemon echoes in its first register
-  //                           so the phone follows THIS exact thread (read through claude → the start
-  //                           skill's background task). cmux runs --command in a shell, so the env
-  //                           prefix takes effect.
-  //   --plugin-dir <root>     dev-only (see PLUGIN_DIR_ARG); installed plugins are global → omitted.
-  //   --permission-mode <m>   mirrors the spawning session's LIVE mode (from the turn-open hook) so
-  //                           the new session has the SAME permissions the user already granted.
-  //   /voice-control:start    a positional slash command — auto-submits + runs on startup (verified).
-  // cmux must focus the new workspace (spawnWorkspace passes --focus true) to start the command; the
-  // workspace uses the spawning pane's cwd (already trusted), so there's no first-run trust gate.
+  // The shell command a spawned cmux workspace runs to join this session (see spawn-command.ts). cmux
+  // focuses the new workspace and reuses the trusted cwd, so there's no first-run trust gate.
   private buildSpawnCommand(spawnId: string): string {
     return buildClaudeSpawnCommand({
       spawnId,
@@ -608,9 +559,8 @@ export class VoiceDaemon {
 
   // ---- helpers ---------------------------------------------------------------
 
-  // Status carries this thread's id so the phone files it (and the roster's per-thread #10
-  // grading) under the right thread; a thread_register also rides along so the roster's
-  // state/listening stay current as the daemon's runtime state changes.
+  // Status carries this thread's id (so the phone files it correctly); a thread_register rides along to
+  // keep the roster's state/listening in lockstep.
   private emitStatus(): void {
     const state: SessionState = {
       sessionId: this.init.sessionId,
@@ -624,9 +574,7 @@ export class VoiceDaemon {
   }
 
   private sendToBrowser(event: DaemonToBrowserEvent): void {
-    // Tag every outbound event with this daemon's threadId so the phone (and the DO) attribute
-    // it to the right thread. The DO trusts the socket's attachment, but tagging keeps the
-    // envelope self-describing and matches the browser→daemon direction.
+    // Tag every outbound event with this daemon's threadId so the phone/DO attribute it correctly.
     this.send({ channel: "browser", threadId: this.init.threadId, event });
   }
 
@@ -657,11 +605,8 @@ export class VoiceDaemon {
     }
     this.httpServer?.close();
     try {
-      // Remove only THIS pane's runtime file (sibling panes keep theirs). qr.txt is
-      // machine-level: leave it as long as any pane might still be live — a sibling rewrites
-      // identical bytes on its next tick, and a fully-idle machine's stale QR is harmless
-      // (the DO revoke-on-exit kills the session it points at). Removing it here would yank
-      // the QR out from under a still-running sibling pane.
+      // Remove only THIS pane's runtime file (siblings keep theirs). qr.txt is machine-level — leave it
+      // (a sibling rewrites identical bytes; a stale QR is harmless, the DO revokes the session on exit).
       rmSync(threadRuntimePath(this.init.surface), { force: true });
     } catch {
       // ignore
@@ -675,10 +620,8 @@ function sameLabel(a: ThreadInfo["label"], b: ThreadInfo["label"]): boolean {
   return a.title === b.title && a.repo === b.repo && a.branch === b.branch && a.cwd === b.cwd;
 }
 
-// Safety ceiling only. Normal (even long) coding replies pass through untouched and are
-// chunked by synthesizeSpeech; this just caps a pathological runaway output so it can't
-// fan out into an unbounded number of TTS calls. The threshold is high enough that real
-// replies are never truncated.
+// Safety ceiling only (see MAX_SPEECH_CHARS): caps a pathological runaway so it can't fan out into
+// unbounded TTS calls. Real replies pass untouched.
 function capForSpeech(text: string): string {
   return text.length > MAX_SPEECH_CHARS ? `${text.slice(0, MAX_SPEECH_CHARS)}…` : text;
 }

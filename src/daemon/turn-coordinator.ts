@@ -1,15 +1,11 @@
-// The voice remote's turn state machine, isolated from all I/O.
-//
-// We never scrape the transcript for "what the user said" — Claude Code injects synthetic user-role
-// records (slash markers, whole SKILL.md bodies) that poison it. Instead two hooks bracket every
-// turn: UserPromptSubmit hands us the REAL prompt (`turnOpened`) and Stop hands us the reply
-// (`turnClosed`). This module owns the resulting state — the inject queue, the in-flight injection,
-// the open-turn FIFO, classification, dedup and stale-turn reaping — and emits its decisions through
-// injected callbacks (`inject` / `speakReply` / `mirrorTypedTurn`), so it is fully unit-testable with
-// a fake clock and no daemon, WebSocket, cmux or OpenAI.
+// The voice remote's turn state machine, isolated from all I/O. Two hooks bracket every turn —
+// UserPromptSubmit gives the REAL prompt (`turnOpened`), Stop gives the reply (`turnClosed`) — because
+// the transcript can't be trusted for either (Claude Code injects synthetic user-role records: slash
+// markers, whole SKILL.md bodies). Decisions are emitted through injected callbacks, so the whole
+// machine is unit-testable with a fake clock and no daemon/cmux/WebSocket/OpenAI.
 
-// A prompt that is a slash command (`/voice-control:start`, the spawn skill, any `/…`) is a
-// plugin/CLI command, not conversation — classified from the REAL prompt the hook reports.
+// A slash command (`/voice-control:start`, the spawn skill, any `/…`) is a plugin/CLI command, not
+// conversation.
 export function isSlashCommand(prompt: string): boolean {
   return prompt.trimStart().startsWith("/");
 }
@@ -18,14 +14,11 @@ export type TurnKind = "voice" | "typed" | "plugin";
 
 type OpenTurn = { kind: TurnKind; prompt: string; openedAt: number };
 
-// A turn open longer than this with no Stop is treated as abandoned (Claude crashed, or an interrupt
-// swallowed the Stop) and reaped, so the idle-gate can release queued voice prompts. Generous: real
-// agent turns can run many minutes; interrupting clears turns immediately, so this is only the
-// unattended backstop.
+// A turn open this long with no Stop is treated as abandoned and reaped, so the idle-gate can release
+// queued prompts. Generous: real agent turns run minutes; this is only the unattended backstop.
 const TURN_TTL_MS = 20 * 60 * 1000;
 
-// Cap on the double-fired-Stop dedup set — a repeat fires within seconds, so only recent reply uuids
-// matter; bounding it keeps a long-running daemon from leaking memory.
+// Bound the double-fired-Stop dedup set (a repeat fires within seconds) so the daemon can't leak.
 const REPLY_UUID_CAP = 100;
 
 export type TurnCoordinatorDeps = {
@@ -37,31 +30,27 @@ export type TurnCoordinatorDeps = {
   mirrorTypedTurn: (prompt: string, reply: string) => void;
   // The working/idle state changed → the daemon re-emits status.
   onStatusChange: () => void;
-  // Diagnostic log line (stderr). Optional so tests stay quiet.
   log?: (message: string) => void;
-  // Injectable clock so the reaper is testable. Defaults to Date.now.
-  now?: () => number;
+  now?: () => number; // injectable clock so the reaper is testable
 };
 
 export class TurnCoordinator {
-  // The daemon injects ONE voice prompt at a time and ONLY while Claude is idle. `inFlight` is the
-  // prompt currently typed/awaited; `queue` holds voice prompts captured while Claude was busy.
+  // We inject ONE voice prompt at a time, only while Claude is idle. `inFlight` is the prompt awaited;
+  // `queue` holds prompts captured while Claude was busy.
   private inFlight?: string;
   private readonly queue: string[] = [];
 
-  // `openTurns` is the FIFO of turns Claude is running (each classified from its real prompt); a reply
-  // closes the oldest. `injectedPending` holds prompts WE typed, awaiting their turnOpened so we
-  // recognise our own voice turns by exact content. `injectedAt` dates the current injection so a
-  // prompt whose turnOpened never arrives can be reaped. `seenReplyUuids` dedups a double-fired Stop.
+  // `openTurns`: FIFO of running turns (a reply closes the oldest). `injectedPending`: prompts WE typed,
+  // awaiting their turnOpened so we recognise our own voice turns by exact content. `injectedAt`: when
+  // the current injection went out, so one whose turnOpened never arrives can be reaped.
   private readonly openTurns: OpenTurn[] = [];
   private readonly injectedPending: string[] = [];
   private injectedAt?: number;
   private readonly seenReplyUuids = new Set<string>();
 
-  // A monotonic id for the current injection, bumped on every inject AND every clearTurns. pump()
-  // captures it before awaiting inject() and re-checks it after, so a result that resolves late (after
-  // an interrupt/reset re-injected) is recognised as stale — by IDENTITY, not by the prompt string,
-  // which can repeat (the status/summary prompts are fixed canned text).
+  // Identity token for the current injection, bumped on every inject AND clearTurns. pump() captures it
+  // before awaiting inject() and re-checks after, so a late result is recognised as stale by IDENTITY,
+  // not by the prompt string (the canned status/summary prompts repeat).
   private injectSeq = 0;
 
   private readonly now: () => number;
@@ -115,9 +104,8 @@ export class TurnCoordinator {
     } else if (turn) {
       this.log("plugin turn ignored");
     }
-    // ANY close may have left the pane idle, so always try to drain a queued voice prompt — not just
-    // after a voice turn. (No open turn → the daemon started mid-turn, e.g. the bootstrap
-    // /voice-control:start; pump is then a safe no-op.)
+    // ANY close may have idled the pane → always try to drain the queue (no open turn = daemon started
+    // mid-turn, e.g. the bootstrap /voice-control:start; pump is then a no-op).
     void this.pump();
     this.deps.onStatusChange();
   }
@@ -158,17 +146,14 @@ export class TurnCoordinator {
     if (this.openTurns.length > 0) return; // Claude is mid-turn — wait for the pane to go idle
     const next = this.queue.shift();
     if (next === undefined) return;
-    const seq = ++this.injectSeq; // identity token for THIS injection
+    const seq = ++this.injectSeq;
     this.inFlight = next; // set before awaiting so a concurrent pump sees "busy"
     this.injectedAt = this.now();
     this.injectedPending.length = 0; // any leftover never opened a turn (stale) — start clean
     this.injectedPending.push(next); // turnOpened recognises this turn as ours by exact content
     this.deps.onStatusChange();
     const ok = await this.deps.inject(next);
-    // While we awaited, an interrupt/reset/re-inject may have superseded this injection. Recognise
-    // that by the seq token (NOT the prompt string — the canned status/summary prompts repeat), so a
-    // stale result can't clobber the current injection's state. Drop it.
-    if (this.injectSeq !== seq) return;
+    if (this.injectSeq !== seq) return; // superseded while awaiting (interrupt/reset/re-inject) → stale
     if (!ok) {
       this.inFlight = undefined;
       this.injectedAt = undefined;
@@ -186,9 +171,8 @@ export class TurnCoordinator {
     this.injectSeq++; // invalidate any in-flight inject() await so its late result is dropped as stale
   }
 
-  // Backstop: drop turns stuck longer than TURN_TTL_MS so the idle-gate can release queued voice
-  // prompts. Two stuck shapes: an OPEN turn that never closed, and an INJECTED prompt whose
-  // turnOpened never arrived. Reaping a voice/injection clears the injection lock.
+  // Backstop: drop turns stuck past TURN_TTL_MS so the idle-gate can release queued prompts. Two stuck
+  // shapes: an OPEN turn that never closed, and an INJECTED prompt whose turnOpened never arrived.
   private reapStaleTurns(): void {
     const cutoff = this.now() - TURN_TTL_MS;
     while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
