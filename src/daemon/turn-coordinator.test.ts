@@ -201,4 +201,57 @@ describe("TurnCoordinator", () => {
     await tick();
     expect(h.injected).toEqual(["a", "b"]);
   });
+
+  it("evicts the oldest reply uuid past the cap so the dedup set can't grow unbounded", () => {
+    const h = harness();
+    // Fill the dedup set with 100 unique uuids via orphan closes (uuids recorded, nothing to mirror).
+    for (let i = 0; i < 100; i++) h.coord.turnClosed(`r${i}`, `u${i}`);
+    expect(h.mirrored.length).toBe(0);
+
+    // A recent uuid still dedups: a duplicate Stop must NOT consume an open turn.
+    h.coord.turnOpened("kept");
+    h.coord.turnClosed("dup", "u99");
+    expect(h.mirrored.length).toBe(0);
+
+    // The 101st unique uuid pushes the set over the cap → evicts the oldest (u0); this close is new,
+    // so it consumes the still-open "kept" turn.
+    h.coord.turnClosed("r100", "u100");
+    expect(h.mirrored).toEqual([{ prompt: "kept", reply: "r100" }]);
+
+    // u0 was evicted, so a Stop carrying it is no longer deduped → it acts on a fresh open turn.
+    h.coord.turnOpened("after-evict");
+    h.coord.turnClosed("r0-again", "u0");
+    expect(h.mirrored).toContainEqual({ prompt: "after-evict", reply: "r0-again" });
+  });
+
+  it("drops a stale inject result that resolves after an interrupt re-injected (no clobber)", async () => {
+    // A controllable inject: the FIRST call hangs until released; later calls resolve immediately.
+    let releaseFirst: (() => void) | undefined;
+    const calls: string[] = [];
+    const coord = new TurnCoordinator({
+      inject: (text) => {
+        calls.push(text);
+        if (calls.length === 1) return new Promise<boolean>((res) => (releaseFirst = () => res(false)));
+        return Promise.resolve(true);
+      },
+      speakReply: () => {},
+      mirrorTypedTurn: () => {},
+      onStatusChange: () => {},
+      now: () => 1
+    });
+
+    coord.enqueueVoice("x"); // inject("x") starts and hangs; inFlight = "x"
+    await tick();
+    expect(calls).toEqual(["x"]);
+
+    coord.interruptWith("y"); // clears, re-injects "y" (resolves true); inFlight = "y"
+    await tick();
+    expect(calls).toEqual(["x", "y"]);
+    expect(coord.currentVoicePrompt).toBe("y");
+
+    releaseFirst?.(); // the stale first inject finally fails — must NOT clobber the live "y"
+    await tick();
+    expect(coord.currentVoicePrompt).toBe("y");
+    expect(coord.isWorking()).toBe(true);
+  });
 });

@@ -158,6 +158,9 @@ export class TurnCoordinator {
     this.injectedPending.push(next); // turnOpened recognises this turn as ours by exact content
     this.deps.onStatusChange();
     const ok = await this.deps.inject(next);
+    // While we awaited, an interrupt/reset/re-inject may have moved on — our `inFlight` is no longer
+    // `next`. The result is then stale: acting on it would clobber the current injection. Drop it.
+    if (this.inFlight !== next) return;
     if (!ok) {
       this.inFlight = undefined;
       this.injectedAt = undefined;
