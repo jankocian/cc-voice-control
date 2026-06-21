@@ -13,8 +13,7 @@ with that directory as an ABSOLUTE path — use `$HOME/...` (NOT `~`, which won'
 quotes) or `$PWD` for the current directory. It's quoted, so paths with spaces are fine.
 
 ```sh
-D="${CLAUDE_PLUGIN_DATA}"
-R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
+R="$HOME/.cache/cc-voice-control/runtime/${CMUX_SURFACE_ID:-default}.json"
 PORT=$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$R" 2>/dev/null)
 [ -z "$PORT" ] && { echo "no-daemon"; exit 0; }
 DIR=$(cd "TARGET_DIR" 2>/dev/null && pwd) || { echo "bad-path"; exit 0; }

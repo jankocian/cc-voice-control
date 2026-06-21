@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
 import { type BridgeClientRole, toBridgeBrowserSessionUrl, toBridgeWebSocketUrl } from "../shared/bridge-contract.js";
@@ -48,11 +48,17 @@ export function stateDir(): string {
  * When the surface is unknown (daemon launched outside cmux) we fall back to a stable
  * sentinel name so the path is still well-defined for the single-pane case.
  */
-const RUNTIME_DIR_NAME = "runtime";
 const RUNTIME_FALLBACK_SURFACE = "default";
 
+// The per-thread runtime file is hook↔daemon IPC: the daemon writes its port here and this pane's
+// Stop/UserPromptSubmit hooks read it to reach that daemon. It must live at a FIXED, machine-stable
+// path — NOT under $CLAUDE_PLUGIN_DATA — because a hook can inherit a DIFFERENT CLAUDE_PLUGIN_DATA than
+// the daemon. A Codex-companion session forces the session-wide CLAUDE_PLUGIN_DATA onto the hooks while
+// the start skill still launches the daemon under the voice-control dir; the two then never agree on
+// the path and every reply is silently dropped. $HOME is shared by both processes (same user), so
+// keying by $HOME + CMUX_SURFACE_ID is the one anchor they always share.
 export function runtimeDir(): string {
-  return join(stateDir(), RUNTIME_DIR_NAME);
+  return join(homedir(), ".cache", "cc-voice-control", "runtime");
 }
 
 /** Machine-level runtime.json — used ONLY for the "setup needed" signal (no daemon, no
