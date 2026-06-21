@@ -1,6 +1,6 @@
 /**
  * Compute a human label for a thread (one Claude pane) — the chip the phone shows in the
- * thread switcher. Pure-ish, isolated like history-ring.ts / shouldReap so the title-priority
+ * thread switcher. Pure-ish, isolated like transcript-projection.ts / shouldReap so the title-priority
  * and graceful-degrade logic is unit-testable without spawning git/cmux.
  *
  * The label is `{ title, repo, branch, cwd }`, where `title` is the single string shown on

@@ -8,6 +8,7 @@ import type {
   BridgeEnvelope,
   BrowserToDaemonEvent,
   DaemonToBrowserEvent,
+  HistoryTurn,
   InjectMode,
   SessionState,
   ThreadId,
@@ -24,12 +25,23 @@ import {
   toWebSocketUrl,
   type VoiceRemoteConfig
 } from "./config.js";
-import { buildHistoryEvent, HistoryRing, selectAudioReply } from "./history-ring.js";
 import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
+import { type ProjectedTurn, pairReplies } from "./transcript-projection.js";
+import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+type Audio = { audioBase64: string; mimeType: string };
+
+// A spoken prompt we injected, tracked until its reply is spoken. `id`/`ts` render the optimistic row
+// shown before the prompt lands in the transcript; `opened` is set on its UserPromptSubmit (confirming the
+// turn is ours); `userUuid`/`userTs` bind it to its native user record, after which the prompt is
+// identified by native uuid (not text) and the optimistic row is dropped.
+type PendingVoice = { id: string; text: string; ts: number; opened?: boolean; userUuid?: string; userTs?: number };
 
 // Reconnect backoff for transient bridge drops (a terminal 1008 close is handled separately).
 const RECONNECT_DELAY_MS = 1500;
@@ -38,9 +50,15 @@ const CMUX_HEALTH_INTERVAL_MS = 5000;
 // Safety ceiling on speech length (synthesizeSpeech chunks past the per-call TTS limit) so a runaway
 // reply can't fan out into unbounded TTS calls. Far above any real reply; ~40k ≈ 10 chunks.
 const MAX_SPEECH_CHARS = 40_000;
-// Recent Claude replies (+ their user messages, with audio) retained so a refreshed/2nd phone restores
-// the thread on reconnect.
-const HISTORY_REPLIES = 7;
+// Cap the projected thread (newest turns) sent to the phone, and the synthesized reply audio retained for
+// tap-to-play, so neither grows unbounded over a long session.
+const MAX_PROJECTED_TURNS = 40;
+const MAX_AUDIO_ENTRIES = 20;
+// Cap untracked-but-queued voice prompts (bounds memory if injections never open turns).
+const MAX_PENDING_VOICE = 16;
+// On a turn close, poll the transcript up to this long for the voice reply to flush before giving up.
+const SETTLE_TIMEOUT_MS = 12_000;
+const SETTLE_POLL_MS = 150;
 
 // Plugin-load root, three dirs up from this module either way (dist/daemon or src/daemon). Only used
 // to point a spawned `claude` at a `--plugin-dir`-loaded (dev) plugin.
@@ -93,10 +111,27 @@ export class VoiceDaemon {
   private healthTimer?: ReturnType<typeof setInterval>;
   private stopped = false;
 
-  // The turn state machine (inject queue, open-turn FIFO, classification, dedup, reaping). All the
-  // turn logic lives here, driven by the two hooks; the daemon just wires its side-effects (type into
-  // cmux, speak/mirror a reply, re-emit status). See turn-coordinator.ts.
+  // The voice injection queue + idle-gate (inject one spoken prompt at a time while Claude is idle) and
+  // working-state tracker. It does NOT touch conversation content — the transcript drives that. See
+  // turn-coordinator.ts.
   private readonly turns: TurnCoordinator;
+
+  // The ONLY state we keep of our own; everything the phone shows is projected from Claude's transcript.
+  //  - `audio`: synthesized reply audio keyed by native reply uuid, for tap-to-play + reconnect.
+  //  - `lastTranscriptPath`: the transcript the hooks last pointed us at, so `sync` can re-project without
+  //    a hook firing.
+  //  - `pending`: spoken prompts we injected, each tracked until its reply is spoken. While a prompt isn't
+  //    yet visible in the transcript it shows as an OPTIMISTIC row (`id`/`ts`); on its UserPromptSubmit we
+  //    BIND it to that native user record (`userUuid`/`userTs`) — from then on it's identified by native
+  //    uuid, not text, so a duplicate phrase or a terminal-typed collision can't mis-speak or mis-retire.
+  //  - `spoken`: reply uuids already spoken, so re-projecting on every event never double-speaks.
+  //  - `floor`: epoch ms below which projected turns are hidden (set on /clear|/compact so a new topic
+  //    doesn't show the previous one still sitting in the transcript tail).
+  private readonly audio = new Map<string, Audio>();
+  private lastTranscriptPath?: string;
+  private readonly pending: PendingVoice[] = [];
+  private readonly spoken = new Set<string>();
+  private floor = 0;
 
   // The spawning session's LIVE permission mode (forwarded each turn by the turn-open hook). A spawn
   // launches with `--permission-mode <this>` so it inherits the user's mode EXACTLY (env won't carry
@@ -107,10 +142,6 @@ export class VoiceDaemon {
   // thread_register so the phone follows the exact thread it asked for, then cleared.
   private pendingSpawnId = process.env.VOICE_SPAWN_ID;
 
-  // The durable thread (last HISTORY_REPLIES replies + their user messages, with audio): catches up a
-  // reconnecting phone via a `history` event and serves reply audio on demand (`get_audio`).
-  private readonly history = new HistoryRing(HISTORY_REPLIES);
-
   // Last-computed thread label (repo·branch·cwd · cmux title). Sent in thread_register and refreshed
   // on the health tick when it changes; starts with a cheap sync fallback so registration never blocks.
   private label: ThreadInfo["label"];
@@ -120,12 +151,6 @@ export class VoiceDaemon {
     this.label = { title: init.threadId };
     this.turns = new TurnCoordinator({
       inject: (text) => this.injectIntoPane(text),
-      speakReply: (reply) => void this.speak(this.emitClaudeTurn(reply), reply),
-      mirrorTypedTurn: (prompt, reply) => {
-        // The user typed this in the terminal: show their REAL prompt, then speak the reply (their pick).
-        this.emitUserTurn(prompt, true);
-        void this.speak(this.emitClaudeTurn(reply), reply);
-      },
       onStatusChange: () => this.emitStatus(),
       log: (message) => console.error(message)
     });
@@ -216,7 +241,8 @@ export class VoiceDaemon {
           }
           try {
             if (route === "/turn-open") {
-              const { prompt, permissionMode } = JSON.parse(body || "{}") as {
+              const { transcriptPath, prompt, permissionMode } = JSON.parse(body || "{}") as {
+                transcriptPath?: string;
                 prompt?: string;
                 permissionMode?: string;
               };
@@ -224,20 +250,16 @@ export class VoiceDaemon {
               if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
                 this.inheritedPermissionMode = permissionMode;
               }
-              this.turns.turnOpened(typeof prompt === "string" ? prompt : "");
+              if (transcriptPath) this.lastTranscriptPath = transcriptPath;
+              const realPrompt = typeof prompt === "string" ? prompt : "";
+              this.turns.turnOpened(realPrompt);
+              this.bindVoicePrompt(realPrompt); // if this turn is one of ours, bind it to its native uuid
+              this.projectAndEmit(); // the new user turn is in the transcript now → show it, keyed natively
             } else {
-              // The Stop hook sends the reply AND the prompt it answered (linked in the transcript) so
-              // the coordinator can pair by identity, not FIFO position.
-              const { prompt, reply, replyUuid } = JSON.parse(body || "{}") as {
-                prompt?: string;
-                reply?: string;
-                replyUuid?: string;
-              };
-              this.turns.turnClosed(
-                typeof prompt === "string" ? prompt : "",
-                typeof reply === "string" ? reply : "",
-                typeof replyUuid === "string" ? replyUuid : undefined
-              );
+              const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
+              if (transcriptPath) this.lastTranscriptPath = transcriptPath;
+              this.turns.turnClosed();
+              void this.handleTurnClose(); // re-project (waiting for the flush) + speak a voice reply
             }
           } catch {
             // ignore malformed hook payloads
@@ -276,15 +298,19 @@ export class VoiceDaemon {
     );
   }
 
-  // Handle a /reset POST (SessionStart on clear/compact): a new topic in the SAME pane, so wipe
-  // the voice history and push an empty `history` so the phone drops the stale thread view.
+  // Handle a /reset POST (SessionStart on clear/compact): a new topic in the SAME pane. Raise the
+  // projection floor to now so the previous topic — still sitting in the transcript tail — is hidden, drop
+  // our voice state, and push the (now empty) projection so the phone clears the stale thread.
   private handleReset(): void {
-    this.history.clear();
+    this.floor = Date.now();
+    this.audio.clear();
+    this.spoken.clear();
+    this.pending.length = 0;
     // /clear or /compact ends the current topic: drop every in-flight/queued/open turn (so a stale
     // turn can't be spoken or wedge the idle-gate) — reset() also re-emits idle status.
     this.turns.reset();
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
-    this.sendToBrowser(buildHistoryEvent(this.history));
+    this.projectAndEmit();
   }
 
   // ---- bridge ----------------------------------------------------------------
@@ -339,31 +365,39 @@ export class VoiceDaemon {
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
-        this.turns.enqueueVoice("Give me a brief spoken status of what you're doing right now.");
+        this.queueVoice("Give me a brief spoken status of what you're doing right now.", "queue");
         return;
       case "summary_request":
-        this.turns.enqueueVoice("Briefly summarize what you've done so far, for the phone.");
+        this.queueVoice("Briefly summarize what you've done so far, for the phone.", "queue");
         return;
       case "stop_task":
         // Esc the running turn → Claude goes idle; the coordinator drops every open turn and drains
         // the queue (a late Stop for a dropped turn lands on an empty FIFO and is ignored).
         await cmuxInterrupt(this.init.surface);
+        this.pending.length = 0;
         this.turns.interrupt();
+        this.projectAndEmit();
         return;
       case "sync":
-        // The phone (re)connected and wants the current state. Replaces a heartbeat:
-        // the daemon otherwise emits status only on change, which a fresh phone misses.
-        // Then send the retained thread so a refresh / 2nd browser restores history. Text
-        // only — no audio is pushed here (iOS reconnects constantly; the phone fetches each
-        // reply's audio on demand via `get_audio`, which it treats as tap-to-play).
+        // The phone (re)connected and wants the current state. Replaces a heartbeat (the daemon otherwise
+        // emits status only on change, which a fresh phone misses), then re-projects the thread so a
+        // refresh / 2nd browser restores it. Only emit history once we know the transcript path: a `history`
+        // snapshot is authoritative (the phone replaces with it), so emitting an empty one before the first
+        // hook of a freshly-(re)started daemon would wipe the phone's thread. Text only — audio on demand.
         this.emitStatus();
-        this.sendToBrowser(buildHistoryEvent(this.history));
+        if (this.lastTranscriptPath) this.projectAndEmit();
         return;
-      case "get_audio":
-        // Tap-to-play on a row whose audio isn't cached locally: serve it from the ring, or
-        // tell the phone gracefully when it has been evicted.
-        this.sendToBrowser(selectAudioReply(this.history, event.requestId));
+      case "get_audio": {
+        // Tap-to-play on a row whose audio isn't cached locally: serve it from our store, or tell the
+        // phone gracefully when it has been evicted.
+        const audio = this.audio.get(event.requestId);
+        this.sendToBrowser(
+          audio
+            ? { type: "tts_audio", requestId: event.requestId, replay: true, ...audio }
+            : { type: "error", requestId: event.requestId, message: "Audio for that reply is no longer available." }
+        );
         return;
+      }
       case "spawn_thread": {
         // The phone "+" : open a NEW cmux workspace running Claude + /voice-control:start. It reads
         // the same session.json → joins this same session as a new thread (same QR). Routed here
@@ -440,14 +474,20 @@ export class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    // Record + echo the user turn so the phone shows it and can reconcile it against history.
-    this.emitUserTurn(transcript);
-    if (mode === "interrupt") {
-      await cmuxInterrupt(this.init.surface); // Esc the running turn, then run this transcript next
-      this.turns.interruptWith(transcript);
-    } else {
-      this.turns.enqueueVoice(transcript);
-    }
+    if (mode === "interrupt") await cmuxInterrupt(this.init.surface); // Esc the running turn, run this next
+    this.queueVoice(transcript, mode);
+  }
+
+  // Queue a spoken prompt: track it (so we speak its reply + show it as an optimistic row until it lands in
+  // the transcript — possibly minutes later if Claude is busy), then hand it to the injection queue. This
+  // is the only conversation content we originate; everything else is projected from the transcript.
+  private queueVoice(text: string, mode: InjectMode): void {
+    if (mode === "interrupt") this.pending.length = 0; // Esc dropped the backlog → its optimistic rows go too
+    this.pending.push({ id: randomUUID(), text, ts: Date.now() });
+    while (this.pending.length > MAX_PENDING_VOICE) this.pending.shift();
+    if (mode === "interrupt") this.turns.interruptWith(text);
+    else this.turns.enqueueVoice(text);
+    this.projectAndEmit();
   }
 
   // ---- injection (driven by the TurnCoordinator) ----------------------------
@@ -467,61 +507,156 @@ export class VoiceDaemon {
       }
       return true;
     }
+    // The coordinator releases its slot; drop the prompt we couldn't deliver (it never reached the
+    // transcript) so its optimistic row doesn't linger and can't be mis-bound later.
+    const i = this.pending.findIndex((p) => p.userUuid === undefined && p.text.trim() === text.trim());
+    if (i >= 0) this.pending.splice(i, 1);
     // Don't hard-fail "listening" on one send: re-probe (only a positive pane-gone verdict flips it).
     void this.refreshCmuxHealth();
     this.sendToBrowser({
       type: "error",
       message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
     });
+    this.projectAndEmit();
     return false;
   }
 
-  // Add a user turn to the ring and echo it live so the phone shows it (and can reconcile it against
-  // history). Used for both a voice transcript and a mirrored terminal-typed message.
-  private emitUserTurn(text: string, mirrored = false): void {
-    const entry = this.history.add("user", randomUUID(), text);
-    this.sendToBrowser({
-      type: "transcript",
-      requestId: entry.requestId,
-      seq: entry.seq,
-      timestamp: entry.timestamp,
-      text,
-      mirrored
-    });
+  // ---- transcript projection (the conversation source of truth) --------------
+
+  // Project the transcript into the phone thread and send it. Called on every turn event + on sync, so the
+  // phone always converges to ground truth. Pure read; never throws into the caller.
+  private projectAndEmit(): void {
+    this.sendToBrowser(this.historyFrom(this.projectedNow()));
   }
 
-  // Add a Claude reply to the ring and echo it live; returns its requestId so the caller can attach
-  // synthesized audio (voice turns auto-speak; mirrored terminal replies stay text-only).
-  private emitClaudeTurn(text: string): string {
-    const entry = this.history.add("claude", randomUUID(), text);
-    this.sendToBrowser({
-      type: "claude_reply",
-      requestId: entry.requestId,
-      seq: entry.seq,
-      timestamp: entry.timestamp,
-      text
-    });
-    return entry.requestId;
+  private projectedNow(): ProjectedTurn[] {
+    if (!this.lastTranscriptPath) return [];
+    return projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor);
   }
 
-  private async speak(requestId: string, text: string): Promise<void> {
+  // Mark a just-opened turn as ours if it matches a queued voice prompt (by the hook's REAL prompt text —
+  // the one authoritative point where text is trusted, at the instant the turn opens). From here the entry
+  // is bound to its native user record by uuid (bindPending), so duplicates / terminal collisions can't
+  // mis-target it.
+  private bindVoicePrompt(prompt: string): void {
+    const text = prompt.trim();
+    if (!text) return;
+    const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
+    if (entry) entry.opened = true;
+  }
+
+  // Bind each opened-but-unbound voice entry to its native user record (newest matching one not already
+  // claimed), capturing its uuid + timestamp. Runs on every projection, so a prompt whose record wasn't
+  // flushed at turn-open binds as soon as it appears. Once bound, the entry shows as the native row, not an
+  // optimistic one.
+  private bindPending(turns: ProjectedTurn[]): void {
+    const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
+    for (const entry of this.pending) {
+      if (!entry.opened || entry.userUuid) continue;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const t = turns[i];
+        if (t.role === "user" && t.text.trim() === entry.text.trim() && !claimed.has(t.uuid)) {
+          entry.userUuid = t.uuid;
+          entry.userTs = t.timestamp;
+          claimed.add(t.uuid);
+          break;
+        }
+      }
+    }
+  }
+
+  // Build the `history` snapshot: native rows from the transcript, plus an optimistic row for each voice
+  // prompt not yet visible there (unbound) — the phone orders by native timestamp, so they sort newest.
+  // The snapshot is the complete, deduped, ordered thread; the phone just displays it.
+  private historyFrom(turns: ProjectedTurn[]): Extract<DaemonToBrowserEvent, { type: "history" }> {
+    this.bindPending(turns);
+    const rows: HistoryTurn[] = [
+      ...turns.map((t) => ({
+        requestId: t.uuid,
+        timestamp: t.timestamp,
+        role: t.role,
+        text: t.text,
+        hasAudio: this.audio.has(t.uuid)
+      })),
+      ...this.pending
+        .filter((p) => p.userUuid === undefined)
+        .map((p) => ({ requestId: p.id, timestamp: p.ts, role: "user" as const, text: p.text, hasAudio: false }))
+    ];
+    return { type: "history", turns: rows };
+  }
+
+  // After a turn closes: wait until every voice turn we're tracking has its reply flushed (positive
+  // evidence, not just "the file stopped changing" — the Stop hook can fire before the reply lands), then
+  // re-project and speak each unspoken voice reply. Replies are matched to our prompts by native uuid, so a
+  // duplicate phrase or a terminal-typed turn with the same text can never be mis-spoken; `spoken` makes it
+  // idempotent + self-healing. Hard timeout so a reply-less / typed turn never hangs.
+  private async handleTurnClose(): Promise<void> {
+    if (!this.lastTranscriptPath) return;
+    let turns = this.projectedNow();
+    this.sendToBrowser(this.historyFrom(turns)); // show the turn promptly, before waiting on the reply
+    const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      this.bindPending(turns);
+      if (this.pending.every((p) => !p.opened || this.findReply(turns, p))) break; // all tracked replies in
+      await sleep(SETTLE_POLL_MS);
+      turns = this.projectedNow();
+    }
+    this.sendToBrowser(this.historyFrom(turns));
+
+    for (let i = this.pending.length - 1; i >= 0; i--) {
+      const entry = this.pending[i];
+      if (!entry.opened) continue;
+      const reply = this.findReply(turns, entry);
+      if (!reply || this.spoken.has(reply.uuid)) continue;
+      this.pending.splice(i, 1);
+      this.remember(this.spoken, reply.uuid, MAX_AUDIO_ENTRIES * 4);
+      void this.speak(reply.uuid, reply.text);
+    }
+  }
+
+  // The reply to a bound voice prompt: the one whose paired prompt IS our native user record (by uuid).
+  // Fallback to the earliest unspoken reply after our prompt's timestamp for the rare case its user record
+  // has scrolled out of the read tail (so pairReplies can't see it). Undefined until the reply has flushed.
+  private findReply(turns: ProjectedTurn[], entry: PendingVoice): ProjectedTurn | undefined {
+    if (!entry.userUuid) return undefined;
+    const paired = pairReplies(turns).find((p) => p.prompt?.uuid === entry.userUuid)?.reply;
+    if (paired) return paired;
+    if (entry.userTs === undefined) return undefined;
+    return turns.find((t) => t.role === "claude" && t.timestamp > (entry.userTs ?? 0) && !this.spoken.has(t.uuid));
+  }
+
+  // Synthesize a reply's audio, retain it (keyed by native reply uuid) for tap-to-play + reconnect, and
+  // push it to the phone to auto-play now.
+  private async speak(uuid: string, text: string): Promise<void> {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
-      // An empty result means there was nothing to synthesize (empty/whitespace reply) — no audio.
-      if (!audioBase64) return;
-      // Stash the audio on the matching reply entry so a reconnecting phone can fetch it on
-      // demand (no-op if the entry has since been evicted from the ring).
-      this.history.attachAudio(requestId, { audioBase64, mimeType });
-      this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
+      if (!audioBase64) return; // nothing to synthesize (empty/whitespace reply)
+      this.audio.set(uuid, { audioBase64, mimeType });
+      while (this.audio.size > MAX_AUDIO_ENTRIES) {
+        const oldest = this.audio.keys().next().value;
+        if (oldest === undefined) break;
+        this.audio.delete(oldest);
+      }
+      this.sendToBrowser({ type: "tts_audio", requestId: uuid, audioBase64, mimeType });
     } catch (error) {
       // The text reply already reached the phone; surface the audio failure (don't swallow it) so a
       // config/model/rate-limit problem is visible instead of "the voice just didn't arrive".
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[tts] synthesis failed for ${requestId}: ${message}`);
+      console.error(`[tts] synthesis failed for ${uuid}: ${message}`);
       this.sendToBrowser({
         type: "error",
         message: "Couldn't speak that reply — its text is shown, but audio failed."
       });
+    }
+  }
+
+  // Add to a bounded set (FIFO eviction) so a long session can't leak.
+  private remember(set: Set<string>, value: string, cap: number): void {
+    set.add(value);
+    while (set.size > cap) {
+      const oldest = set.values().next().value;
+      if (oldest === undefined) break;
+      set.delete(oldest);
     }
   }
 

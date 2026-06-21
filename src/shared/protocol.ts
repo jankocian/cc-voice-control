@@ -21,19 +21,21 @@ export type SessionState = {
 // the running turn (Esc) and run immediately.
 export type InjectMode = "queue" | "interrupt";
 
-// One entry of the durable conversation thread the daemon retains (a ring of the last
-// few turns). Text only — audio is fetched on demand via `get_audio`, never bundled into
-// history (iOS reconnects constantly; re-pushing audio every time would burn bandwidth).
+// One conversational turn projected from Claude Code's transcript (see transcript-projection.ts). The
+// transcript is the source of truth, so a turn IS a native record: `requestId` is its native `uuid`
+// (identity + dedup key) and `timestamp` is its native record time (order key) — both stable across
+// daemon restarts, unlike the old daemon-monotonic seq. Text only; audio is fetched on demand via
+// `get_audio` (iOS reconnects constantly; re-pushing audio every time would burn bandwidth).
 export type HistoryTurn = {
-  // Daemon-monotonic sequence number; the phone merges/orders the thread by this.
-  seq: number;
-  // Creation wall-clock (Date.now()).
-  timestamp: number;
+  // The native transcript record uuid. Identity: the phone dedupes by this, so a turn re-sent in a later
+  // snapshot is never duplicated, and audio is keyed to it.
   requestId: string;
+  // Native record timestamp (epoch ms). The phone orders the thread newest-first by this.
+  timestamp: number;
   role: "user" | "claude";
   text: string;
-  // True for a reply whose synthesized audio is still in the ring (fetchable). The phone
-  // renders such rows as tap-to-play even before the audio bytes have been requested.
+  // True for a reply whose synthesized audio is still retained (fetchable). The phone renders such rows
+  // as tap-to-play even before the audio bytes have been requested.
   hasAudio: boolean;
 };
 
@@ -55,16 +57,13 @@ export type BrowserToDaemonEvent =
 
 export type DaemonToBrowserEvent =
   | { type: "session_status"; state: SessionState; memory: { currentTask?: string } }
-  // `mirrored` marks a user message the daemon echoed from a TERMINAL-typed turn (not sent from the
-  // phone) — the phone shows it in history but suppresses the "Sent ✓" flash / recording reset.
-  | { type: "transcript"; requestId: string; seq: number; timestamp: number; text: string; mirrored?: boolean }
-  | { type: "claude_reply"; requestId: string; seq: number; timestamp: number; text: string }
   // `replay` marks a reply re-sent on reconnect: the phone shows it for tap-to-play
   // instead of auto-playing it (a reply the user already missed should not start talking).
   | { type: "tts_audio"; requestId: string; audioBase64: string; mimeType: string; replay?: boolean }
-  // The retained thread, sent in response to `sync`. Replaces single-reply replay: the
-  // phone reconciles these (text-only) turns to restore history after a refresh / on a
-  // 2nd browser, then fetches audio per row on demand.
+  // The projected conversation thread, the SINGLE channel for transcript content. The daemon re-projects
+  // it from Claude's transcript on every turn event (and on `sync`) and sends the snapshot; the phone
+  // reconciles by native uuid + native timestamp, so it self-heals to ground truth and can never drift,
+  // duplicate, or reorder. Text only; audio is fetched per row on demand.
   | { type: "history"; turns: HistoryTurn[] }
   // This daemon just spawned a new thread (phone "+" OR the /voice-control:spawn skill). `spawnId`
   // is a one-shot correlation key carried end-to-end (spawn command env → child daemon → its first
