@@ -4574,7 +4574,7 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 // node_modules/zod/v4/classic/external.js
@@ -18904,10 +18904,9 @@ var ConfigSchema = exports_external.object({
 function stateDir() {
   return process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
 }
-var RUNTIME_DIR_NAME = "runtime";
 var RUNTIME_FALLBACK_SURFACE = "default";
 function runtimeDir() {
-  return join(stateDir(), RUNTIME_DIR_NAME);
+  return join(homedir(), ".cache", "cc-voice-control", "runtime");
 }
 function runtimePath() {
   return join(stateDir(), "runtime.json");
