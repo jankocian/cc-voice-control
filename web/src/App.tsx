@@ -11,10 +11,18 @@ import { usePlayback } from "./hooks/usePlayback";
 import { type RecordedClip, type RecorderError, useRecorder } from "./hooks/useRecorder";
 import { useThreads } from "./hooks/useThreads";
 import { useWakeLock } from "./hooks/useWakeLock";
-import { type Message, makeMessage, messageFromHistory, reconcileMessages } from "./lib/messages";
-import type { RosterEvent, RosterThread, ThreadId } from "./lib/protocol";
+import { type Message, makeMessage, messageFromHistory } from "./lib/messages";
+import type { RosterEvent, ThreadId } from "./lib/protocol";
 import type { SessionCredentials } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
+import {
+  DEFAULT_RUNTIME,
+  EMPTY_MESSAGES,
+  pruneThreadMap,
+  reconcileAndPrune,
+  rosterRuntime,
+  updateThreadMessages
+} from "./lib/thread-messages";
 
 const RECORDER_ERROR_TEXT: Record<RecorderError, string> = {
   "not-supported": "This browser cannot record audio",
@@ -22,11 +30,6 @@ const RECORDER_ERROR_TEXT: Record<RecorderError, string> = {
   empty: "Didn't catch that — tap to retry",
   "read-failed": "Could not read the recording"
 };
-
-// A thread that has never sent a session_status yet falls back to its roster snapshot for the
-// runtime (the daemon folds state/listening into the roster too). currentTask only arrives via
-// session_status, so it's undefined until the first one.
-const DEFAULT_RUNTIME: BridgeRuntime = { state: "idle", currentTask: undefined, listening: true };
 
 export function App({ credentials }: { credentials: SessionCredentials }) {
   const { flash, show: showFlash } = useFlash();
@@ -468,57 +471,6 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   );
 }
 
-// A stable empty array so threads with no messages yet don't churn the pager memo.
-const EMPTY_MESSAGES: Message[] = [];
-
 // How long after tapping "+" we keep following the spawn (focus the next new thread). Long enough
 // for a fresh pane's daemon to launch + register; after this an unrelated join won't steal focus.
 const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
-
-// Fall back to a thread's roster snapshot (state/listening) for its runtime before its first
-// session_status arrives. currentTask is only on session_status, so it stays undefined here.
-function rosterRuntime(thread: RosterThread | undefined): BridgeRuntime | undefined {
-  if (!thread) return undefined;
-  return { state: thread.state, listening: thread.listening, currentTask: undefined };
-}
-
-// Apply a message-list update to one thread in the per-thread Map (immutably, so React re-renders).
-function updateThreadMessages(
-  setMap: React.Dispatch<React.SetStateAction<Map<ThreadId, Message[]>>>,
-  threadId: ThreadId,
-  update: (prev: Message[]) => Message[]
-): void {
-  setMap((prev) => {
-    const next = new Map(prev);
-    next.set(threadId, update(prev.get(threadId) ?? []));
-    return next;
-  });
-}
-
-// Reconcile incoming rows into the thread (merge/dedup/order by seq), then drop cached audio for
-// any row that fell out of the capped window — preserving the bounded-memory pruning.
-function reconcileAndPrune(prev: Message[], incoming: Message[], dropAudio: (requestId: string) => void): Message[] {
-  const next = reconcileMessages(prev, incoming);
-  const kept = new Set(next.map((m) => m.requestId).filter((id): id is string => id !== undefined));
-  for (const message of prev) {
-    if (message.requestId && !kept.has(message.requestId)) dropAudio(message.requestId);
-  }
-  return next;
-}
-
-// Drop entries whose threadId is no longer in `live`; returns the same map ref when nothing changed
-// (so it never forces a re-render). `onDrop` releases any resource the evicted value held.
-function pruneThreadMap<V>(
-  map: Map<ThreadId, V>,
-  live: ReadonlySet<ThreadId>,
-  onDrop?: (value: V) => void
-): Map<ThreadId, V> {
-  let next: Map<ThreadId, V> | null = null;
-  for (const [threadId, value] of map) {
-    if (live.has(threadId)) continue;
-    next ??= new Map(map);
-    next.delete(threadId);
-    onDrop?.(value);
-  }
-  return next ?? map;
-}
