@@ -70,12 +70,13 @@ function readRuntime() {
 function post(port) {
   return new Promise((resolve, reject) => {
     const req = request(
-      { host: "127.0.0.1", port, path: "/reset", method: "POST", headers: { "content-length": 0 } },
+      { host: "127.0.0.1", port, path: "/reset", method: "POST", headers: { "content-length": 0 }, timeout: 2000 },
       (res) => {
         res.resume();
         res.on("end", resolve);
       }
     );
+    req.on("timeout", () => req.destroy());
     req.on("error", reject);
     req.end();
   });

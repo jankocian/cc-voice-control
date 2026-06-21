@@ -285,10 +285,12 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     const now = Date.now();
     const connected = (threadId: ThreadId) => this.daemonSocket(threadId) !== undefined;
     // Prune long-offline ghosts from storage so they can't accumulate across a restart-heavy session
-    // (buildRoster also excludes them from this snapshot).
-    for (const [key, value] of stored) {
-      if (isGhostThread(value, connected(threadIdFromKey(key)), now)) void this.ctx.storage.delete(key);
-    }
+    // (buildRoster also excludes them from this snapshot). Awaited as one batch — unawaited DO storage
+    // writes can silently drop.
+    const ghosts = [...stored]
+      .filter(([key, v]) => isGhostThread(v, connected(threadIdFromKey(key)), now))
+      .map(([key]) => key);
+    if (ghosts.length > 0) await this.ctx.storage.delete(ghosts);
     send(target, { channel: "roster", event: { type: "thread_roster", threads: buildRoster(stored, connected, now) } });
   }
 

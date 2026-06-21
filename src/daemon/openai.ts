@@ -7,6 +7,33 @@ const OPENAI_BASE = "https://api.openai.com/v1";
  *  buffers are concatenated, so nothing is ever truncated. */
 export const MAX_TTS_INPUT_CHARS = 4096;
 
+// Bail on a hung OpenAI request rather than freezing the daemon. Generous — a long reply chunks into
+// several calls, each well under this.
+const OPENAI_TIMEOUT_MS = 30_000;
+
+async function openaiFetch(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// OpenAI errors are JSON like {"error":{"message":"…"}} — surface that message when present, else the
+// raw body, so a failure reads cleanly instead of dumping the whole envelope.
+function openaiError(label: string, status: number, body: string): Error {
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: string } };
+    if (parsed?.error?.message) detail = parsed.error.message;
+  } catch {
+    // not JSON — keep the raw body
+  }
+  return new Error(`${label} failed (${status}): ${detail}`);
+}
+
 /** Pick an advisory filename extension from the upload MIME. OpenAI sniffs the
  *  container, but a matching extension avoids any edge-case ambiguity. */
 function filenameForMime(mimeType: string): string {
@@ -30,7 +57,7 @@ export async function transcribeAudio(config: VoiceRemoteConfig, audio: Uint8Arr
   // We only need the final transcript string; "text" returns it raw (no JSON envelope).
   form.append("response_format", "text");
 
-  const response = await fetch(`${OPENAI_BASE}/audio/transcriptions`, {
+  const response = await openaiFetch(`${OPENAI_BASE}/audio/transcriptions`, {
     method: "POST",
     headers: { authorization: `Bearer ${config.openaiApiKey}` },
     body: form
@@ -38,7 +65,7 @@ export async function transcribeAudio(config: VoiceRemoteConfig, audio: Uint8Arr
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`OpenAI speech-to-text failed (${response.status}): ${body}`);
+    throw openaiError("OpenAI speech-to-text", response.status, body);
   }
 
   return (await response.text()).trim();
@@ -49,7 +76,7 @@ export type SynthesizedSpeech = { audioBase64: string; mimeType: string };
 /** One OpenAI /audio/speech call for a single chunk that already fits the input limit.
  *  Returns the raw mp3 bytes so callers can concatenate frames across chunks. */
 async function synthesizeChunk(config: VoiceRemoteConfig, text: string, voiceOverride?: string): Promise<Buffer> {
-  const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
+  const response = await openaiFetch(`${OPENAI_BASE}/audio/speech`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${config.openaiApiKey}`,
@@ -66,7 +93,7 @@ async function synthesizeChunk(config: VoiceRemoteConfig, text: string, voiceOve
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`OpenAI text-to-speech failed (${response.status}): ${body}`);
+    throw openaiError("OpenAI text-to-speech", response.status, body);
   }
 
   return Buffer.from(await response.arrayBuffer());
@@ -86,6 +113,8 @@ export async function synthesizeSpeech(
   text: string,
   voiceOverride?: string
 ): Promise<SynthesizedSpeech> {
+  // Empty / whitespace-only input would 400 the API — nothing to say, so return empty audio.
+  if (!text.trim()) return { audioBase64: "", mimeType: "audio/mpeg" };
   // Fast path: short replies stay a single API call.
   if (text.length <= MAX_TTS_INPUT_CHARS) {
     const buffer = await synthesizeChunk(config, text, voiceOverride);
@@ -157,10 +186,11 @@ export function splitForTts(text: string, limit: number = MAX_TTS_INPUT_CHARS): 
  *  cutting a surrogate pair in half, so no chunk handed to the API carries a lone
  *  surrogate half. Always makes forward progress (no infinite loop), even at limit 1. */
 function hardSplit(text: string, limit: number): string[] {
+  const safeLimit = Math.max(1, limit); // a non-positive limit would never advance `end` → infinite loop
   const pieces: string[] = [];
   let i = 0;
   while (i < text.length) {
-    let end = Math.min(i + limit, text.length);
+    let end = Math.min(i + safeLimit, text.length);
     // If the cut would land just after a high surrogate, back off one unit to keep the
     // pair whole — but only when that still advances past `i`.
     if (end < text.length && end - 1 > i) {
