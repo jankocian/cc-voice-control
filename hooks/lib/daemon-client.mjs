@@ -4,16 +4,16 @@
 // hook scripts.
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
-// Plugin runtime state lives in Claude Code's managed per-plugin data dir ($CLAUDE_PLUGIN_DATA,
-// exported to hook processes), never in ~/.config. Per-thread file runtime/<surfaceId>.json (matches
-// config.ts#threadRuntimePath); the hook runs in its pane, so $CMUX_SURFACE_ID names its own daemon.
+// The per-thread runtime file is hook↔daemon IPC; it lives at a FIXED $HOME path — NOT under
+// $CLAUDE_PLUGIN_DATA — because a hook can inherit a DIFFERENT CLAUDE_PLUGIN_DATA than the daemon (a
+// Codex-companion session forces the session-wide value onto hooks). $HOME + CMUX_SURFACE_ID is the
+// anchor both processes share. MUST match config.ts#runtimeDir exactly.
 function runtimePath() {
-  const stateDir = process.env.CLAUDE_PLUGIN_DATA || join(tmpdir(), "cc-voice-control");
   const surface = process.env.CMUX_SURFACE_ID || "default";
-  return join(stateDir, "runtime", `${surface}.json`);
+  return join(homedir(), ".cache", "cc-voice-control", "runtime", `${surface}.json`);
 }
 
 /** The daemon's runtime info for this pane (`{ port, pid, … }`), or undefined if it isn't running. */
