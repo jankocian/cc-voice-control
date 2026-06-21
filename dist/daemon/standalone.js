@@ -19478,22 +19478,168 @@ function renderQr(text, margin = 2) {
   return renderQrUnicode(encodeQr(text), margin);
 }
 
+// src/daemon/spawn-command.ts
+var PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
+function permissionModeArg(mode) {
+  return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
+}
+function shellSingleQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+function buildClaudeSpawnCommand({ spawnId, pluginDir, permissionMode }) {
+  const pluginDirArg = pluginDir ? `--plugin-dir ${shellSingleQuote(pluginDir)} ` : "";
+  return `VOICE_SPAWN_ID=${spawnId} claude ${pluginDirArg}${permissionModeArg(permissionMode)}/voice-control:start`;
+}
+
+// src/daemon/turn-coordinator.ts
+function isSlashCommand(prompt) {
+  return prompt.trimStart().startsWith("/");
+}
+var TURN_TTL_MS = 20 * 60 * 1000;
+var REPLY_UUID_CAP = 100;
+
+class TurnCoordinator {
+  deps;
+  inFlight;
+  queue = [];
+  openTurns = [];
+  injectedPending = [];
+  injectedAt;
+  seenReplyUuids = new Set;
+  injectSeq = 0;
+  now;
+  constructor(deps) {
+    this.deps = deps;
+    this.now = deps.now ?? Date.now;
+  }
+  isWorking() {
+    return this.openTurns.length > 0 || this.inFlight !== undefined;
+  }
+  get currentVoicePrompt() {
+    return this.inFlight;
+  }
+  enqueueVoice(text) {
+    this.queue.push(text);
+    this.pump();
+  }
+  turnOpened(prompt) {
+    this.reapStaleTurns();
+    this.openTurns.push({ kind: this.classify(prompt), prompt, openedAt: this.now() });
+    this.deps.onStatusChange();
+  }
+  turnClosed(reply, replyUuid) {
+    if (replyUuid) {
+      if (this.seenReplyUuids.has(replyUuid))
+        return;
+      this.seenReplyUuids.add(replyUuid);
+      if (this.seenReplyUuids.size > REPLY_UUID_CAP) {
+        const oldest = this.seenReplyUuids.values().next().value;
+        if (oldest !== undefined)
+          this.seenReplyUuids.delete(oldest);
+      }
+    }
+    const turn = this.openTurns.shift();
+    if (turn?.kind === "voice") {
+      this.log(`voice reply, ${reply.length} chars`);
+      this.inFlight = undefined;
+      this.injectedAt = undefined;
+      if (reply)
+        this.deps.speakReply(reply);
+    } else if (turn?.kind === "typed") {
+      this.log(`typed reply, ${reply.length} chars`);
+      if (reply)
+        this.deps.mirrorTypedTurn(turn.prompt, reply);
+    } else if (turn) {
+      this.log("plugin turn ignored");
+    }
+    this.pump();
+    this.deps.onStatusChange();
+  }
+  interrupt() {
+    this.clearTurns();
+    this.deps.onStatusChange();
+    this.pump();
+  }
+  interruptWith(text) {
+    this.clearTurns();
+    this.queue.unshift(text);
+    this.pump();
+  }
+  reset() {
+    this.clearTurns();
+    this.queue.length = 0;
+    this.deps.onStatusChange();
+  }
+  classify(prompt) {
+    const trimmed = prompt.trim();
+    if (this.injectedPending.length > 0 && this.injectedPending[0].trim() === trimmed) {
+      this.injectedPending.shift();
+      return "voice";
+    }
+    return isSlashCommand(prompt) ? "plugin" : "typed";
+  }
+  async pump() {
+    this.reapStaleTurns();
+    if (this.inFlight !== undefined)
+      return;
+    if (this.openTurns.length > 0)
+      return;
+    const next = this.queue.shift();
+    if (next === undefined)
+      return;
+    const seq = ++this.injectSeq;
+    this.inFlight = next;
+    this.injectedAt = this.now();
+    this.injectedPending.length = 0;
+    this.injectedPending.push(next);
+    this.deps.onStatusChange();
+    const ok = await this.deps.inject(next);
+    if (this.injectSeq !== seq)
+      return;
+    if (!ok) {
+      this.inFlight = undefined;
+      this.injectedAt = undefined;
+      this.injectedPending.pop();
+      this.deps.onStatusChange();
+      this.pump();
+    }
+  }
+  clearTurns() {
+    this.inFlight = undefined;
+    this.injectedAt = undefined;
+    this.openTurns.length = 0;
+    this.injectedPending.length = 0;
+    this.injectSeq++;
+  }
+  reapStaleTurns() {
+    const cutoff = this.now() - TURN_TTL_MS;
+    while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
+      const stale = this.openTurns.shift();
+      if (stale?.kind === "voice") {
+        this.inFlight = undefined;
+        this.injectedAt = undefined;
+      }
+      this.log("reaped a stale open turn");
+    }
+    if (this.inFlight !== undefined && this.injectedPending.length > 0 && this.injectedAt !== undefined && this.injectedAt < cutoff) {
+      this.log("reaped a stuck injection (no turn-open arrived)");
+      this.inFlight = undefined;
+      this.injectedAt = undefined;
+      this.injectedPending.length = 0;
+    }
+  }
+  log(message) {
+    this.deps.log?.(`[turn] ${message}`);
+  }
+}
+
 // src/daemon/voice-daemon.ts
 var RECONNECT_DELAY_MS = 1500;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 40000;
 var HISTORY_REPLIES = 7;
 var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-var PLUGIN_DIR_ARG = stateDir().endsWith("-inline") ? `--plugin-dir '${PLUGIN_ROOT}' ` : "";
-var PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
-function permissionModeArg(mode) {
-  return mode && PERMISSION_MODES.has(mode) ? `--permission-mode ${mode} ` : "";
-}
-function isSlashCommand(prompt) {
-  return prompt.trimStart().startsWith("/");
-}
-var TURN_TTL_MS = 20 * 60 * 1000;
-var REPLY_UUID_CAP = 100;
+var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
   const threadId = surface ?? randomUUID();
@@ -19512,12 +19658,7 @@ class VoiceDaemon {
   reconnectTimer;
   healthTimer;
   stopped = false;
-  inFlight;
-  queue = [];
-  openTurns = [];
-  injectedPending = [];
-  seenReplyUuids = new Set;
-  injectedAt;
+  turns;
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
   history = new HistoryRing(HISTORY_REPLIES);
@@ -19525,6 +19666,16 @@ class VoiceDaemon {
   constructor(init) {
     this.init = init;
     this.label = { title: init.threadId };
+    this.turns = new TurnCoordinator({
+      inject: (text) => this.injectIntoPane(text),
+      speakReply: (reply) => void this.speak(this.emitClaudeTurn(reply), reply),
+      mirrorTypedTurn: (prompt, reply) => {
+        this.emitUserTurn(prompt, true);
+        this.speak(this.emitClaudeTurn(reply), reply);
+      },
+      onStatusChange: () => this.emitStatus(),
+      log: (message) => console.error(message)
+    });
   }
   get browserUrl() {
     return this.init.browserUrl;
@@ -19580,10 +19731,13 @@ class VoiceDaemon {
           try {
             if (route === "/turn-open") {
               const { prompt, permissionMode } = JSON.parse(body || "{}");
-              this.onTurnOpen(typeof prompt === "string" ? prompt : "", permissionMode);
+              if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
+                this.inheritedPermissionMode = permissionMode;
+              }
+              this.turns.turnOpened(typeof prompt === "string" ? prompt : "");
             } else {
               const { reply, replyUuid } = JSON.parse(body || "{}");
-              this.onTurnClose(typeof reply === "string" ? reply : "", typeof replyUuid === "string" ? replyUuid : undefined);
+              this.turns.turnClosed(typeof reply === "string" ? reply : "", typeof replyUuid === "string" ? replyUuid : undefined);
             }
           } catch {}
         });
@@ -19609,13 +19763,9 @@ class VoiceDaemon {
   }
   handleReset() {
     this.history.clear();
-    this.inFlight = undefined;
-    this.queue.length = 0;
-    this.openTurns.length = 0;
-    this.injectedPending.length = 0;
+    this.turns.reset();
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
     this.sendToBrowser(buildHistoryEvent(this.history));
-    this.emitStatus();
   }
   connectBridge() {
     if (this.stopped)
@@ -19657,13 +19807,14 @@ class VoiceDaemon {
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
-        this.enqueue("Give me a brief spoken status of what you're doing right now.");
+        this.turns.enqueueVoice("Give me a brief spoken status of what you're doing right now.");
         return;
       case "summary_request":
-        this.enqueue("Briefly summarize what you've done so far, for the phone.");
+        this.turns.enqueueVoice("Briefly summarize what you've done so far, for the phone.");
         return;
       case "stop_task":
-        await this.interrupt();
+        await cmuxInterrupt(this.init.surface);
+        this.turns.interrupt();
         return;
       case "sync":
         this.emitStatus();
@@ -19712,7 +19863,11 @@ class VoiceDaemon {
     }
   }
   buildSpawnCommand(spawnId) {
-    return `VOICE_SPAWN_ID=${spawnId} claude ${PLUGIN_DIR_ARG}${permissionModeArg(this.inheritedPermissionMode)}/voice-control:start`;
+    return buildClaudeSpawnCommand({
+      spawnId,
+      pluginDir: SPAWN_PLUGIN_DIR,
+      permissionMode: this.inheritedPermissionMode
+    });
   }
   async handleAudio(audioBase64, mimeType, mode) {
     let transcript;
@@ -19727,60 +19882,30 @@ class VoiceDaemon {
       return;
     }
     this.emitUserTurn(transcript);
-    if (mode === "interrupt")
-      await this.interruptWith(transcript);
-    else
-      this.enqueue(transcript);
+    if (mode === "interrupt") {
+      await cmuxInterrupt(this.init.surface);
+      this.turns.interruptWith(transcript);
+    } else {
+      this.turns.enqueueVoice(transcript);
+    }
   }
-  enqueue(text) {
-    this.queue.push(text);
-    this.pump();
-  }
-  async pump() {
-    this.reapStaleTurns();
-    if (this.inFlight !== undefined)
-      return;
-    if (this.openTurns.length > 0)
-      return;
-    const next = this.queue.shift();
-    if (next === undefined)
-      return;
-    this.inFlight = next;
-    this.injectedAt = Date.now();
-    this.injectedPending.length = 0;
-    this.injectedPending.push(next);
-    this.emitStatus();
-    console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(next)}`);
-    const ok = await cmuxSubmit(next, this.init.surface);
+  async injectIntoPane(text) {
+    console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(text)}`);
+    const ok = await cmuxSubmit(text, this.init.surface);
     console.error(`[inject] cmuxSubmit ok=${ok}`);
     if (ok) {
       if (!this.cmuxHealthy) {
         this.cmuxHealthy = true;
         this.emitStatus();
       }
-      return;
+      return true;
     }
-    this.inFlight = undefined;
-    this.injectedPending.pop();
     this.refreshCmuxHealth();
     this.sendToBrowser({
       type: "error",
       message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
     });
-    this.emitStatus();
-    this.pump();
-  }
-  async interrupt() {
-    await cmuxInterrupt(this.init.surface);
-    this.clearTurns();
-    this.emitStatus();
-    this.pump();
-  }
-  async interruptWith(text) {
-    await cmuxInterrupt(this.init.surface);
-    this.clearTurns();
-    this.queue.unshift(text);
-    this.pump();
+    return false;
   }
   emitUserTurn(text, mirrored = false) {
     const entry = this.history.add("user", randomUUID(), text);
@@ -19804,97 +19929,30 @@ class VoiceDaemon {
     });
     return entry.requestId;
   }
-  onTurnOpen(prompt, permissionMode) {
-    if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
-      this.inheritedPermissionMode = permissionMode;
-    }
-    this.reapStaleTurns();
-    this.openTurns.push({ kind: this.classifyTurn(prompt), prompt, openedAt: Date.now() });
-    this.emitStatus();
-  }
-  classifyTurn(prompt) {
-    const trimmed = prompt.trim();
-    if (this.injectedPending.length > 0 && this.injectedPending[0].trim() === trimmed) {
-      this.injectedPending.shift();
-      return "voice";
-    }
-    return isSlashCommand(prompt) ? "plugin" : "typed";
-  }
-  onTurnClose(reply, replyUuid) {
-    if (replyUuid) {
-      if (this.seenReplyUuids.has(replyUuid))
-        return;
-      this.seenReplyUuids.add(replyUuid);
-      if (this.seenReplyUuids.size > REPLY_UUID_CAP) {
-        const oldest = this.seenReplyUuids.values().next().value;
-        if (oldest !== undefined)
-          this.seenReplyUuids.delete(oldest);
-      }
-    }
-    const turn = this.openTurns.shift();
-    if (!turn) {
-      this.emitStatus();
-      return;
-    }
-    if (turn.kind === "voice") {
-      console.error(`[turn] voice reply, ${reply.length} chars`);
-      this.inFlight = undefined;
-      this.injectedAt = undefined;
-      if (reply)
-        this.speak(this.emitClaudeTurn(reply), reply);
-      this.pump();
-    } else if (turn.kind === "typed") {
-      console.error(`[turn] typed reply, ${reply.length} chars`);
-      if (reply) {
-        this.emitUserTurn(turn.prompt, true);
-        this.speak(this.emitClaudeTurn(reply), reply);
-      }
-    } else {
-      console.error("[turn] plugin turn ignored");
-    }
-    this.emitStatus();
-  }
-  clearTurns() {
-    this.inFlight = undefined;
-    this.injectedAt = undefined;
-    this.openTurns.length = 0;
-    this.injectedPending.length = 0;
-  }
-  reapStaleTurns() {
-    const cutoff = Date.now() - TURN_TTL_MS;
-    while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
-      const stale = this.openTurns.shift();
-      if (stale?.kind === "voice") {
-        this.inFlight = undefined;
-        this.injectedAt = undefined;
-      }
-      console.error("[turn] reaped a stale open turn");
-    }
-    if (this.inFlight !== undefined && this.injectedPending.length > 0 && this.injectedAt !== undefined && this.injectedAt < cutoff) {
-      console.error("[turn] reaped a stuck injection (no turn-open arrived)");
-      this.inFlight = undefined;
-      this.injectedAt = undefined;
-      this.injectedPending.length = 0;
-    }
-  }
   async speak(requestId, text) {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
+      if (!audioBase64)
+        return;
       this.history.attachAudio(requestId, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
-    } catch {}
+    } catch (error51) {
+      const message = error51 instanceof Error ? error51.message : String(error51);
+      console.error(`[tts] synthesis failed for ${requestId}: ${message}`);
+      this.sendToBrowser({
+        type: "error",
+        message: "Couldn't speak that reply — its text is shown, but audio failed."
+      });
+    }
   }
   buildThreadInfo() {
     return {
       threadId: this.init.threadId,
       label: this.label,
-      state: this.isWorking() ? "working" : "idle",
+      state: this.turns.isWorking() ? "working" : "idle",
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
-  }
-  isWorking() {
-    return this.openTurns.length > 0 || this.inFlight !== undefined;
   }
   registerThread() {
     this.send({ channel: "registry", event: { type: "thread_register", info: this.buildThreadInfo() } });
@@ -19918,9 +19976,9 @@ class VoiceDaemon {
     const state = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,
-      state: this.isWorking() ? "working" : "idle"
+      state: this.turns.isWorking() ? "working" : "idle"
     };
-    this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.inFlight } });
+    this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.turns.currentVoicePrompt } });
     if (this.ws?.readyState === wrapper_default.OPEN)
       this.registerThread();
   }
