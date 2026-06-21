@@ -19172,74 +19172,6 @@ function parseWorkspaceRef(stdout) {
   return match ? match[0] : undefined;
 }
 
-// src/daemon/history-ring.ts
-var MAX_ENTRIES_PER_REPLY = 4;
-
-class HistoryRing {
-  maxReplies;
-  now;
-  entries = [];
-  nextSeq = 1;
-  constructor(maxReplies, now = Date.now) {
-    this.maxReplies = maxReplies;
-    this.now = now;
-  }
-  add(role, requestId, text) {
-    const entry = { seq: this.nextSeq++, timestamp: this.now(), requestId, role, text };
-    this.entries.push(entry);
-    this.evict();
-    return entry;
-  }
-  attachAudio(requestId, audio) {
-    const entry = this.entries.find((e) => e.requestId === requestId && e.role === "claude");
-    if (entry)
-      entry.audio = audio;
-  }
-  get(requestId) {
-    return this.entries.find((e) => e.requestId === requestId);
-  }
-  snapshot() {
-    return this.entries;
-  }
-  clear() {
-    this.entries.length = 0;
-  }
-  evict() {
-    const replySeqs = this.entries.filter((e) => e.role === "claude").map((e) => e.seq);
-    if (replySeqs.length > this.maxReplies) {
-      const cutoff = replySeqs[replySeqs.length - this.maxReplies - 1];
-      let write = 0;
-      for (const entry of this.entries) {
-        if (entry.seq > cutoff)
-          this.entries[write++] = entry;
-      }
-      this.entries.length = write;
-    }
-    const maxEntries = this.maxReplies * MAX_ENTRIES_PER_REPLY;
-    if (this.entries.length > maxEntries) {
-      this.entries.splice(0, this.entries.length - maxEntries);
-    }
-  }
-}
-function buildHistoryEvent(ring) {
-  const turns = ring.snapshot().map((e) => ({
-    seq: e.seq,
-    timestamp: e.timestamp,
-    requestId: e.requestId,
-    role: e.role,
-    text: e.text,
-    hasAudio: e.audio !== undefined
-  }));
-  return { type: "history", turns };
-}
-function selectAudioReply(ring, requestId) {
-  const entry = ring.get(requestId);
-  if (entry?.audio) {
-    return { type: "tts_audio", requestId, replay: true, ...entry.audio };
-  }
-  return { type: "error", requestId, message: "Audio for that reply is no longer available." };
-}
-
 // src/daemon/labels.ts
 import { spawn as spawn2 } from "node:child_process";
 import { basename } from "node:path";
@@ -19491,21 +19423,114 @@ function buildClaudeSpawnCommand({ spawnId, pluginDir, permissionMode }) {
   return `VOICE_SPAWN_ID=${spawnId} claude ${pluginDirArg}${permissionModeArg(permissionMode)}/voice-control:start`;
 }
 
-// src/daemon/turn-coordinator.ts
-function isSlashCommand(prompt) {
-  return prompt.trimStart().startsWith("/");
+// src/daemon/transcript-projection.ts
+var REAL_PROMPT_SOURCES = new Set(["typed", "queued"]);
+function extractText(content) {
+  if (typeof content === "string")
+    return content.trim();
+  if (!Array.isArray(content))
+    return "";
+  return content.filter((b) => !!b && b.type === "text" && typeof b.text === "string").map((b) => b.text).join("").trim();
 }
+var roleOf = (r) => r.message?.role ?? r.type;
+function toEpoch(iso) {
+  if (!iso)
+    return 0;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? 0 : t;
+}
+function isRealUserTurn(r) {
+  if (roleOf(r) !== "user" || r.isSidechain || r.isMeta)
+    return false;
+  if (!REAL_PROMPT_SOURCES.has(r.promptSource ?? ""))
+    return false;
+  const text = extractText(r.message?.content);
+  return text.length > 0 && !text.startsWith("/");
+}
+function isClaudeReply(r) {
+  if (roleOf(r) !== "assistant" || r.isSidechain)
+    return false;
+  const stop = r.message?.stop_reason;
+  if (!stop || stop === "tool_use")
+    return false;
+  return extractText(r.message?.content).length > 0;
+}
+function projectTurns(records, maxTurns = 40) {
+  const turns = [];
+  for (const r of records) {
+    if (!r.uuid)
+      continue;
+    const role = isRealUserTurn(r) ? "user" : isClaudeReply(r) ? "claude" : undefined;
+    if (!role)
+      continue;
+    turns.push({ uuid: r.uuid, timestamp: toEpoch(r.timestamp), role, text: extractText(r.message?.content) });
+  }
+  turns.sort((a, b) => a.timestamp - b.timestamp);
+  return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
+}
+function pairReplies(turns) {
+  const pairs = [];
+  for (let i = 0;i < turns.length; i++) {
+    if (turns[i].role !== "claude")
+      continue;
+    let prompt;
+    for (let j = i - 1;j >= 0; j--) {
+      if (turns[j].role === "user") {
+        prompt = turns[j];
+        break;
+      }
+    }
+    pairs.push({ reply: turns[i], prompt });
+  }
+  return pairs;
+}
+
+// src/daemon/transcript-reader.ts
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+var TAIL_BYTES = 512 * 1024;
+function readTailRecords(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - TAIL_BYTES);
+    const buf = Buffer.alloc(size - start);
+    const bytesRead = readSync(fd, buf, 0, buf.length, start);
+    const lines = buf.toString("utf8", 0, bytesRead).split(`
+`);
+    if (start > 0)
+      lines.shift();
+    const records = [];
+    for (const line of lines) {
+      if (!line)
+        continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {}
+    }
+    return records;
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined)
+      try {
+        closeSync(fd);
+      } catch {}
+  }
+}
+function projectTranscript(path, maxTurns) {
+  return projectTurns(readTailRecords(path), maxTurns);
+}
+
+// src/daemon/turn-coordinator.ts
 var TURN_TTL_MS = 20 * 60 * 1000;
-var REPLY_UUID_CAP = 100;
 
 class TurnCoordinator {
   deps;
   inFlight;
+  injectedAt;
   queue = [];
   openTurns = [];
-  injectedPending = [];
-  injectedAt;
-  seenReplyUuids = new Set;
   injectSeq = 0;
   now;
   constructor(deps) {
@@ -19524,53 +19549,18 @@ class TurnCoordinator {
   }
   turnOpened(prompt) {
     this.reapStaleTurns();
-    this.openTurns.push({ kind: this.classify(prompt), prompt, openedAt: this.now() });
+    const trimmed = prompt.trim();
+    if (this.inFlight !== undefined && this.inFlight.trim() === trimmed) {
+      this.inFlight = undefined;
+      this.injectedAt = undefined;
+    }
+    this.openTurns.push({ prompt, openedAt: this.now() });
     this.deps.onStatusChange();
   }
-  turnClosed(prompt, reply, replyUuid) {
-    if (replyUuid) {
-      if (this.seenReplyUuids.has(replyUuid))
-        return;
-      this.seenReplyUuids.add(replyUuid);
-      if (this.seenReplyUuids.size > REPLY_UUID_CAP) {
-        const oldest = this.seenReplyUuids.values().next().value;
-        if (oldest !== undefined)
-          this.seenReplyUuids.delete(oldest);
-      }
-    }
-    const turn = this.takeMatchingTurn(prompt);
-    if (turn?.kind === "voice") {
-      this.log(`voice reply, ${reply.length} chars`);
-      if (reply)
-        this.deps.speakReply(reply);
-    } else if (turn?.kind === "typed") {
-      this.log(`typed reply, ${reply.length} chars`);
-      if (reply)
-        this.deps.mirrorTypedTurn(turn.prompt, reply);
-    } else if (turn) {
-      this.log("plugin turn ignored");
-    }
+  turnClosed() {
+    this.openTurns.shift();
     this.pump();
     this.deps.onStatusChange();
-  }
-  takeMatchingTurn(prompt) {
-    const trimmed = (prompt || "").trim();
-    let index = trimmed ? this.openTurns.findIndex((t) => t.prompt.trim() === trimmed) : -1;
-    if (index < 0) {
-      if (this.openTurns.length === 0)
-        return;
-      index = 0;
-    }
-    const removed = this.openTurns.splice(0, index + 1);
-    for (const t of removed) {
-      if (t.kind === "voice" && this.inFlight !== undefined && t.prompt.trim() === this.inFlight.trim()) {
-        this.inFlight = undefined;
-        this.injectedAt = undefined;
-      }
-    }
-    if (removed.length > 1)
-      this.log(`reaped ${removed.length - 1} stale turn(s) whose close was lost`);
-    return removed[removed.length - 1];
   }
   interrupt() {
     this.clearTurns();
@@ -19587,14 +19577,6 @@ class TurnCoordinator {
     this.queue.length = 0;
     this.deps.onStatusChange();
   }
-  classify(prompt) {
-    const trimmed = prompt.trim();
-    if (this.injectedPending.length > 0 && this.injectedPending[0].trim() === trimmed) {
-      this.injectedPending.shift();
-      return "voice";
-    }
-    return isSlashCommand(prompt) ? "plugin" : "typed";
-  }
   async pump() {
     this.reapStaleTurns();
     if (this.inFlight !== undefined)
@@ -19607,8 +19589,6 @@ class TurnCoordinator {
     const seq = ++this.injectSeq;
     this.inFlight = next;
     this.injectedAt = this.now();
-    this.injectedPending.length = 0;
-    this.injectedPending.push(next);
     this.deps.onStatusChange();
     const ok = await this.deps.inject(next);
     if (this.injectSeq !== seq)
@@ -19616,7 +19596,6 @@ class TurnCoordinator {
     if (!ok) {
       this.inFlight = undefined;
       this.injectedAt = undefined;
-      this.injectedPending.pop();
       this.deps.onStatusChange();
       this.pump();
     }
@@ -19625,36 +19604,35 @@ class TurnCoordinator {
     this.inFlight = undefined;
     this.injectedAt = undefined;
     this.openTurns.length = 0;
-    this.injectedPending.length = 0;
     this.injectSeq++;
   }
   reapStaleTurns() {
     const cutoff = this.now() - TURN_TTL_MS;
     while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
-      const stale = this.openTurns.shift();
-      if (stale?.kind === "voice") {
-        this.inFlight = undefined;
-        this.injectedAt = undefined;
-      }
+      this.openTurns.shift();
       this.log("reaped a stale open turn");
     }
-    if (this.inFlight !== undefined && this.injectedPending.length > 0 && this.injectedAt !== undefined && this.injectedAt < cutoff) {
+    if (this.inFlight !== undefined && this.injectedAt !== undefined && this.injectedAt < cutoff) {
       this.log("reaped a stuck injection (no turn-open arrived)");
       this.inFlight = undefined;
       this.injectedAt = undefined;
-      this.injectedPending.length = 0;
     }
   }
   log(message) {
-    this.deps.log?.(`[turn] ${message}`);
+    this.deps.log?.(`[voice] ${message}`);
   }
 }
 
 // src/daemon/voice-daemon.ts
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var RECONNECT_DELAY_MS = 1500;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 40000;
-var HISTORY_REPLIES = 7;
+var MAX_PROJECTED_TURNS = 40;
+var MAX_AUDIO_ENTRIES = 20;
+var MAX_PENDING_VOICE = 16;
+var SETTLE_TIMEOUT_MS = 12000;
+var SETTLE_POLL_MS = 150;
 var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 function createDaemonInit(config2) {
@@ -19676,20 +19654,19 @@ class VoiceDaemon {
   healthTimer;
   stopped = false;
   turns;
+  audio = new Map;
+  lastTranscriptPath;
+  pending = [];
+  spoken = new Set;
+  floor = 0;
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
-  history = new HistoryRing(HISTORY_REPLIES);
   label;
   constructor(init) {
     this.init = init;
     this.label = { title: init.threadId };
     this.turns = new TurnCoordinator({
       inject: (text) => this.injectIntoPane(text),
-      speakReply: (reply) => void this.speak(this.emitClaudeTurn(reply), reply),
-      mirrorTypedTurn: (prompt, reply) => {
-        this.emitUserTurn(prompt, true);
-        this.speak(this.emitClaudeTurn(reply), reply);
-      },
       onStatusChange: () => this.emitStatus(),
       log: (message) => console.error(message)
     });
@@ -19747,14 +19724,22 @@ class VoiceDaemon {
           }
           try {
             if (route === "/turn-open") {
-              const { prompt, permissionMode } = JSON.parse(body || "{}");
+              const { transcriptPath, prompt, permissionMode } = JSON.parse(body || "{}");
               if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
                 this.inheritedPermissionMode = permissionMode;
               }
-              this.turns.turnOpened(typeof prompt === "string" ? prompt : "");
+              if (transcriptPath)
+                this.lastTranscriptPath = transcriptPath;
+              const realPrompt = typeof prompt === "string" ? prompt : "";
+              this.turns.turnOpened(realPrompt);
+              this.bindVoicePrompt(realPrompt);
+              this.projectAndEmit();
             } else {
-              const { prompt, reply, replyUuid } = JSON.parse(body || "{}");
-              this.turns.turnClosed(typeof prompt === "string" ? prompt : "", typeof reply === "string" ? reply : "", typeof replyUuid === "string" ? replyUuid : undefined);
+              const { transcriptPath } = JSON.parse(body || "{}");
+              if (transcriptPath)
+                this.lastTranscriptPath = transcriptPath;
+              this.turns.turnClosed();
+              this.handleTurnClose();
             }
           } catch {}
         });
@@ -19779,10 +19764,13 @@ class VoiceDaemon {
     writeFileSync2(threadRuntimePath(this.init.surface), JSON.stringify({ port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl }, null, 2));
   }
   handleReset() {
-    this.history.clear();
+    this.floor = Date.now();
+    this.audio.clear();
+    this.spoken.clear();
+    this.pending.length = 0;
     this.turns.reset();
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
-    this.sendToBrowser(buildHistoryEvent(this.history));
+    this.projectAndEmit();
   }
   connectBridge() {
     if (this.stopped)
@@ -19824,22 +19812,27 @@ class VoiceDaemon {
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
-        this.turns.enqueueVoice("Give me a brief spoken status of what you're doing right now.");
+        this.queueVoice("Give me a brief spoken status of what you're doing right now.", "queue");
         return;
       case "summary_request":
-        this.turns.enqueueVoice("Briefly summarize what you've done so far, for the phone.");
+        this.queueVoice("Briefly summarize what you've done so far, for the phone.", "queue");
         return;
       case "stop_task":
         await cmuxInterrupt(this.init.surface);
+        this.pending.length = 0;
         this.turns.interrupt();
+        this.projectAndEmit();
         return;
       case "sync":
         this.emitStatus();
-        this.sendToBrowser(buildHistoryEvent(this.history));
+        if (this.lastTranscriptPath)
+          this.projectAndEmit();
         return;
-      case "get_audio":
-        this.sendToBrowser(selectAudioReply(this.history, event.requestId));
+      case "get_audio": {
+        const audio = this.audio.get(event.requestId);
+        this.sendToBrowser(audio ? { type: "tts_audio", requestId: event.requestId, replay: true, ...audio } : { type: "error", requestId: event.requestId, message: "Audio for that reply is no longer available." });
         return;
+      }
       case "spawn_thread": {
         const result = await this.spawnThread(event.cwd);
         if (!result.ok) {
@@ -19898,13 +19891,21 @@ class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    this.emitUserTurn(transcript);
-    if (mode === "interrupt") {
+    if (mode === "interrupt")
       await cmuxInterrupt(this.init.surface);
-      this.turns.interruptWith(transcript);
-    } else {
-      this.turns.enqueueVoice(transcript);
-    }
+    this.queueVoice(transcript, mode);
+  }
+  queueVoice(text, mode) {
+    if (mode === "interrupt")
+      this.pending.length = 0;
+    this.pending.push({ id: randomUUID(), text, ts: Date.now() });
+    while (this.pending.length > MAX_PENDING_VOICE)
+      this.pending.shift();
+    if (mode === "interrupt")
+      this.turns.interruptWith(text);
+    else
+      this.turns.enqueueVoice(text);
+    this.projectAndEmit();
   }
   async injectIntoPane(text) {
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(text)}`);
@@ -19917,49 +19918,128 @@ class VoiceDaemon {
       }
       return true;
     }
+    const i = this.pending.findIndex((p) => p.userUuid === undefined && p.text.trim() === text.trim());
+    if (i >= 0)
+      this.pending.splice(i, 1);
     this.refreshCmuxHealth();
     this.sendToBrowser({
       type: "error",
       message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
     });
+    this.projectAndEmit();
     return false;
   }
-  emitUserTurn(text, mirrored = false) {
-    const entry = this.history.add("user", randomUUID(), text);
-    this.sendToBrowser({
-      type: "transcript",
-      requestId: entry.requestId,
-      seq: entry.seq,
-      timestamp: entry.timestamp,
-      text,
-      mirrored
-    });
+  projectAndEmit() {
+    this.sendToBrowser(this.historyFrom(this.projectedNow()));
   }
-  emitClaudeTurn(text) {
-    const entry = this.history.add("claude", randomUUID(), text);
-    this.sendToBrowser({
-      type: "claude_reply",
-      requestId: entry.requestId,
-      seq: entry.seq,
-      timestamp: entry.timestamp,
-      text
-    });
-    return entry.requestId;
+  projectedNow() {
+    if (!this.lastTranscriptPath)
+      return [];
+    return projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor);
   }
-  async speak(requestId, text) {
+  bindVoicePrompt(prompt) {
+    const text = prompt.trim();
+    if (!text)
+      return;
+    const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
+    if (entry)
+      entry.opened = true;
+  }
+  bindPending(turns) {
+    const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
+    for (const entry of this.pending) {
+      if (!entry.opened || entry.userUuid)
+        continue;
+      for (let i = turns.length - 1;i >= 0; i--) {
+        const t = turns[i];
+        if (t.role === "user" && t.text.trim() === entry.text.trim() && !claimed.has(t.uuid)) {
+          entry.userUuid = t.uuid;
+          entry.userTs = t.timestamp;
+          claimed.add(t.uuid);
+          break;
+        }
+      }
+    }
+  }
+  historyFrom(turns) {
+    this.bindPending(turns);
+    const rows = [
+      ...turns.map((t) => ({
+        requestId: t.uuid,
+        timestamp: t.timestamp,
+        role: t.role,
+        text: t.text,
+        hasAudio: this.audio.has(t.uuid)
+      })),
+      ...this.pending.filter((p) => p.userUuid === undefined).map((p) => ({ requestId: p.id, timestamp: p.ts, role: "user", text: p.text, hasAudio: false }))
+    ];
+    return { type: "history", turns: rows };
+  }
+  async handleTurnClose() {
+    if (!this.lastTranscriptPath)
+      return;
+    let turns = this.projectedNow();
+    this.sendToBrowser(this.historyFrom(turns));
+    const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      this.bindPending(turns);
+      if (this.pending.every((p) => !p.opened || this.findReply(turns, p)))
+        break;
+      await sleep(SETTLE_POLL_MS);
+      turns = this.projectedNow();
+    }
+    this.sendToBrowser(this.historyFrom(turns));
+    for (let i = this.pending.length - 1;i >= 0; i--) {
+      const entry = this.pending[i];
+      if (!entry.opened)
+        continue;
+      const reply = this.findReply(turns, entry);
+      if (!reply || this.spoken.has(reply.uuid))
+        continue;
+      this.pending.splice(i, 1);
+      this.remember(this.spoken, reply.uuid, MAX_AUDIO_ENTRIES * 4);
+      this.speak(reply.uuid, reply.text);
+    }
+  }
+  findReply(turns, entry) {
+    if (!entry.userUuid)
+      return;
+    const paired = pairReplies(turns).find((p) => p.prompt?.uuid === entry.userUuid)?.reply;
+    if (paired)
+      return paired;
+    if (entry.userTs === undefined)
+      return;
+    return turns.find((t) => t.role === "claude" && t.timestamp > (entry.userTs ?? 0) && !this.spoken.has(t.uuid));
+  }
+  async speak(uuid3, text) {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (!audioBase64)
         return;
-      this.history.attachAudio(requestId, { audioBase64, mimeType });
-      this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
+      this.audio.set(uuid3, { audioBase64, mimeType });
+      while (this.audio.size > MAX_AUDIO_ENTRIES) {
+        const oldest = this.audio.keys().next().value;
+        if (oldest === undefined)
+          break;
+        this.audio.delete(oldest);
+      }
+      this.sendToBrowser({ type: "tts_audio", requestId: uuid3, audioBase64, mimeType });
     } catch (error51) {
       const message = error51 instanceof Error ? error51.message : String(error51);
-      console.error(`[tts] synthesis failed for ${requestId}: ${message}`);
+      console.error(`[tts] synthesis failed for ${uuid3}: ${message}`);
       this.sendToBrowser({
         type: "error",
         message: "Couldn't speak that reply — its text is shown, but audio failed."
       });
+    }
+  }
+  remember(set2, value, cap) {
+    set2.add(value);
+    while (set2.size > cap) {
+      const oldest = set2.values().next().value;
+      if (oldest === undefined)
+        break;
+      set2.delete(oldest);
     }
   }
   buildThreadInfo() {
