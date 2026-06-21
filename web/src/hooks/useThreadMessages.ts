@@ -36,6 +36,9 @@ export function useThreadMessages({
   activeThreadIdRef,
   armSpawnFollow
 }: Deps) {
+  // Destructure the STABLE pieces of `threads` (the wrapper object is recreated each render, but its
+  // list + callbacks are stable), so the callbacks/effects below don't churn every render.
+  const { threads: threadsList, noteActivity } = threads;
   const [messagesByThread, setMessagesByThread] = useState<Map<ThreadId, Message[]>>(new Map());
   const [runtimeByThread, setRuntimeByThread] = useState<Map<ThreadId, BridgeRuntime>>(new Map());
   // The thread whose mic turn is in flight (transcribing) — one at a time, since the mic is shared.
@@ -69,7 +72,7 @@ export function useThreadMessages({
               dropAudio
             )
           );
-          threads.noteActivity(threadId);
+          noteActivity(threadId);
           return;
         case "claude_reply": {
           const message = makeMessage("Claude Code", event.text, event.requestId, {
@@ -77,7 +80,7 @@ export function useThreadMessages({
             timestamp: event.timestamp
           });
           updateThreadMessages(setMessagesByThread, threadId, (prev) => reconcileAndPrune(prev, [message], dropAudio));
-          threads.noteActivity(threadId);
+          noteActivity(threadId);
           return;
         }
         case "history": {
@@ -113,27 +116,27 @@ export function useThreadMessages({
           return;
       }
     },
-    [attachAudio, dropAudio, markPlayable, showFlash, threads, activeThreadIdRef, armSpawnFollow]
+    [attachAudio, dropAudio, markPlayable, showFlash, noteActivity, activeThreadIdRef, armSpawnFollow]
   );
 
   // Release per-thread state for threads the roster fully dropped (a snapshot without them; a
   // greyed/offline thread stays in the roster, so its history is kept). Without it the maps would grow
   // one entry per pane ever seen. Also releases each dropped thread's cached audio.
   useEffect(() => {
-    const live = new Set(threads.threads.map((t) => t.threadId));
+    const live = new Set(threadsList.map((t) => t.threadId));
     setRuntimeByThread((prev) => pruneThreadMap(prev, live));
     setMessagesByThread((prev) =>
       pruneThreadMap(prev, live, (messages) => {
         for (const message of messages) if (message.requestId) dropAudio(message.requestId);
       })
     );
-  }, [threads.threads, dropAudio]);
+  }, [threadsList, dropAudio]);
 
   // The active thread's roster entry + runtime (its session_status, falling back to the roster snapshot
   // before the first status arrives).
   const active: RosterThread | undefined = useMemo(
-    () => threads.threads.find((t) => t.threadId === activeThreadId),
-    [threads.threads, activeThreadId]
+    () => threadsList.find((t) => t.threadId === activeThreadId),
+    [threadsList, activeThreadId]
   );
   const activeRuntime =
     (activeThreadId && runtimeByThread.get(activeThreadId)) || rosterRuntime(active) || DEFAULT_RUNTIME;
@@ -141,11 +144,11 @@ export function useThreadMessages({
   // Pager pages: each thread with its (newest-first) messages. Empty until its history/turns land.
   const pagerThreads: PagerThread[] = useMemo(
     () =>
-      threads.threads.map((thread) => ({
+      threadsList.map((thread) => ({
         threadId: thread.threadId,
         messages: messagesByThread.get(thread.threadId) ?? EMPTY_MESSAGES
       })),
-    [threads.threads, messagesByThread]
+    [threadsList, messagesByThread]
   );
 
   const transcribing = transcribingThreadId !== null && transcribingThreadId === activeThreadId;

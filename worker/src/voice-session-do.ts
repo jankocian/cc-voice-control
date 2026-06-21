@@ -89,12 +89,13 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     if (attachment.role === "daemon") {
       // The daemon ends its thread on shutdown so a leaked URL can't reconnect to a dead session.
       // Removing the last thread expires the whole session; otherwise it just drops that thread.
-      if (envelope.channel === "control" && envelope.event.type === "terminate") {
+      // (`event` is required by the type but this is untrusted wire data, so guard it.)
+      if (envelope.channel === "control" && envelope.event?.type === "terminate") {
         await this.removeThread(attachment.threadId, ws);
         return;
       }
       // Register/refresh this thread's label + state in the roster, then broadcast the delta.
-      if (envelope.channel === "registry" && envelope.event.type === "thread_register") {
+      if (envelope.channel === "registry" && envelope.event?.type === "thread_register") {
         await this.upsertThread(attachment.threadId, envelope.event.info);
         return;
       }

@@ -67,8 +67,15 @@ export function useVoiceControls({
 
   const onRecorderError = useCallback((error: RecorderError) => showFlash(RECORDER_ERROR_TEXT[error]), [showFlash]);
 
-  const recorder = useRecorder({ canvasRef, onClip, onError: onRecorderError, onStart: stopPlayback });
-  recordingRef.current = recorder.recording;
+  // Destructure the recorder's STABLE methods + state (the wrapper is recreated when recording state
+  // changes) so the callbacks/effects below depend on the methods, not the churning wrapper.
+  const { recording, visualizerActive, start, stop, cancel, teardown } = useRecorder({
+    canvasRef,
+    onClip,
+    onError: onRecorderError,
+    onStart: stopPlayback
+  });
+  recordingRef.current = recording;
 
   const startRecording = useCallback(
     (mode: "queue" | "interrupt") => {
@@ -78,9 +85,9 @@ export function useVoiceControls({
         return;
       }
       nextModeRef.current = mode;
-      void recorder.start();
+      void start();
     },
-    [transcribing, bridgeReady, recorder, showFlash, activeThreadIdRef]
+    [transcribing, bridgeReady, start, showFlash, activeThreadIdRef]
   );
 
   const sendControl = useCallback(
@@ -107,19 +114,19 @@ export function useVoiceControls({
 
   // Free the mic/stream when the page is hidden (iOS backgrounding).
   useEffect(() => {
-    const onPageHide = () => recorder.teardown();
+    const onPageHide = () => teardown();
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, [recorder]);
+  }, [teardown]);
 
   return {
-    recording: recorder.recording,
-    visualizerActive: recorder.visualizerActive,
+    recording,
+    visualizerActive,
     onMic: useCallback(() => startRecording("queue"), [startRecording]),
     onSteer: useCallback(() => startRecording("queue"), [startRecording]),
     onInterrupt: useCallback(() => startRecording("interrupt"), [startRecording]),
-    onStopRecording: useCallback(() => recorder.stop(), [recorder]),
-    onCancel: useCallback(() => recorder.cancel(), [recorder]),
+    onStopRecording: useCallback(() => stop(), [stop]),
+    onCancel: useCallback(() => cancel(), [cancel]),
     onStopTask: useCallback(() => sendControl({ type: "stop_task" }), [sendControl]),
     onSpawn
   };
