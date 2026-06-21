@@ -58,6 +58,12 @@ export class TurnCoordinator {
   private injectedAt?: number;
   private readonly seenReplyUuids = new Set<string>();
 
+  // A monotonic id for the current injection, bumped on every inject AND every clearTurns. pump()
+  // captures it before awaiting inject() and re-checks it after, so a result that resolves late (after
+  // an interrupt/reset re-injected) is recognised as stale — by IDENTITY, not by the prompt string,
+  // which can repeat (the status/summary prompts are fixed canned text).
+  private injectSeq = 0;
+
   private readonly now: () => number;
 
   constructor(private readonly deps: TurnCoordinatorDeps) {
@@ -152,15 +158,17 @@ export class TurnCoordinator {
     if (this.openTurns.length > 0) return; // Claude is mid-turn — wait for the pane to go idle
     const next = this.queue.shift();
     if (next === undefined) return;
+    const seq = ++this.injectSeq; // identity token for THIS injection
     this.inFlight = next; // set before awaiting so a concurrent pump sees "busy"
     this.injectedAt = this.now();
     this.injectedPending.length = 0; // any leftover never opened a turn (stale) — start clean
     this.injectedPending.push(next); // turnOpened recognises this turn as ours by exact content
     this.deps.onStatusChange();
     const ok = await this.deps.inject(next);
-    // While we awaited, an interrupt/reset/re-inject may have moved on — our `inFlight` is no longer
-    // `next`. The result is then stale: acting on it would clobber the current injection. Drop it.
-    if (this.inFlight !== next) return;
+    // While we awaited, an interrupt/reset/re-inject may have superseded this injection. Recognise
+    // that by the seq token (NOT the prompt string — the canned status/summary prompts repeat), so a
+    // stale result can't clobber the current injection's state. Drop it.
+    if (this.injectSeq !== seq) return;
     if (!ok) {
       this.inFlight = undefined;
       this.injectedAt = undefined;
@@ -175,6 +183,7 @@ export class TurnCoordinator {
     this.injectedAt = undefined;
     this.openTurns.length = 0;
     this.injectedPending.length = 0;
+    this.injectSeq++; // invalidate any in-flight inject() await so its late result is dropped as stale
   }
 
   // Backstop: drop turns stuck longer than TURN_TTL_MS so the idle-gate can release queued voice

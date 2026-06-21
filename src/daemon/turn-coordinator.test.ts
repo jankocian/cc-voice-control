@@ -254,4 +254,42 @@ describe("TurnCoordinator", () => {
     expect(coord.currentVoicePrompt).toBe("y");
     expect(coord.isWorking()).toBe(true);
   });
+
+  it("identifies a stale inject by token, not text, when the SAME prompt is re-injected", async () => {
+    // The status/summary prompts are fixed canned strings, so an interrupt can re-inject identical
+    // text while the first inject is still in flight — a string-equality guard would mis-pass it.
+    let releaseFirst: (() => void) | undefined;
+    const calls: string[] = [];
+    let speaks = 0;
+    const coord = new TurnCoordinator({
+      inject: (text) => {
+        calls.push(text);
+        if (calls.length === 1) return new Promise<boolean>((res) => (releaseFirst = () => res(false)));
+        return Promise.resolve(true);
+      },
+      speakReply: () => {
+        speaks += 1;
+      },
+      mirrorTypedTurn: () => {},
+      onStatusChange: () => {},
+      now: () => 1
+    });
+
+    coord.enqueueVoice("status"); // inject #1 ("status") hangs
+    await tick();
+    coord.interruptWith("status"); // re-inject the SAME text; inject #2 resolves true
+    await tick();
+    expect(calls).toEqual(["status", "status"]);
+
+    releaseFirst?.(); // stale #1 fails — token mismatch must drop it, leaving #2's injection intact
+    await tick();
+    expect(coord.currentVoicePrompt).toBe("status");
+    expect(coord.isWorking()).toBe(true);
+
+    // #2 is still a live VOICE injection: its turn opens + closes and is SPOKEN (not misclassified).
+    coord.turnOpened("status");
+    coord.turnClosed("here's your status", "u1");
+    await tick();
+    expect(speaks).toBe(1);
+  });
 });
