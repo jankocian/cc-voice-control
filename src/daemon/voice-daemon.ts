@@ -711,12 +711,21 @@ export class VoiceDaemon {
   private async speak(requestId: string, text: string): Promise<void> {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
+      // An empty result means there was nothing to synthesize (empty/whitespace reply) — no audio.
+      if (!audioBase64) return;
       // Stash the audio on the matching reply entry so a reconnecting phone can fetch it on
       // demand (no-op if the entry has since been evicted from the ring).
       this.history.attachAudio(requestId, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId, audioBase64, mimeType });
-    } catch {
-      // best-effort speech; the text reply already went through
+    } catch (error) {
+      // The text reply already reached the phone; surface the audio failure (don't swallow it) so a
+      // config/model/rate-limit problem is visible instead of "the voice just didn't arrive".
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[tts] synthesis failed for ${requestId}: ${message}`);
+      this.sendToBrowser({
+        type: "error",
+        message: "Couldn't speak that reply — its text is shown, but audio failed."
+      });
     }
   }
 
