@@ -19527,7 +19527,7 @@ class TurnCoordinator {
     this.openTurns.push({ kind: this.classify(prompt), prompt, openedAt: this.now() });
     this.deps.onStatusChange();
   }
-  turnClosed(reply, replyUuid) {
+  turnClosed(prompt, reply, replyUuid) {
     if (replyUuid) {
       if (this.seenReplyUuids.has(replyUuid))
         return;
@@ -19538,11 +19538,9 @@ class TurnCoordinator {
           this.seenReplyUuids.delete(oldest);
       }
     }
-    const turn = this.openTurns.shift();
+    const turn = this.takeMatchingTurn(prompt);
     if (turn?.kind === "voice") {
       this.log(`voice reply, ${reply.length} chars`);
-      this.inFlight = undefined;
-      this.injectedAt = undefined;
       if (reply)
         this.deps.speakReply(reply);
     } else if (turn?.kind === "typed") {
@@ -19554,6 +19552,25 @@ class TurnCoordinator {
     }
     this.pump();
     this.deps.onStatusChange();
+  }
+  takeMatchingTurn(prompt) {
+    const trimmed = (prompt || "").trim();
+    let index = trimmed ? this.openTurns.findIndex((t) => t.prompt.trim() === trimmed) : -1;
+    if (index < 0) {
+      if (this.openTurns.length === 0)
+        return;
+      index = 0;
+    }
+    const removed = this.openTurns.splice(0, index + 1);
+    for (const t of removed) {
+      if (t.kind === "voice" && this.inFlight !== undefined && t.prompt.trim() === this.inFlight.trim()) {
+        this.inFlight = undefined;
+        this.injectedAt = undefined;
+      }
+    }
+    if (removed.length > 1)
+      this.log(`reaped ${removed.length - 1} stale turn(s) whose close was lost`);
+    return removed[removed.length - 1];
   }
   interrupt() {
     this.clearTurns();
@@ -19736,8 +19753,8 @@ class VoiceDaemon {
               }
               this.turns.turnOpened(typeof prompt === "string" ? prompt : "");
             } else {
-              const { reply, replyUuid } = JSON.parse(body || "{}");
-              this.turns.turnClosed(typeof reply === "string" ? reply : "", typeof replyUuid === "string" ? replyUuid : undefined);
+              const { prompt, reply, replyUuid } = JSON.parse(body || "{}");
+              this.turns.turnClosed(typeof prompt === "string" ? prompt : "", typeof reply === "string" ? reply : "", typeof replyUuid === "string" ? replyUuid : undefined);
             }
           } catch {}
         });
