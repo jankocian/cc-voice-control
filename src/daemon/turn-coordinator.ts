@@ -82,8 +82,12 @@ export class TurnCoordinator {
     this.deps.onStatusChange();
   }
 
-  /** A turn FINISHED (Stop, with the reply). Pair it with the oldest open turn and act on its kind. */
-  turnClosed(reply: string, replyUuid?: string): void {
+  /**
+   * A turn FINISHED (Stop), carrying the reply AND the prompt it answered (the transcript links them).
+   * We pair by IDENTITY — the open turn whose prompt matches — NOT by FIFO position, so a single
+   * dropped /turn-close can never shift every later reply onto the wrong turn (the off-by-one bug).
+   */
+  turnClosed(prompt: string, reply: string, replyUuid?: string): void {
     if (replyUuid) {
       if (this.seenReplyUuids.has(replyUuid)) return; // double-fired Stop
       this.seenReplyUuids.add(replyUuid);
@@ -92,11 +96,9 @@ export class TurnCoordinator {
         if (oldest !== undefined) this.seenReplyUuids.delete(oldest);
       }
     }
-    const turn = this.openTurns.shift();
+    const turn = this.takeMatchingTurn(prompt);
     if (turn?.kind === "voice") {
       this.log(`voice reply, ${reply.length} chars`);
-      this.inFlight = undefined; // our injection completed → release the next queued voice prompt
-      this.injectedAt = undefined;
       if (reply) this.deps.speakReply(reply);
     } else if (turn?.kind === "typed") {
       this.log(`typed reply, ${reply.length} chars`);
@@ -108,6 +110,29 @@ export class TurnCoordinator {
     // mid-turn, e.g. the bootstrap /voice-control:start; pump is then a no-op).
     void this.pump();
     this.deps.onStatusChange();
+  }
+
+  // Remove and return the open turn this reply belongs to, matched by prompt content. Claude answers a
+  // pane's turns in order, so any turn OLDER than the match that is still open had its own close dropped
+  // — reap those too (their replies were already lost upstream), so the pairing never shifts and the
+  // working lamp self-heals. If the prompt matches nothing but turns are open (an extraction miss), fall
+  // back to the oldest so a reply is never silently swallowed; with no open turn at all it's an orphan.
+  private takeMatchingTurn(prompt: string): OpenTurn | undefined {
+    const trimmed = (prompt || "").trim();
+    let index = trimmed ? this.openTurns.findIndex((t) => t.prompt.trim() === trimmed) : -1;
+    if (index < 0) {
+      if (this.openTurns.length === 0) return undefined; // orphan (bootstrap /voice-control:start, etc.)
+      index = 0; // no content match but turns are open → oldest is the best guess
+    }
+    const removed = this.openTurns.splice(0, index + 1); // the match + every older, now-stale turn
+    for (const t of removed) {
+      if (t.kind === "voice" && t.prompt === this.inFlight) {
+        this.inFlight = undefined; // our injection completed (or its close was lost) → release the queue
+        this.injectedAt = undefined;
+      }
+    }
+    if (removed.length > 1) this.log(`reaped ${removed.length - 1} stale turn(s) whose close was lost`);
+    return removed[removed.length - 1];
   }
 
   /** The user Esc'd the running turn (the daemon does the Esc): drop all turns, run the queue. */

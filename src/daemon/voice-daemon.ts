@@ -226,8 +226,15 @@ export class VoiceDaemon {
               }
               this.turns.turnOpened(typeof prompt === "string" ? prompt : "");
             } else {
-              const { reply, replyUuid } = JSON.parse(body || "{}") as { reply?: string; replyUuid?: string };
+              // The Stop hook sends the reply AND the prompt it answered (linked in the transcript) so
+              // the coordinator can pair by identity, not FIFO position.
+              const { prompt, reply, replyUuid } = JSON.parse(body || "{}") as {
+                prompt?: string;
+                reply?: string;
+                replyUuid?: string;
+              };
               this.turns.turnClosed(
+                typeof prompt === "string" ? prompt : "",
                 typeof reply === "string" ? reply : "",
                 typeof replyUuid === "string" ? replyUuid : undefined
               );

@@ -2,15 +2,21 @@
 /**
  * Stop hook for the voice remote.
  *
- * Fires when the interactive Claude Code session finishes a turn. It reads the turn's FINAL
- * assistant reply from the transcript and POSTs it to this pane's daemon at /turn-close. The daemon
- * pairs it with the turn it opened (from the UserPromptSubmit hook) and speaks / mirrors / ignores
- * accordingly — so this hook does NOT try to figure out what the user said (the transcript buries
- * the real prompt under command markers and SKILL.md bodies; UserPromptSubmit carries it instead).
- * If the daemon isn't running, this is a no-op. It never blocks the Stop event.
+ * Fires when the interactive Claude Code session finishes a turn. Reads the turn's FINAL assistant
+ * reply AND the user prompt it answered (linked via `parentUuid` in the transcript) and POSTs both to
+ * this pane's daemon at /turn-close. The daemon pairs the reply to its turn BY THAT PROMPT — identity,
+ * not FIFO position — so a single lost turn can never shift the conversation onto the wrong reply.
+ * No-op if the daemon isn't running. Never blocks the Stop event for longer than RESOLVE_TIMEOUT_MS.
  */
-import { readFileSync, watch } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { postDaemon, readDaemonRuntime, readStdin } from "./lib/daemon-client.mjs";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The finished turn's records are at the END of the transcript, which can grow to many MB over a
+// session — read only the tail rather than re-parsing the whole file on every poll.
+const TAIL_BYTES = 512 * 1024;
+const RESOLVE_TIMEOUT_MS = 12_000;
+const POLL_MS = 150;
 
 main().catch(() => process.exit(0));
 
@@ -26,84 +32,125 @@ async function main() {
   const runtime = readDaemonRuntime();
   if (!runtime?.port) process.exit(0); // daemon not running
 
-  const reply = await resolveReply(hook.transcript_path);
-  if (!reply) process.exit(0);
+  const turn = await resolveTurn(hook.transcript_path);
+  if (!turn) process.exit(0);
 
-  await postDaemon(runtime.port, "/turn-close", { reply: reply.text, replyUuid: reply.uuid }).catch(() => {});
+  await postDaemon(runtime.port, "/turn-close", {
+    prompt: turn.prompt,
+    reply: turn.text,
+    replyUuid: turn.uuid
+  }).catch(() => {});
   process.exit(0);
 }
 
 /**
- * Resolve the turn's final assistant reply. The Stop hook can fire before Claude has flushed the
- * final message to the transcript JSONL, so we read once and, if it isn't there yet, wait for the
- * file to change (fs.watch — event-driven, no polling) and re-read. The turn is done once the newest
- * assistant message carries a terminal stop_reason (not a tool_use pause). Backstop: the hook timeout.
+ * Resolve the finished turn (its reply + the prompt it answered). The Stop hook can fire before Claude
+ * has flushed the final message, so we POLL the transcript until the newest assistant message carries a
+ * terminal stop_reason — robust where fs.watch silently drops or races the write (the bug that lost
+ * replies). Backstop: a hard timeout so the hook never hangs the Stop event.
  */
-function resolveReply(transcriptPath) {
-  if (!transcriptPath) return Promise.resolve(undefined);
-
-  const read = () => readReply(transcriptPath);
-  const first = read();
-  if (first.final) return Promise.resolve({ text: first.text, uuid: first.uuid });
-
-  return new Promise((resolve) => {
-    let watcher;
-    let settled = false;
-    const finish = (reply) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (watcher) watcher.close();
-      resolve(reply);
-    };
-    // If the final message never lands (an errored/killed turn), stop watching so this hook process
-    // can't hang forever — the daemon reaps the still-open turn on its own.
-    const timer = setTimeout(() => finish(undefined), 10_000);
-    try {
-      watcher = watch(transcriptPath, () => {
-        const r = read();
-        if (r.final) finish({ text: r.text, uuid: r.uuid });
-      });
-      watcher.on("error", () => finish(undefined));
-    } catch {
-      finish(undefined);
-    }
-  });
+async function resolveTurn(transcriptPath) {
+  if (!transcriptPath) return undefined;
+  const deadline = Date.now() + RESOLVE_TIMEOUT_MS;
+  for (;;) {
+    const turn = readTurn(transcriptPath);
+    if (turn.final) return turn;
+    if (Date.now() >= deadline) return undefined;
+    await sleep(POLL_MS);
+  }
 }
 
-function readReply(transcriptPath) {
-  let raw;
+// Parse the JSONL records from the tail of the transcript (newest turn lives there).
+function readTailRecords(path) {
+  let fd;
   try {
-    raw = readFileSync(transcriptPath, "utf8");
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - TAIL_BYTES);
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    const lines = buf.toString("utf8").split("\n");
+    if (start > 0) lines.shift(); // drop the partial first line when we began mid-file
+    return lines
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
   } catch {
-    return { final: false };
-  }
-  const records = raw
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => {
+    return [];
+  } finally {
+    if (fd !== undefined)
       try {
-        return JSON.parse(l);
+        closeSync(fd);
       } catch {
-        return null;
+        // ignore
       }
-    })
-    .filter(Boolean);
-
-  // Scan from the end for the newest assistant message. The turn is finished once it carries a
-  // terminal stop_reason; a tool_use pause means the final reply hasn't been written yet.
-  for (let i = records.length - 1; i >= 0; i--) {
-    const record = records[i];
-    const message = record.message || record;
-    const role = message.role || record.type;
-    if (role !== "assistant") continue;
-    const stop = message.stop_reason;
-    if (stop && stop !== "tool_use") {
-      return { final: true, text: extractText(message.content), uuid: record.uuid || message.id || "" };
-    }
-    return { final: false }; // newest assistant message is a tool pause → not done yet
   }
-  return { final: false };
+}
+
+function readTurn(transcriptPath) {
+  const records = readTailRecords(transcriptPath);
+  if (records.length === 0) return { final: false };
+
+  // The newest assistant record. If it's a tool_use pause (no terminal stop_reason), the final reply
+  // hasn't been written yet → not done.
+  let replyIdx = -1;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const m = records[i].message || records[i];
+    if ((m.role || records[i].type) === "assistant") {
+      replyIdx = i;
+      break;
+    }
+  }
+  if (replyIdx < 0) return { final: false };
+  const replyMsg = records[replyIdx].message || records[replyIdx];
+  const stop = replyMsg.stop_reason;
+  if (!stop || stop === "tool_use") return { final: false };
+
+  // The reply is the newest terminal assistant. If it's thinking-only (no text), step back to the
+  // nearest preceding assistant in this turn that actually has text.
+  let text = extractText(replyMsg.content);
+  let uuid = records[replyIdx].uuid || replyMsg.id || "";
+  if (!text) {
+    for (let i = replyIdx - 1; i >= 0; i--) {
+      const m = records[i].message || records[i];
+      const role = m.role || records[i].type;
+      if (role === "user") break; // previous turn boundary
+      if (role !== "assistant") continue;
+      const t = extractText(m.content);
+      if (t) {
+        text = t;
+        uuid = records[i].uuid || m.id || "";
+        break;
+      }
+    }
+  }
+
+  return { final: true, text, uuid, prompt: promptFor(records, records[replyIdx]) };
+}
+
+// The user prompt this reply answered: follow parentUuid from the reply back to the nearest user
+// record. For a typed/voice turn that's the real text (= the open turn's prompt, so the daemon matches
+// it by identity); for a slash-command turn it may be synthetic, but the daemon classifies plugin
+// turns from /turn-open and ignores them regardless. Empty if the link runs off the read tail.
+function promptFor(records, replyRecord) {
+  const byUuid = new Map();
+  for (const r of records) if (r.uuid) byUuid.set(r.uuid, r);
+  let cur = replyRecord;
+  for (let hops = 0; cur && hops < 50; hops++) {
+    const m = cur.message || cur;
+    if ((m.role || cur.type) === "user") {
+      const t = extractText(m.content);
+      if (t) return t;
+    }
+    cur = cur.parentUuid ? byUuid.get(cur.parentUuid) : undefined;
+  }
+  return "";
 }
 
 function extractText(content) {
