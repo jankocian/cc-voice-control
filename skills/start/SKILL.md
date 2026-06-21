@@ -23,16 +23,14 @@ then shows a scannable QR code + the phone URL. State lives in the plugin's own 
    keep running. (If the OpenAI key is missing it instead writes onboarding state and exits.)
 
 2. **Wait for the daemon to publish the session, then show it.** The daemon writes a
-   machine-level QR code (`$CLAUDE_PLUGIN_DATA/qr.txt`, same URL/QR for every pane) and a
-   **per-pane** runtime file at a fixed, plugin-data-independent path
-   (`$HOME/.cache/cc-voice-control/runtime/<CMUX_SURFACE_ID>.json` — fixed so the Stop/UserPromptSubmit
-   hooks find the same file even when their `CLAUDE_PLUGIN_DATA` differs from the daemon's, e.g. under a
-   Codex companion). Poll for THIS pane's runtime file in a **separate, normal (foreground) Bash
-   call** — and also handle the no-API-key case, which writes `$CLAUDE_PLUGIN_DATA/runtime.json` and exits:
+   machine-level QR code (`qr.txt`, the same URL/QR for every pane) and a **per-pane** runtime
+   file (`runtime/<CMUX_SURFACE_ID>.json`, so multiple panes don't clobber each other). Poll for
+   THIS pane's runtime file in a **separate, normal (foreground) Bash call** — and also handle
+   the no-API-key case, which writes the machine-level `runtime.json` and exits:
 
    ```sh
    D="${CLAUDE_PLUGIN_DATA}"
-   R="$HOME/.cache/cc-voice-control/runtime/${CMUX_SURFACE_ID:-default}.json"
+   R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
    for i in $(seq 1 20); do { [ -f "$R" ] || [ -f "$D/runtime.json" ]; } && break; sleep 0.5; done
    if [ -f "$R" ]; then cat "$D/qr.txt" 2>/dev/null; echo; cat "$R";
    elif [ -f "$D/runtime.json" ]; then cat "$D/runtime.json";   # may be a needsSetup notice
