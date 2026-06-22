@@ -48,6 +48,11 @@ export function useVoiceControls({
   const resendToastRef = useRef<string | null>(null);
   const sendAudioRef = useRef<(clip: RecordedClip, mode: "queue" | "interrupt") => void>(() => {});
 
+  // Dismiss a stale resend toast (a new recording / a confirmed send supersedes a prior failure).
+  const clearResendToast = useCallback(() => {
+    if (resendToastRef.current) toast.close(resendToastRef.current);
+    resendToastRef.current = null;
+  }, []);
   // A retryable error toast with a "Resend" action — one at a time (replace any prior). Re-sends the last
   // retained clip down the same path (a fresh submit_audio to the then-active thread).
   const raiseResendToast = useCallback(() => {
@@ -59,17 +64,15 @@ export function useVoiceControls({
       actionProps: {
         children: "Resend",
         onClick: () => {
+          // Dismiss this error toast first (Toast.Action doesn't auto-close) so the retry doesn't leave a
+          // stale "couldn't send" showing while it's actually re-sending; a fresh failure re-raises it.
+          clearResendToast();
           const last = lastSendRef.current;
           if (last) sendAudioRef.current(last.clip, last.mode);
         }
       }
     });
-  }, []);
-  // Dismiss a stale resend toast (a new recording / a confirmed send supersedes a prior failure).
-  const clearResendToast = useCallback(() => {
-    if (resendToastRef.current) toast.close(resendToastRef.current);
-    resendToastRef.current = null;
-  }, []);
+  }, [clearResendToast]);
 
   const sendAudio = useCallback(
     (clip: RecordedClip, mode: "queue" | "interrupt") => {
