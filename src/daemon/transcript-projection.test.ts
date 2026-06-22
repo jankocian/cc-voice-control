@@ -48,12 +48,38 @@ describe("projectTurns — the filter", () => {
     const turns = projectTurns(records);
     expect(turns.map((t) => t.uuid)).toEqual(["u1", "a1", "u2", "u3", "a2"]);
     expect(turns.map((t) => t.role)).toEqual(["user", "claude", "user", "user", "claude"]);
+    expect(turns.every((t) => t.interim === false)).toBe(true); // no tool_use-with-text records here
     expect(turns[0]).toEqual({
       uuid: "u1",
       timestamp: Date.parse("2026-06-21T15:00:01.000Z"),
       role: "user",
-      text: "Hee-o."
+      text: "Hee-o.",
+      interim: false
     });
+  });
+
+  it("surfaces interim STEPS (assistant text before a tool call) flagged interim, plus the final reply", () => {
+    const turns = projectTurns([
+      user("u", "2026-06-21T15:00:01.000Z", "fix the bug", { promptSource: "typed" }),
+      // narration text written before a tool call → a step
+      asst(
+        "s1",
+        "2026-06-21T15:00:02.000Z",
+        [
+          { type: "text", text: "I'll start by reading the file." },
+          { type: "tool_use", id: "t", name: "Read", input: {} }
+        ],
+        "tool_use"
+      ),
+      asst("s2", "2026-06-21T15:00:03.000Z", [{ type: "thinking", thinking: "hmm" }], "tool_use"), // thinking-only → dropped
+      asst("a", "2026-06-21T15:00:04.000Z", text("Fixed it."))
+    ]);
+    expect(turns.map((t) => [t.uuid, t.interim])).toEqual([
+      ["u", false],
+      ["s1", true], // the step
+      ["a", false] // the final reply
+    ]);
+    expect(turns[1].text).toBe("I'll start by reading the file.");
   });
 
   it("orders by native timestamp even if records arrive out of order, and uses native uuids as identity", () => {
@@ -71,7 +97,7 @@ describe("projectTurns — the filter", () => {
     expect(projectTurns(records, 3).map((t) => t.uuid)).toEqual(["u7", "u8", "u9"]);
   });
 
-  it("dedupes a finished reply from a tool-call pause in the same turn (keeps only the end_turn text)", () => {
+  it("keeps mid-turn narration as a step and the end_turn text as the final reply", () => {
     const turns = projectTurns([
       user("u", "2026-06-21T15:00:01.000Z", "do it", { promptSource: "typed" }),
       asst(
@@ -85,7 +111,11 @@ describe("projectTurns — the filter", () => {
       ),
       asst("a-final", "2026-06-21T15:00:04.000Z", text("done."))
     ]);
-    expect(turns.map((t) => t.uuid)).toEqual(["u", "a-final"]);
+    expect(turns.map((t) => [t.uuid, t.interim])).toEqual([
+      ["u", false],
+      ["a-mid", true],
+      ["a-final", false]
+    ]);
   });
 });
 

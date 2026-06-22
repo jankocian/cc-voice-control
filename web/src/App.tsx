@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
+import { StepsToggle } from "./components/StepsToggle";
 import { ThreadPager } from "./components/ThreadPager";
 import { type ThreadRow, ThreadSwitcher } from "./components/ThreadSwitcher";
 import { TopBar } from "./components/TopBar";
@@ -99,6 +100,30 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   useEffect(() => {
     if (!connected) setTranscribingThreadId(null);
   }, [connected, setTranscribingThreadId]);
+
+  // "Read every step": persisted per phone. Tell the active thread's daemon the current mode — re-sent when
+  // it (re)connects or the active thread changes, since the daemon defaults to off on a fresh process.
+  const [speakSteps, setSpeakSteps] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("vc-speak-steps") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSteps = useCallback(() => {
+    setSpeakSteps((on) => {
+      const next = !on;
+      try {
+        localStorage.setItem("vc-speak-steps", next ? "1" : "0");
+      } catch {
+        /* private mode — in-memory only */
+      }
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    if (activeThreadId && activeConnected) sendDaemon(activeThreadId, { type: "set_speak_steps", on: speakSteps });
+  }, [speakSteps, activeThreadId, activeConnected, sendDaemon]);
 
   // Focus a thread (pill / dropdown / swipe settle). Stop the previous thread's audio first so it
   // doesn't keep playing under the new view — the shared player is a singleton across threads.
@@ -204,12 +229,15 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
       <TopBar>
-        <ThreadSwitcher
-          rows={switcherRows}
-          activeThreadId={activeThreadId}
-          onSelect={switchThread}
-          onSpawn={voice.onSpawn}
-        />
+        <div className="flex items-center gap-2">
+          <StepsToggle on={speakSteps} onToggle={toggleSteps} />
+          <ThreadSwitcher
+            rows={switcherRows}
+            activeThreadId={activeThreadId}
+            onSelect={switchThread}
+            onSpawn={voice.onSpawn}
+          />
+        </div>
       </TopBar>
 
       <div className="relative min-h-0 flex-1">

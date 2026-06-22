@@ -16,6 +16,8 @@ export type Message = {
   timestamp: number;
   // True for a reply whose audio the daemon still retains (fetchable on demand). Drives tap-to-play.
   hasAudio?: boolean;
+  // A "step": Claude's narration before a tool call. Rendered dimmer; tap-to-play synthesizes on demand.
+  interim?: boolean;
   title: string;
   body: string;
   // Wall-clock time the turn happened, e.g. "12:34 AM".
@@ -32,6 +34,7 @@ export function messageFromHistory(turn: HistoryTurn): Message {
     requestId: turn.requestId,
     timestamp: turn.timestamp,
     hasAudio: turn.hasAudio,
+    interim: turn.interim === true,
     title: turn.role === "user" ? "You" : "Claude Code",
     body: turn.text,
     time: formatClock(turn.timestamp)
