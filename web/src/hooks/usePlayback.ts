@@ -147,21 +147,15 @@ export function usePlayback({
   // Reflect the audio element's actual play/pause into render state.
   useEffect(() => {
     const onPlay = () => setPlayingId(currentPlayingIdRef.current);
-    // Fully tear down the <audio> element. This is the load-bearing fix for "background
-    // music never resumes": on iOS a still-loaded element keeps WebKit's native audio
-    // session ACTIVE, which suppresses the resume of the other app (Spotify/Apple Music).
-    // Removing the src + calling load() forces the session to deactivate — the reliable
-    // trigger for the other app to come back. We then mark the session explicitly mixable
-    // ("ambient"); the next reply re-claims "transient-solo" in startPlayback.
+    // Reset playback state when a clip stops (natural end, error, or drop). We deliberately do NOT
+    // tear the element down with load(): that only ever existed to "force the iOS session to
+    // deactivate so background music resumes" — a resume iOS WebKit never actually delivers — and
+    // slamming load() at the end produced an audible click. Under the mixing model the reply plays
+    // as an "ambient" (mixable) clip that never paused the music, so there is nothing to resume and
+    // nothing to tear down; just revoke the blob URL and clear state.
     const unload = () => {
       try {
         player.pause();
-      } catch {
-        /* ignore */
-      }
-      player.removeAttribute("src");
-      try {
-        player.load();
       } catch {
         /* ignore */
       }
@@ -174,17 +168,12 @@ export function usePlayback({
       setLoadedId(null);
       setPosition(0);
       setDuration(0);
-      setAudioSessionType("ambient");
     };
     const onPause = () => {
       setPlayingId(null);
-      // A manual pause keeps the clip loaded (so it can be resumed from the scrubber) but
-      // still hands the session back as mixable so background audio isn't held hostage.
-      setAudioSessionType("ambient");
     };
-    // Natural end / load error → tear the element down so the native session deactivates
-    // and any ducked background music resumes. The row falls back to its replay control
-    // (still in playableIds); a tap reloads it fresh. A natural end (however the clip was started —
+    // Natural end / load error → reset playback state; the row falls back to its replay control
+    // (still in playableIds), so a tap reloads it fresh. A natural end (however the clip was started —
     // autoplay OR a manual tap) fires onAutoReplyFinished, the auto-respond hands-free trigger; App gates
     // it to a real final reply + the setting. A load error never fires it.
     const onEnded = () => {
@@ -248,11 +237,12 @@ export function usePlayback({
     [player, playbackRate]
   );
 
-  // Start (or resume) the loaded clip. Claims the iOS "transient-solo" audio session
-  // first, so background music (Spotify) pauses for the reply and auto-resumes when the
-  // clip ends/pauses (the pause/ended/error listeners reset the session to "auto").
+  // Start (or resume) the loaded clip on the "ambient" (mixable) audio session so the reply plays
+  // OVER background music (Spotify) instead of pausing it: iOS WebKit can pause other audio but
+  // never reliably resumes it, so we never pause it. (Ambient respects the device mute switch — with
+  // music playing the switch is off, so the reply is audible and mixes in.)
   const startPlayback = useCallback((): void => {
-    setAudioSessionType("transient-solo");
+    setAudioSessionType("ambient");
     player.play().catch(() => {});
   }, [player]);
 

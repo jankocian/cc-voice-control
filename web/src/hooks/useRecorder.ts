@@ -22,8 +22,9 @@ export type UseRecorderOptions = {
 };
 
 // A held mic track is reusable as long as it's LIVE (readyState "live"). We deliberately do NOT reject a
-// momentarily-MUTED track: iOS mutes the track when the page's audio session churns (e.g. a reply plays →
-// transient-solo → ambient), and rejecting it would force a fresh getUserMedia — which on iOS Safari
+// momentarily-MUTED track: iOS mutes the track when the page's audio session churns (e.g. record holds
+// "play-and-record", a reply plays "ambient", idle drops to "auto"), and rejecting it would force a fresh
+// getUserMedia — which on iOS Safari
 // re-shows the permission prompt EVERY time (permission isn't persisted; the only way to avoid the prompt
 // is to keep one stream alive and reuse it). Starting a recording re-claims "play-and-record", which
 // re-activates the mic and clears a transient mute, so reuse records real audio. An `ended` track is gone
@@ -228,10 +229,11 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     // Do NOT drop to "auto" here: on iOS, leaving the recording category ENDS the held mic track,
     // so the next record re-runs getUserMedia → a fresh permission prompt (the exact symptom). We hold
     // "play-and-record" so the track stays live for reuse. The cost is background music stays ducked
-    // between a recording and its reply; the reply's TTS (transient-solo) resumes it, and the idle
-    // release / pagehide / unmount hand the session back to "auto" so music isn't held hostage for long.
-    // ponytail: iOS couples mic-alive with record-mode — can't both avoid re-prompts AND resume music
-    // between recordings; the user chose no-reprompt. Needs on-device verification.
+    // while we hold the mic; the idle release / pagehide / unmount hand the session back to "auto" so
+    // music isn't held hostage for long. (The reply itself plays "ambient"/mixed, so it doesn't pause
+    // music — but it also can't un-duck what the live mic is ducking.)
+    // ponytail: iOS couples mic-alive with record-mode — can't both avoid re-prompts AND keep music
+    // un-ducked while the mic is held; the user chose no-reprompt. Needs on-device verification.
     // Cancelled by the user — drop the clip silently (no clip, no error flash).
     if (canceled) return;
     if (!blob.size) {
