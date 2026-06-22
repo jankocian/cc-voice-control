@@ -4,6 +4,7 @@ import {
   type ProjectedTurn,
   pairReplies,
   projectTurns,
+  resolveVoiceReply,
   type TranscriptRecord
 } from "./transcript-projection.js";
 
@@ -103,6 +104,24 @@ describe("projectTurns — the filter", () => {
     expect(projectTurns(records, 3).map((t) => t.uuid)).toEqual(["u7", "u8", "u9"]);
   });
 
+  it("drops a thinking-only end_turn record, keeping the later answer text as the final reply", () => {
+    // Extended thinking flushes the thinking block as its OWN record stamped end_turn, then streams the
+    // answer text (same message) as a second end_turn record many seconds later. The thinking record has
+    // no text → dropped; only the answer text becomes the final reply. (Real incident: d6644242 transcript.)
+    const turns = projectTurns([
+      user("u", "2026-06-22T13:50:35.594Z", "deep research please", { promptSource: "typed" }),
+      asst("step", "2026-06-22T13:53:54.182Z", text("Let me read the recorder code."), "tool_use"),
+      asst("think", "2026-06-22T13:55:30.072Z", [{ type: "thinking", thinking: "x".repeat(5123) }], "end_turn"),
+      asst("answer", "2026-06-22T13:55:49.298Z", text("## What's happening\n\nI traced it…"), "end_turn")
+    ]);
+    expect(turns.map((t) => [t.uuid, t.interim])).toEqual([
+      ["u", false],
+      ["step", true],
+      ["answer", false] // the thinking-only record is gone
+    ]);
+    expect(pairReplies(turns).map((p) => [p.prompt?.uuid, p.reply.uuid])).toEqual([["u", "answer"]]);
+  });
+
   it("keeps mid-turn narration as a step and the end_turn text as the final reply", () => {
     const turns = projectTurns([
       user("u", "2026-06-21T15:00:01.000Z", "do it", { promptSource: "typed" }),
@@ -155,6 +174,43 @@ describe("pairReplies — voice TTS targeting", () => {
   it("returns no pairs when there is no reply yet", () => {
     const turns = projectTurns([user("u1", "2026-06-21T15:00:01.000Z", "hi", { promptSource: "typed" })]);
     expect(pairReplies(turns)).toEqual([]);
+  });
+});
+
+describe("resolveVoiceReply — pick the FINAL reply to speak by identity, never an interim step", () => {
+  const turn = (uuid: string, role: ProjectedTurn["role"], ts: number, interim = false): ProjectedTurn => ({
+    uuid,
+    timestamp: ts,
+    role,
+    text: `${uuid}-text`,
+    interim
+  });
+
+  it("returns the final reply paired to our prompt uuid, not the interim steps before it", () => {
+    const turns = [
+      turn("u", "user", 1),
+      turn("s1", "claude", 2, true),
+      turn("s2", "claude", 3, true),
+      turn("final", "claude", 4)
+    ];
+    expect(resolveVoiceReply(turns, "u")?.uuid).toBe("final");
+  });
+
+  it("returns undefined while only interim steps have flushed — so the caller keeps waiting for the answer", () => {
+    // THE REGRESSION: the Stop hook can fire (or be polled) before the answer text lands; the old fallback
+    // grabbed the first step here and spoke/consumed it, so the real answer was never spoken (no audio).
+    const turns = [turn("u", "user", 1), turn("s1", "claude", 2, true), turn("s2", "claude", 3, true)];
+    expect(resolveVoiceReply(turns, "u")).toBeUndefined();
+  });
+
+  it("matches by IDENTITY, not order: with two prompts + replies, each uuid resolves to its own reply", () => {
+    const turns = [turn("u1", "user", 1), turn("a1", "claude", 2), turn("u2", "user", 3), turn("a2", "claude", 4)];
+    expect(resolveVoiceReply(turns, "u1")?.uuid).toBe("a1");
+    expect(resolveVoiceReply(turns, "u2")?.uuid).toBe("a2");
+  });
+
+  it("returns undefined when the prompt uuid isn't anchored yet", () => {
+    expect(resolveVoiceReply([turn("final", "claude", 4)], undefined)).toBeUndefined();
   });
 });
 

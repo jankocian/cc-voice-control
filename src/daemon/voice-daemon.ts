@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { type FSWatcher, mkdirSync, rmSync, watch, writeFileSync } from "node:fs";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,19 +31,26 @@ import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
-import { dropSessionAnnouncement, type ProjectedTurn, pairReplies } from "./transcript-projection.js";
+import { dropSessionAnnouncement, type ProjectedTurn, resolveVoiceReply } from "./transcript-projection.js";
 import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
 type Audio = { audioBase64: string; mimeType: string };
 
-// A spoken prompt we injected, tracked until its reply is spoken. `id`/`ts` render the optimistic row
-// shown before the prompt lands in the transcript; `opened` is set on its UserPromptSubmit (confirming the
-// turn is ours); `userUuid`/`userTs` bind it to its native user record, after which the prompt is
-// identified by native uuid (not text) and the optimistic row is dropped.
-type PendingVoice = { id: string; text: string; ts: number; opened?: boolean; userUuid?: string; userTs?: number };
+// A spoken prompt we injected, tracked until its reply is spoken. `id`/`ts` render the optimistic row shown
+// before the prompt lands in the transcript; `opened` is set on its UserPromptSubmit (confirming the turn is
+// ours); `userUuid`/`userTs` bind it to its native user record (identity for the reply match + the anchor
+// for which steps belong to this turn); `openOffset` is the transcript byte position just before the prompt,
+// captured at turn-open so the whole turn — however large — is always read back in full (see voiceReadFloor).
+type PendingVoice = {
+  id: string;
+  text: string;
+  ts: number;
+  opened?: boolean;
+  userUuid?: string;
+  userTs?: number;
+  openOffset?: number;
+};
 
 // Reconnect backoff for transient bridge drops (a terminal 1008 close is handled separately).
 const RECONNECT_DELAY_MS = 1500;
@@ -60,11 +67,22 @@ const MAX_SPEECH_CHARS = 40_000;
 // tap-to-play, so neither grows unbounded over a long session.
 const MAX_PROJECTED_TURNS = 40;
 const MAX_AUDIO_ENTRIES = 20;
+// Cap the set of already-spoken reply/step uuids (the dedup guard against re-speaking on re-projection).
+// It tracks more uuids than we keep audio for — every interim step a long turn speaks, plus replies — so
+// it's a multiple of the audio cap rather than equal to it.
+const SPOKEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
 // Cap untracked-but-queued voice prompts (bounds memory if injections never open turns).
 const MAX_PENDING_VOICE = 16;
-// On a turn close, poll the transcript up to this long for the voice reply to flush before giving up.
-const SETTLE_TIMEOUT_MS = 12_000;
-const SETTLE_POLL_MS = 150;
+// After a turn closes we wait for the voice reply to FLUSH to the transcript, reacting to the actual file
+// write (fs.watch) rather than guessing a timeout — see waitForTranscript. The Stop hook can fire well
+// before the answer TEXT lands: an extended-thinking turn writes the thinking block as its own `end_turn`
+// record first, then streams the answer seconds-to-minutes later (≈19s behind for a ~4k-char answer in
+// the wild; a long answer streams longer). These caps are only the safety backstop for the abnormal case
+// where the answer never comes (e.g. an interrupted turn) — the watch resolves the normal case at once.
+const REPLY_FLUSH_CAP_MS = 120_000;
+// fs.watch can coalesce/miss events on some filesystems, so a slow poll backs it up. Promptness comes from
+// the watch; this only bounds how long a missed event can stall us.
+const FLUSH_POLL_MS = 1_000;
 
 // Plugin-load root, three dirs up from this module either way (dist/daemon or src/daemon). Only used
 // to point a spawned `claude` at a `--plugin-dir`-loaded (dev) plugin.
@@ -137,6 +155,10 @@ export class VoiceDaemon {
   //    doesn't show the previous one still sitting in the transcript tail).
   private readonly audio = new Map<string, Audio>();
   private lastTranscriptPath?: string;
+  // The transcript size as of our last read. Captured as a turn's `openOffset` when it opens (the prompt is
+  // written just after this point), so the turn — however large it grows — is always read back in full.
+  // Undefined until the first read, so the first turn after a (re)start falls back to the tail.
+  private lastEof?: number;
   private readonly pending: PendingVoice[] = [];
   private readonly spoken = new Set<string>();
   private floor = 0;
@@ -271,7 +293,7 @@ export class VoiceDaemon {
               if (transcriptPath) this.lastTranscriptPath = transcriptPath;
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
-              this.bindVoicePrompt(realPrompt); // if this turn is one of ours, bind it to its native uuid
+              this.bindVoicePrompt(realPrompt); // mark the turn ours + record its read floor (openOffset)
               this.projectAndEmit(); // the new user turn is in the transcript now → show it, keyed natively
             } else if (route === "/turn-progress") {
               // PreToolUse: Claude wrote a step (narration) before this tool call → re-project so it shows
@@ -413,9 +435,16 @@ export class VoiceDaemon {
         // emits status only on change, which a fresh phone misses), then re-projects the thread so a
         // refresh / 2nd browser restores it. Only emit history once we know the transcript path: a `history`
         // snapshot is authoritative (the phone replaces with it), so emitting an empty one before the first
-        // hook of a freshly-(re)started daemon would wipe the phone's thread. Text only — audio on demand.
+        // hook of a freshly-(re)started daemon would wipe the phone's thread. Text only — audio on demand,
+        // EXCEPT a voice reply we never got to speak (its answer landed after the turn-close settle window,
+        // or the phone was backgrounded when it did): speak it now so a reconnect/refresh isn't left with a
+        // silent final answer. Idempotent (`spoken`), so a reconnect never re-speaks an already-spoken one.
         this.emitStatus();
-        if (this.lastTranscriptPath) this.projectAndEmit();
+        if (this.lastTranscriptPath) {
+          const turns = this.projectedNow();
+          this.sendToBrowser(this.historyFrom(turns));
+          this.speakReadyVoiceReplies(turns);
+        }
         return;
       case "get_audio":
         // Tap-to-play on a row whose audio isn't cached: serve it, synthesizing on demand for a step (we
@@ -558,23 +587,46 @@ export class VoiceDaemon {
 
   private projectedNow(): ProjectedTurn[] {
     if (!this.lastTranscriptPath) return [];
-    const turns = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter(
-      (t) => t.timestamp >= this.floor
-    );
+    // Read from the start of the oldest open voice turn (so its prompt is always present for the reply
+    // match, however large the turn) or the tail (recent history for the phone). Remember the file end as
+    // the read floor we'll capture at the next turn-open.
+    const { turns, eof } = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS, this.voiceReadFloor());
+    this.lastEof = eof;
     // Hide the start-skill's "voice remote is live" QR/URL reply — it's noise on the phone (and must
     // never be spoken). Matched on our own session URL, so it's prose-independent. See the helper.
-    return dropSessionAnnouncement(turns, this.init.browserUrl);
+    return dropSessionAnnouncement(
+      turns.filter((t) => t.timestamp >= this.floor),
+      this.init.browserUrl
+    );
+  }
+
+  // The earliest read floor among voice turns still awaiting their reply — so projectedNow reads from the
+  // start of the oldest unresolved voice turn, guaranteeing its prompt record is present for the identity
+  // match no matter how much the turn wrote. Undefined when no voice turn is open → projectedNow uses the
+  // tail. Once a turn's reply is spoken its entry is dropped, so the window shrinks back to the tail.
+  private voiceReadFloor(): number | undefined {
+    let floor: number | undefined;
+    for (const p of this.pending) {
+      if (p.opened && p.openOffset !== undefined)
+        floor = floor === undefined ? p.openOffset : Math.min(floor, p.openOffset);
+    }
+    return floor;
   }
 
   // Mark a just-opened turn as ours if it matches a queued voice prompt (by the hook's REAL prompt text —
-  // the one authoritative point where text is trusted, at the instant the turn opens). From here the entry
-  // is bound to its native user record by uuid (bindPending), so duplicates / terminal collisions can't
-  // mis-target it.
+  // the one authoritative point where text is trusted, at the instant the turn opens). We also record the
+  // turn's read floor: `lastEof` is the transcript size as of our previous read, i.e. just BEFORE this
+  // prompt was written, so reading from there always includes the prompt (and everything the turn goes on to
+  // write). From here the entry is bound to its native user record by uuid (bindPending), so duplicates /
+  // terminal collisions can't mis-target it.
   private bindVoicePrompt(prompt: string): void {
     const text = prompt.trim();
     if (!text) return;
     const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
-    if (entry) entry.opened = true;
+    if (entry) {
+      entry.opened = true;
+      entry.openOffset = this.lastEof;
+    }
   }
 
   // Bind each opened-but-unbound voice entry to its native user record (newest matching one not already
@@ -627,7 +679,7 @@ export class VoiceDaemon {
     if (!voice) return;
     for (const t of turns) {
       if (!t.interim || this.spoken.has(t.uuid) || t.timestamp < (voice.userTs ?? 0)) continue;
-      this.remember(this.spoken, t.uuid, MAX_AUDIO_ENTRIES * 4);
+      this.remember(this.spoken, t.uuid, SPOKEN_UUID_CAP);
       void this.speak(t.uuid, t.text);
     }
   }
@@ -656,45 +708,84 @@ export class VoiceDaemon {
     );
   }
 
-  // After a turn closes: wait until every voice turn we're tracking has its reply flushed (positive
-  // evidence, not just "the file stopped changing" — the Stop hook can fire before the reply lands), then
-  // re-project and speak each unspoken voice reply. Replies are matched to our prompts by native uuid, so a
-  // duplicate phrase or a terminal-typed turn with the same text can never be mis-spoken; `spoken` makes it
-  // idempotent + self-healing. Hard timeout so a reply-less / typed turn never hangs.
+  // After a turn closes: wait until every voice turn we're tracking has its FINAL reply flushed, then
+  // re-project and speak each unspoken voice reply. We wait on POSITIVE evidence (the answer record is in
+  // the transcript) reacting to the actual file write — never a fixed timeout — because the Stop hook can
+  // fire long before the answer TEXT lands (an extended-thinking turn flushes the thinking block as its own
+  // `end_turn` record first, then streams the answer seconds-to-minutes later). Replies are matched to our
+  // prompts by native uuid (the prompt is always in the read window — see voiceReadFloor), so a duplicate
+  // phrase / terminal-typed turn can't be mis-spoken; `spoken` makes it idempotent + self-healing.
   private async handleTurnClose(): Promise<void> {
     if (!this.lastTranscriptPath) return;
-    let turns = this.projectedNow();
-    this.sendToBrowser(this.historyFrom(turns)); // show the turn promptly, before waiting on the reply
-    const deadline = Date.now() + SETTLE_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      this.bindPending(turns);
-      if (this.pending.every((p) => !p.opened || this.findReply(turns, p))) break; // all tracked replies in
-      await sleep(SETTLE_POLL_MS);
-      turns = this.projectedNow();
-    }
+    this.sendToBrowser(this.historyFrom(this.projectedNow())); // show the turn promptly, before the reply
+    await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
+    const turns = this.projectedNow();
     this.sendToBrowser(this.historyFrom(turns));
+    this.speakReadyVoiceReplies(turns);
+  }
 
+  // True once every opened voice prompt we're tracking has its final reply present in the transcript. Binds
+  // pending entries as it goes, so the wait both binds the prompt's uuid and detects its answer.
+  private repliesSettled(): boolean {
+    const turns = this.projectedNow();
+    this.bindPending(turns);
+    return this.pending.every((p) => !p.opened || this.findReply(turns, p) !== undefined);
+  }
+
+  // Resolve when `ready()` is true, driven by the transcript's actual writes (fs.watch) so we react the
+  // instant a record flushes — no fixed-timeout guessing, and an answer that streams in long after the Stop
+  // hook is still caught. A slow poll backs up fs.watch (it can coalesce/miss events on some filesystems);
+  // `capMs` is the backstop for the abnormal case where the awaited record never arrives. Resolves at once
+  // when already ready (the common case: the answer was flushed before the Stop hook fired) or once the
+  // daemon is stopping, so a pending wait can never keep a torn-down daemon's event loop alive.
+  private waitForTranscript(ready: () => boolean, capMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const path = this.lastTranscriptPath;
+      if (!path || this.stopped || ready()) return resolve();
+      let watcher: FSWatcher | undefined;
+      let poll: ReturnType<typeof setInterval> | undefined;
+      let cap: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        watcher?.close();
+        if (poll) clearInterval(poll);
+        if (cap) clearTimeout(cap);
+        resolve();
+      };
+      const check = () => {
+        if (this.stopped || ready()) finish();
+      };
+      try {
+        watcher = watch(path, check);
+      } catch {
+        // fs.watch unsupported here → the poll alone carries it
+      }
+      poll = setInterval(check, FLUSH_POLL_MS);
+      cap = setTimeout(finish, capMs);
+    });
+  }
+
+  // Speak the FINAL reply of every opened voice prompt whose answer has now flushed, retiring its pending
+  // entry. Idempotent via `spoken`, and it only ever resolves a final reply (never an interim step), so a
+  // voice entry whose answer hasn't landed yet is left untouched — to be spoken when it does, on the turn
+  // close OR a later event (a reconnect `sync`, the next turn). That late-retry is what saves the reply
+  // when the answer streams in after the settle window (a long extended-thinking turn).
+  private speakReadyVoiceReplies(turns: ProjectedTurn[]): void {
     for (let i = this.pending.length - 1; i >= 0; i--) {
       const entry = this.pending[i];
       if (!entry.opened) continue;
       const reply = this.findReply(turns, entry);
       if (!reply || this.spoken.has(reply.uuid)) continue;
       this.pending.splice(i, 1);
-      this.remember(this.spoken, reply.uuid, MAX_AUDIO_ENTRIES * 4);
+      this.remember(this.spoken, reply.uuid, SPOKEN_UUID_CAP);
       // "off" still resolves the turn + shows the reply, but doesn't auto-play it (tap-to-play remains).
       if (this.speakMode !== "off") void this.speak(reply.uuid, reply.text);
     }
   }
 
-  // The reply to a bound voice prompt: the one whose paired prompt IS our native user record (by uuid).
-  // Fallback to the earliest unspoken reply after our prompt's timestamp for the rare case its user record
-  // has scrolled out of the read tail (so pairReplies can't see it). Undefined until the reply has flushed.
+  // The reply to a bound voice prompt (see resolveVoiceReply): the FINAL reply whose immediately-preceding
+  // user record IS our prompt (by uuid). NEVER an interim step. Undefined until the answer text has flushed.
   private findReply(turns: ProjectedTurn[], entry: PendingVoice): ProjectedTurn | undefined {
-    if (!entry.userUuid) return undefined;
-    const paired = pairReplies(turns).find((p) => p.prompt?.uuid === entry.userUuid)?.reply;
-    if (paired) return paired;
-    if (entry.userTs === undefined) return undefined;
-    return turns.find((t) => t.role === "claude" && t.timestamp > (entry.userTs ?? 0) && !this.spoken.has(t.uuid));
+    return resolveVoiceReply(turns, entry.userUuid);
   }
 
   // Retain synthesized audio keyed by native uuid, evicting the oldest past the cap.
