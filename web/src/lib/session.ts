@@ -7,6 +7,8 @@
 // Standing access is a per-device httpOnly cookie minted by POST /claim during a pairing window — never
 // the secret — so a stolen conversation history (which never contains the cookie) grants no access.
 
+import { sha256Hex } from "./e2e";
+
 export type SessionCredentials = {
   secret: string;
 };
@@ -33,10 +35,9 @@ export function readSessionCredentials(loc: Location = window.location): Session
 }
 
 // routingId = sha256(secret) (lowercase hex). MUST match the daemon's deriveRoutingId (node createHash)
-// exactly, or the two ends would reach different Durable Objects.
-export async function deriveRoutingId(secret: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+// exactly, or the two ends would reach different Durable Objects — hence the shared sha256Hex.
+export function deriveRoutingId(secret: string): Promise<string> {
+  return sha256Hex(secret);
 }
 
 // The bridge socket: wss when the page is https, routed by routingId, carrying only role=browser. The

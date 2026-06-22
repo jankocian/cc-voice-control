@@ -75,6 +75,20 @@ export async function openJson<T>(key: CryptoKey, blob: EncBlob, aad: string): P
   return JSON.parse(await open(key, blob, aad)) as T;
 }
 
+// SHA-256 → lowercase hex, via WebCrypto. Shared by the phone (routingId) and the worker (device-token
+// hashing) so they can't drift. The daemon derives routingId with Node's sync createHash — same output,
+// pinned by a test — because it can't await in a sync constructor path.
+export async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes(input));
+  return hex(new Uint8Array(digest));
+}
+
+// base64url of raw bytes (used for the device token). Built on the same call-stack-safe base64 as the
+// sealing path, then made URL-safe.
+export function toBase64url(raw: Uint8Array): string {
+  return toBase64(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 // base64 (standard, with +/=) for JSON transport. Loop, not spread — audio blobs are hundreds of KB and
 // String.fromCharCode(...bigArray) would overflow the call stack.
 function toBase64(bytes: Uint8Array): string {
@@ -87,5 +101,11 @@ function fromBase64(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
   const out = new Uint8Array(new ArrayBuffer(binary.length));
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function hex(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
   return out;
 }

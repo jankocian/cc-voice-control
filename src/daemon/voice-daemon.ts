@@ -17,6 +17,7 @@ import type {
   ThreadInfo,
   WireThreadInfo
 } from "../shared/protocol.js";
+import { createSerializer } from "../shared/serialize.js";
 import { startBridgeHeartbeat } from "./bridge-heartbeat.js";
 import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
 import {
@@ -180,11 +181,11 @@ export class VoiceDaemon {
 
   // End-to-end encryption: the AES key derived from the session secret (the worker never has it), and
   // the SEALED label cached so the (sync) registerThread can send it without awaiting. Outbound content
-  // is sealed through a promise chain so concurrent sends keep their order (history snapshots must not
-  // be overtaken by a later one). Both set in start() before the first send.
+  // is sealed through a serializer so concurrent sends keep their order (a history snapshot must not be
+  // overtaken by a later one). Both set in start() before the first send.
   private key!: CryptoKey;
   private sealedLabel!: EncBlob;
-  private sealChain: Promise<void> = Promise.resolve();
+  private readonly enqueueSeal = createSerializer();
 
   constructor(init: DaemonInit) {
     this.init = init;
@@ -347,7 +348,7 @@ export class VoiceDaemon {
     try {
       writeFileSync(qrPath(), `${renderQr(this.init.browserUrl)}\n`);
     } catch (error) {
-      console.error(`[qr] render failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[qr] render failed: ${errText(error)}`);
     }
     // Per-thread runtime file (runtime/<surfaceId>.json) so panes don't clobber each other's
     // port/pid and this pane's Stop/reset hooks reach THIS daemon.
@@ -381,12 +382,18 @@ export class VoiceDaemon {
   // connect (so `pair` works even during a brief reconnect).
   private openPairWindow(): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.send({ channel: "control", event: { type: "open_claim_window" } });
+      this.requestClaimWindow();
       console.error("[pair] opened a device-pairing window");
     } else {
       this.pairWindowRequested = true;
       console.error("[pair] bridge socket down — pairing window will open on reconnect");
     }
+  }
+
+  // Ask the DO to open a device-pairing window (the one control message both the first-connect path and
+  // /voice-control:pair emit).
+  private requestClaimWindow(): void {
+    this.send({ channel: "control", event: { type: "open_claim_window" } });
   }
 
   // ---- bridge ----------------------------------------------------------------
@@ -414,7 +421,7 @@ export class VoiceDaemon {
       this.everConnected = true;
       if ((firstConnect && !this.wasSpawned) || this.pairWindowRequested) {
         this.pairWindowRequested = false;
-        this.send({ channel: "control", event: { type: "open_claim_window" } });
+        this.requestClaimWindow();
       }
       // Keep this socket alive + detect a half-open drop (zombie OPEN that never fires close).
       this.stopHeartbeat = startBridgeHeartbeat(ws, BRIDGE_PING_INTERVAL_MS);
@@ -537,7 +544,7 @@ export class VoiceDaemon {
       res.end(JSON.stringify(result));
     } catch (error) {
       // Never leave the skill's request hanging (or reject an uncaught promise) if the spawn throws.
-      console.error(`[spawn] request failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[spawn] request failed: ${errText(error)}`);
       res.statusCode = 500;
       res.end(JSON.stringify({ ok: false }));
     }
@@ -777,7 +784,7 @@ export class VoiceDaemon {
     } catch (error) {
       // The text reply already reached the phone; surface the audio failure (don't swallow it) so a
       // config/model/rate-limit problem is visible instead of "the voice just didn't arrive".
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errText(error);
       console.error(`[tts] synthesis failed for ${uuid}: ${message}`);
       this.sendToBrowser({
         type: "error",
@@ -861,12 +868,10 @@ export class VoiceDaemon {
     // so the phone/DO attribute it correctly. Chained so concurrent sends keep their order — a later
     // history snapshot must never overtake an earlier one on the wire.
     const threadId = this.init.threadId;
-    this.sealChain = this.sealChain
-      .then(async () => {
-        const enc = await sealJson(this.key, event, aad("browser", threadId));
-        this.send({ channel: "browser", threadId, enc });
-      })
-      .catch((error) => console.error(`[e2e] failed to seal an outbound event: ${errText(error)}`));
+    this.enqueueSeal(async () => {
+      const enc = await sealJson(this.key, event, aad("browser", threadId));
+      this.send({ channel: "browser", threadId, enc });
+    });
   }
 
   private send(envelope: BridgeEnvelope): void {
@@ -879,7 +884,7 @@ export class VoiceDaemon {
   }
 
   private sendError(error: unknown): void {
-    this.sendToBrowser({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    this.sendToBrowser({ type: "error", message: errText(error) });
   }
 
   stop(): void {

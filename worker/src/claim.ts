@@ -8,6 +8,8 @@
 // These helpers are pure (no DurableObject/storage), so the pairing POLICY and the cookie wire-format
 // are unit-tested without a Workers runtime; the DO wires them to ctx.storage + the request.
 
+import { sha256Hex, toBase64url } from "../../src/shared/e2e";
+
 // How long a pairing window stays open after the daemon opens it. Generous enough to cover
 // start → render-QR → unlock-phone → scan, short enough that a leaked URL is only claimable in a
 // brief, user-initiated window.
@@ -83,24 +85,13 @@ export function buildSetCookie(name: string, value: string, secure: boolean): st
 }
 
 // 256-bit opaque device token, base64url. crypto.getRandomValues is available in the Workers runtime
-// and in Node's vitest (globalThis.crypto).
+// and in Node's vitest (globalThis.crypto). base64url + the SHA-256→hex below reuse the shared crypto
+// encoders (src/shared/e2e.ts) so the token format and hashing can't drift from the rest of the system.
 export function mintDeviceToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return base64url(bytes);
+  return toBase64url(crypto.getRandomValues(new Uint8Array(32)));
 }
 
 // We persist only the token's hash, so a leak of the DO's storage never yields a usable cookie.
-export async function hashToken(token: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  return hex(new Uint8Array(digest));
-}
-
-function base64url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function hex(bytes: Uint8Array): string {
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+export function hashToken(token: string): Promise<string> {
+  return sha256Hex(token);
 }

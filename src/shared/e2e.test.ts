@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveKey, open, openJson, seal, sealJson } from "./e2e.js";
+import { deriveKey, open, openJson, seal, sealJson, sha256Hex, toBase64url } from "./e2e.js";
 
 const SECRET = "y9Qn3kР- a test secret with unicode ☃";
 const AAD = "browser:thread-1";
@@ -39,6 +39,21 @@ describe("e2e seal/open round-trip", () => {
     const big = "A".repeat(300_000); // ~300KB base64 audio stand-in
     const blob = await seal(key, big, AAD);
     expect(await open(key, blob, AAD)).toBe(big);
+  });
+});
+
+describe("shared crypto encoders", () => {
+  it("sha256Hex matches the daemon's routingId derivation (pinned — both ends must agree)", async () => {
+    // Same vector pinned in src/daemon/config.test.ts for the Node createHash path: the phone (WebCrypto)
+    // and the daemon (Node) MUST produce identical routingIds or they'd reach different Durable Objects.
+    expect(await sha256Hex("secret")).toBe("2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b");
+    expect(await sha256Hex("secret")).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("toBase64url is URL-safe and unpadded", () => {
+    expect(toBase64url(new Uint8Array([255, 255, 255]))).toBe("____");
+    expect(toBase64url(new Uint8Array([0]))).toBe("AA");
+    expect(toBase64url(new Uint8Array([251, 255]))).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 });
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createSerializer } from "../../../src/shared/serialize";
 import { aad, openJson, sealJson } from "../lib/e2e";
 import type {
   BridgeEnvelope,
@@ -116,7 +117,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
   const connectedThreadsRef = useRef<Set<ThreadId>>(new Set());
   // Serialize outbound seals so commands keep their order on the wire (an interrupt must not overtake
   // the submit it follows).
-  const sendChainRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueueSendRef = useRef(createSerializer());
 
   // Keep the latest callbacks + key in refs so the effect mounts once (the socket lifecycle owns the
   // single connection; re-subscribing per render would tear it down on every keystroke). The key is
@@ -139,18 +140,15 @@ export function useBridge(options: UseBridgeOptions): Bridge {
   // Seal an event for one thread's daemon and send it, chained so order is preserved. Re-checks the
   // socket after the (async) seal in case it closed meanwhile.
   const enqueueDaemonSend = useCallback((threadId: ThreadId, event: BrowserToDaemonEvent): void => {
-    sendChainRef.current = sendChainRef.current
-      .then(async () => {
-        const socket = socketRef.current;
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        const enc = await sealJson(keyRef.current, event, aad("daemon", threadId));
-        if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ channel: "daemon", threadId, enc } satisfies BridgeEnvelope));
-        }
-      })
-      .catch(() => {
-        /* socket closing / seal failed; the reconnect path re-syncs */
-      });
+    enqueueSendRef.current(async () => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const enc = await sealJson(keyRef.current, event, aad("daemon", threadId));
+      // Re-check after the (async) seal in case the socket closed meanwhile.
+      if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ channel: "daemon", threadId, enc } satisfies BridgeEnvelope));
+      }
+    });
   }, []);
 
   const sendDaemon = useCallback(
@@ -178,7 +176,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     let expiredStreak = 0;
     // Serialize inbound decrypts so events apply in arrival order (a history snapshot must not be
     // overtaken by an earlier one whose decrypt finished later).
-    let recvChain: Promise<void> = Promise.resolve();
+    const enqueueRecv = createSerializer();
 
     // Track which threads have a live daemon, mirroring the roster, so sendDaemon/bridgeReady
     // can guard synchronously. A fresh connect resets it (the next thread_roster repopulates).
@@ -268,11 +266,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         } catch {
           return;
         }
-        recvChain = recvChain
-          .then(() => handleEnvelope(envelope))
-          .catch(() => {
-            /* drop an undecryptable / foreign message */
-          });
+        enqueueRecv(() => handleEnvelope(envelope));
       });
 
       socket.addEventListener("open", () => {
