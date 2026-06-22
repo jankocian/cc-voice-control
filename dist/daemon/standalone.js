@@ -19055,6 +19055,26 @@ var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 var wrapper_default = import_websocket.default;
 
+// src/daemon/bridge-heartbeat.ts
+var OPEN = 1;
+function startBridgeHeartbeat(socket, intervalMs) {
+  let awaitingPong = false;
+  socket.on("pong", () => {
+    awaitingPong = false;
+  });
+  const timer = setInterval(() => {
+    if (socket.readyState !== OPEN)
+      return;
+    if (awaitingPong) {
+      socket.terminate();
+      return;
+    }
+    awaitingPong = true;
+    socket.ping();
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
 // src/daemon/cmux.ts
 import { spawn } from "node:child_process";
 var CMUX_BIN = process.env.CMUX_BIN || process.env.CMUX_BUNDLED_CLI_PATH || "cmux";
@@ -19626,6 +19646,7 @@ class TurnCoordinator {
 // src/daemon/voice-daemon.ts
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var RECONNECT_DELAY_MS = 1500;
+var BRIDGE_PING_INTERVAL_MS = 25000;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 40000;
 var MAX_PROJECTED_TURNS = 40;
@@ -19652,6 +19673,7 @@ class VoiceDaemon {
   cmuxReachable = true;
   reconnectTimer;
   healthTimer;
+  stopHeartbeat;
   stopped = false;
   turns;
   audio = new Map;
@@ -19782,6 +19804,7 @@ class VoiceDaemon {
       this.registerThread();
       this.emitStatus();
       this.refreshLabel();
+      this.stopHeartbeat = startBridgeHeartbeat(ws, BRIDGE_PING_INTERVAL_MS);
     });
     ws.on("message", (raw) => {
       let envelope;
@@ -19795,6 +19818,8 @@ class VoiceDaemon {
       }
     });
     ws.on("close", (code) => {
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = undefined;
       if (this.stopped || this.ws !== ws)
         return;
       this.ws = undefined;
@@ -20098,6 +20123,7 @@ class VoiceDaemon {
       clearTimeout(this.reconnectTimer);
     if (this.healthTimer)
       clearInterval(this.healthTimer);
+    this.stopHeartbeat?.();
     this.send({ channel: "control", event: { type: "terminate" } });
     try {
       this.ws?.close();
