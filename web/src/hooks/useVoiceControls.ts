@@ -105,7 +105,27 @@ export function useVoiceControls({
     [sendAudio, clearResendToast]
   );
 
-  const onRecorderError = useCallback((error: RecorderError) => showFlash(RECORDER_ERROR_TEXT[error]), [showFlash]);
+  // A blocked mic (getUserMedia denied — often with NO permission dialog, e.g. the hands-free auto-respond
+  // re-acquire, which iOS rejects outside a user gesture) needs a VISIBLE, self-explaining cue, not just a
+  // hero flash that's scrolled away mid-conversation. Raise a 5s toast pointing at the fix; one at a time.
+  const micToastRef = useRef<string | null>(null);
+  const raiseMicBlockedToast = useCallback(() => {
+    if (micToastRef.current) toast.close(micToastRef.current);
+    micToastRef.current = toast.add({
+      title: "Can’t open the microphone",
+      description: "Allow mic access for this site in Safari, or add the app to your Home Screen.",
+      type: "error",
+      timeout: 5000
+    });
+  }, []);
+  // A blocked mic → the toast (visible, actionable); other recorder errors stay transient hero flashes.
+  const onRecorderError = useCallback(
+    (error: RecorderError) => {
+      if (error === "mic-blocked") raiseMicBlockedToast();
+      else showFlash(RECORDER_ERROR_TEXT[error]);
+    },
+    [showFlash, raiseMicBlockedToast]
+  );
 
   // Destructure the recorder's STABLE methods + state (the wrapper is recreated when recording state
   // changes) so the callbacks/effects below depend on the methods, not the churning wrapper.
