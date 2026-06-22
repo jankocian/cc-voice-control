@@ -18,7 +18,7 @@ import { useWakeLock } from "./hooks/useWakeLock";
 import { newestPlayableReply } from "./lib/messages";
 import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
 import { readThreadHint, type SessionCredentials } from "./lib/session";
-import { deriveStatus, gradeThread } from "./lib/status";
+import { deriveStatus, gradeThread, type StatusView } from "./lib/status";
 import { cn } from "./lib/utils";
 
 // How long after tapping "+" we keep following the spawn (focus the next new thread). Long enough for a
@@ -469,16 +469,36 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     onSeek: playback.seekEntry
   };
 
+  // An off-screen slide shows ITS OWN thread's calm status (connection/runtime only), derived from that
+  // thread's roster entry. The live overlays — recording / speaking / the working timer / a flash — belong
+  // to the ACTIVE thread alone (the mic + player are shared singletons), so they must never bleed onto
+  // another slide's pill (the "shared state across slides" we're guarding against).
+  const inactiveThreadStatus = (threadId: ThreadId): StatusView => {
+    const t = threads.threads.find((r) => r.threadId === threadId);
+    return deriveStatus({
+      connected,
+      daemonConnected: t?.connected === true,
+      daemonLastSeenAt: t?.lastSeenAt ?? null,
+      now,
+      recording: false,
+      transcribing: false,
+      speaking: false,
+      runtimeState: t?.state ?? "idle",
+      currentTask: undefined,
+      listening: t?.listening === true,
+      flash: null
+    });
+  };
+
   // The hero is rendered IN THE FLOW at the top of each pager page (so it scrolls away like a normal
-  // header — never a pinned overlay covering the messages/scrollbar). Its status/controls always act on
-  // the active thread; only the on-screen page gets the live mic + canvas wired, so the visualizer paints
-  // once and a swipe still shows a hero on the incoming page.
-  const renderHero = (isActive: boolean) => (
+  // header — never a pinned overlay). Only the ACTIVE page gets the live mic/canvas + the active status;
+  // off-screen pages show their own thread's at-rest status so the pill never mirrors the active thread.
+  const renderHero = (isActive: boolean, threadId: ThreadId) => (
     <Hero
-      status={status}
-      elapsed={elapsed}
-      flash={flash}
-      flashAlert={flashTone === "alert"}
+      status={isActive ? status : inactiveThreadStatus(threadId)}
+      elapsed={isActive ? elapsed : 0}
+      flash={isActive ? flash : null}
+      flashAlert={isActive && flashTone === "alert"}
       recording={isActive && voice.recording}
       visualizerActive={isActive && voice.visualizerActive}
       canvasRef={isActive ? canvasRef : undefined}
@@ -544,7 +564,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           // No threads yet (fresh load, malformed/stale link, daemon not joined) — the carousel would
           // render nothing, so show the hero + status standalone instead of a blank screen.
           <div className="flex h-full flex-col overflow-y-auto pb-safe">
-            {renderHero(true)}
+            {/* isActive → uses the active `status`; threadId is unused here (no thread yet). */}
+            {renderHero(true, activeThreadId ?? "")}
             <div className="flex flex-1 flex-col items-center justify-center gap-1 px-6 pb-16 text-center">
               <p className="text-sm font-medium text-ink-soft">{status.title}</p>
               {status.detail && <p className="text-xs text-ink-faint">{status.detail}</p>}

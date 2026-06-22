@@ -76,23 +76,21 @@ export function useVoiceControls({
 
   const sendAudio = useCallback(
     (clip: RecordedClip, mode: "queue" | "interrupt") => {
-      const threadId = activeThreadIdRef.current;
-      if (!threadId) {
-        showFlash("Lost the connection before sending");
-        return;
-      }
-      // Retain the attempt so a failed send (here or a later daemon `error`) can be re-tried.
+      // Retain the attempt up front so ANY failure (no active thread, the send itself, or a later daemon
+      // `error`) can be re-tried from the toast. The "Resend" toast is the single, actionable signal for a
+      // failed send — no redundant hero flash alongside it.
       lastSendRef.current = { clip, mode };
+      const threadId = activeThreadIdRef.current;
       if (
+        !threadId ||
         !sendDaemon(threadId, { type: "submit_audio", audioBase64: clip.audioBase64, mimeType: clip.mimeType, mode })
       ) {
-        showFlash("Lost the connection before sending");
         raiseResendToast();
         return;
       }
       setTranscribingThreadId(threadId);
     },
-    [sendDaemon, showFlash, activeThreadIdRef, setTranscribingThreadId, raiseResendToast]
+    [sendDaemon, activeThreadIdRef, setTranscribingThreadId, raiseResendToast]
   );
   sendAudioRef.current = sendAudio;
 

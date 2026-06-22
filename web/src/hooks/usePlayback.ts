@@ -374,9 +374,11 @@ export function usePlayback({
   const unlockedRef = useRef(false);
   const unlock = useCallback((): void => {
     if (unlockedRef.current) return;
-    unlockedRef.current = true;
-    // Only unlock when idle (don't stomp an actively-loaded clip).
+    // Only unlock when idle (don't stomp an actively-loaded clip). Latch AFTER this guard — if the first
+    // gesture lands while a clip is playing, we skip THIS time but stay un-latched so a later idle gesture
+    // can still bless the element (otherwise autoplay would be permanently blocked).
     if (currentPlayingIdRef.current) return;
+    unlockedRef.current = true;
     try {
       player.muted = true;
       player.src = SILENT_WAV;

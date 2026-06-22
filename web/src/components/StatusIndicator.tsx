@@ -22,11 +22,12 @@ export function StatusIndicator({
   flashAlert?: boolean;
 }) {
   const { dataState, key, title } = status;
-  const showTimer = dataState === "working";
-  // The title alone is the label for every state ("Connected", "Listening…", …); kept succinct, so the
-  // pill is never empty — a pill that came and went is exactly what shifted the hero's layout.
+  // The working elapsed time lives INSIDE the pill ("Agent is working… · 0:42"), not as a separate big
+  // number — one constant-height line, so the hero never shifts as the timer appears/ticks. (elapsed is 0
+  // on inactive pager slides, where we don't have that thread's running clock — then just the title shows.)
   const ready = key === "ready";
-  const message = flash ?? title;
+  const label = dataState === "working" && elapsed > 0 ? `${title} · ${formatClock(elapsed)}` : title;
+  const message = flash ?? label;
   // Red for an alert flash (an action the user must notice). Amber for the steady attention states
   // (daemon down / not listening). Neutral white otherwise.
   const danger = flash !== null && flashAlert;
@@ -53,14 +54,8 @@ export function StatusIndicator({
         )}
       >
         {showDot && <span className={cn("size-1.5 shrink-0 rounded-full", dotTone)} />}
-        <span className="truncate">{message}</span>
+        <span className="truncate tabular-nums">{message}</span>
       </span>
-
-      {showTimer && (
-        <span className="font-mono text-3xl font-semibold tabular-nums tracking-tight text-ink">
-          {formatClock(elapsed)}
-        </span>
-      )}
     </div>
   );
 }
