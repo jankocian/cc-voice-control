@@ -18896,7 +18896,7 @@ function encodeId(id) {
 // src/daemon/config.ts
 var ConfigSchema = exports_external.object({
   openaiApiKey: exports_external.string().min(1),
-  openaiVoice: exports_external.string().min(1).default("marin"),
+  openaiVoice: exports_external.string().min(1).default("cedar"),
   ttsModel: exports_external.string().min(1).default("gpt-4o-mini-tts"),
   sttModel: exports_external.string().min(1).default("gpt-4o-mini-transcribe"),
   ttsInstructions: exports_external.string().min(1).optional(),
@@ -19400,15 +19400,21 @@ async function synthesizeChunk(config2, text, voiceOverride) {
   }
   return Buffer.from(await response.arrayBuffer());
 }
+var TTS_TRAILING_SENTINEL = " …";
 async function synthesizeSpeech(config2, text, voiceOverride) {
   if (!text.trim())
     return { audioBase64: "", mimeType: "audio/mpeg" };
-  if (text.length <= MAX_TTS_INPUT_CHARS) {
-    const buffer = await synthesizeChunk(config2, text, voiceOverride);
+  const chunks = splitForTts(text, MAX_TTS_INPUT_CHARS);
+  const last = chunks.length - 1;
+  if (last >= 0 && chunks[last].length + TTS_TRAILING_SENTINEL.length <= MAX_TTS_INPUT_CHARS) {
+    chunks[last] += TTS_TRAILING_SENTINEL;
+  }
+  if (chunks.length === 1) {
+    const buffer = await synthesizeChunk(config2, chunks[0], voiceOverride);
     return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
   }
   const parts = [];
-  for (const chunk of splitForTts(text, MAX_TTS_INPUT_CHARS)) {
+  for (const chunk of chunks) {
     try {
       parts.push(await synthesizeChunk(config2, chunk, voiceOverride));
     } catch (error51) {
