@@ -1,5 +1,4 @@
 import { Hand, Mic, Square, X } from "lucide-react";
-import type { ReactNode } from "react";
 import { StatusVisual } from "@/components/StatusVisual";
 import { Button } from "@/components/ui/button";
 import { formatClock } from "@/hooks/useElapsed";
@@ -10,9 +9,9 @@ import { cn } from "@/lib/utils";
 // out of view (App drives `shown`) — slides in as the <TopBar> slides out — so the mic / stop / cancel
 // stay reachable while reading the message history, with maximum room for content.
 //
-// Layout mirrors the nav it replaces: a small live visualizer on the left (where the wordmark was), the
-// state's action cluster aligned right (the primary mic/record button sits where the gear was, at the
-// same iconSm size), and a small settings gear pinned far right (passed as `children`).
+// Layout mirrors the nav it replaces: a small live visualizer on the left (where the wordmark was) and
+// the state's action cluster aligned right. Only the chat controls live here — no settings gear; while
+// reading the thread, the mic / stop / cancel are all that's wanted.
 //
 // Mirrors <Controls>'s state logic, compacted to iconSm:
 //   idle / speaking → mic
@@ -31,8 +30,7 @@ export function MiniControls({
   onInterrupt,
   onStopRecording,
   onCancel,
-  onStopTask,
-  children
+  onStopTask
 }: {
   status: StatusView;
   elapsed: number;
@@ -48,8 +46,6 @@ export function MiniControls({
   onStopRecording: () => void;
   onCancel: () => void;
   onStopTask: () => void;
-  // The settings gear (the same <SettingsMenu> the nav holds) — lowest-priority element, pinned far right.
-  children?: ReactNode;
 }) {
   const { dataState } = status;
   const alertFlash = flashAlert && flash ? flash : null;
@@ -76,8 +72,7 @@ export function MiniControls({
           )}
         </div>
 
-        {/* Actions — same set as the full cluster, all iconSm. The primary mic/record sits where the gear
-            was; the settings gear (children) is pinned to its right. */}
+        {/* Actions — same set as the full cluster, all iconSm. */}
         <div className="flex shrink-0 items-center gap-2">
           {recording ? (
             <>
@@ -117,7 +112,6 @@ export function MiniControls({
               <Mic />
             </Button>
           )}
-          {children}
         </div>
       </div>
     </div>

@@ -86,7 +86,27 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     if (threadId) sendDaemonRef.current?.(threadId, { type: "get_audio", requestId });
   }, []);
 
-  const playback = usePlayback({ getRecording, onRequestAudio });
+  // Autoplay = a pure client-side play/don't-play toggle (the daemon ALWAYS synthesizes). "off" → a fresh
+  // reply is cached + tap-playable but doesn't play by itself. These refs bridge settings/recorder defined
+  // below into usePlayback (created here) without reordering the hooks.
+  const autoplayEnabledRef = useRef(true);
+  const autoRespondRef = useRef(false);
+  const transcribingRef = useRef(false);
+  const startRecordingRef = useRef<() => void>(() => {});
+  const getAutoplay = useCallback(() => autoplayEnabledRef.current, []);
+  // Hands-free auto-respond: after a FINAL reply finishes auto-playing, open the mic so the user can answer
+  // and just hit stop. `autoRespondRef` is set below to (toggle ON ∧ autoplay ON ∧ auto-follow ON), so it
+  // already encodes every prerequisite. Skip if we're already recording/sending, and only fire for a real
+  // final reply (never an interim step). Reads `pagerThreadsRef` assigned below — resolved at call time.
+  const onAutoReplyFinished = useCallback((requestId: string) => {
+    if (!autoRespondRef.current || recordingRef.current || transcribingRef.current) return;
+    const msgs = pagerThreadsRef.current.find((p) => p.threadId === activeThreadIdRef.current)?.messages ?? [];
+    const msg = msgs.find((m) => m.requestId === requestId);
+    if (msg?.kind !== "claude" || msg.interim) return;
+    startRecordingRef.current();
+  }, []);
+
+  const playback = usePlayback({ getRecording, getAutoplay, onRequestAudio, onAutoReplyFinished });
   const { stopPlayback } = playback;
 
   // Auto-follow: a fresh background reply arms a one-shot follow to that thread; the effect below performs
@@ -176,6 +196,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       /* private mode — in-memory only */
     }
   }, []);
+  // Autoplay is now purely client-side (the daemon always synthesizes): "off" means don't auto-play, just
+  // tap. We still tell the daemon the mode so it knows whether to also auto-read interim STEPS ("all").
+  autoplayEnabledRef.current = speakMode !== "off";
   useEffect(() => {
     if (activeThreadId && activeConnected) sendDaemon(activeThreadId, { type: "set_speak_mode", mode: speakMode });
   }, [speakMode, activeThreadId, activeConnected, sendDaemon]);
@@ -185,9 +208,11 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   // effect below defers until then). Read via a ref in the (stable) background-reply callback.
   const [autoFollow, setAutoFollow] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("vc-auto-follow") === "true";
+      // Default ON: a fresh reply on a background thread follows it automatically (the common want).
+      const stored = localStorage.getItem("vc-auto-follow");
+      return stored === null ? true : stored === "true";
     } catch {
-      return false;
+      return true;
     }
   });
   autoFollowRef.current = autoFollow;
@@ -195,6 +220,28 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     setAutoFollow(on);
     try {
       localStorage.setItem("vc-auto-follow", String(on));
+    } catch {
+      /* private mode — in-memory only */
+    }
+  }, []);
+
+  // Auto-respond (off / on), persisted. When on, the mic opens automatically right after a final reply
+  // finishes playing — a hands-free loop (listen → speak → hit stop). Only meaningful when autoplay is on
+  // AND auto-follow is on (you hear the reply on whatever thread it lands), so the toggle is shown but
+  // DISABLED otherwise; the behaviour also re-checks the prerequisites at fire time (onAutoReplyFinished).
+  const autoRespondAvailable = speakMode !== "off" && autoFollow;
+  const [autoRespond, setAutoRespond] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("vc-auto-respond") === "true";
+    } catch {
+      return false;
+    }
+  });
+  autoRespondRef.current = autoRespond && autoRespondAvailable;
+  const changeAutoRespond = useCallback((on: boolean) => {
+    setAutoRespond(on);
+    try {
+      localStorage.setItem("vc-auto-respond", String(on));
     } catch {
       /* private mode — in-memory only */
     }
@@ -222,7 +269,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       stopPlayback();
       const hadUnread = (unreadRef.current.get(threadId) ?? 0) > 0;
       threads.setActive(threadId);
-      if (!hadUnread) return;
+      // Play-on-land only when autoplay is on — with autoplay off, landing on the thread shows the reply
+      // with a ▶ to tap, it never plays by itself.
+      if (!hadUnread || !autoplayEnabledRef.current) return;
       const messages = pagerThreadsRef.current.find((p) => p.threadId === threadId)?.messages ?? [];
       const requestId = newestPlayableReply(messages);
       if (requestId) playEntryRef.current(requestId);
@@ -293,6 +342,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   });
   // Let the thread-messages reducer drive the "Resend" toast (a failed/confirmed in-flight mic turn).
   resendToastRef.current = { raise: voice.raiseResendToast, clear: voice.clearResendToast };
+  // Bridge the recorder + transcribing state into the (earlier-defined) auto-respond callback.
+  transcribingRef.current = transcribing;
+  startRecordingRef.current = voice.onMic;
 
   // Track recent user interaction (touch / scroll / tap) so a deferred auto-follow can hold off until the
   // user is idle. Passive listeners on the app root; capture-phase for `scroll` (it doesn't bubble).
@@ -439,6 +491,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       onSpeakModeChange={changeSpeakMode}
       autoFollow={autoFollow}
       onAutoFollowChange={changeAutoFollow}
+      autoRespond={autoRespond}
+      onAutoRespondChange={changeAutoRespond}
+      autoRespondAvailable={autoRespondAvailable}
       theme={theme}
       onThemeChange={setTheme}
     />
@@ -474,21 +529,31 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           onStopRecording={voice.onStopRecording}
           onCancel={voice.onCancel}
           onStopTask={voice.onStopTask}
-        >
-          {settings}
-        </MiniControls>
+        />
       </div>
 
       <div className="relative min-h-0 flex-1">
-        <ThreadPager
-          threads={pagerThreads}
-          activeThreadId={activeThreadId}
-          renderHero={renderHero}
-          playback={threadPlayback}
-          onActivate={switchThread}
-          activeScrollRootRef={setScrollRoot}
-          activeSentinelRef={setHeroSentinel}
-        />
+        {pagerThreads.length === 0 ? (
+          // No threads yet (fresh load, malformed/stale link, daemon not joined) — the carousel would
+          // render nothing, so show the hero + status standalone instead of a blank screen.
+          <div className="flex h-full flex-col overflow-y-auto pb-safe">
+            {renderHero(true)}
+            <div className="flex flex-1 flex-col items-center justify-center gap-1 px-6 pb-16 text-center">
+              <p className="text-sm font-medium text-ink-soft">{status.title}</p>
+              {status.detail && <p className="text-xs text-ink-faint">{status.detail}</p>}
+            </div>
+          </div>
+        ) : (
+          <ThreadPager
+            threads={pagerThreads}
+            activeThreadId={activeThreadId}
+            renderHero={renderHero}
+            playback={threadPlayback}
+            onActivate={switchThread}
+            activeScrollRootRef={setScrollRoot}
+            activeSentinelRef={setHeroSentinel}
+          />
+        )}
 
         {/* Bottom "liquid glass" thread switcher + swipe dots — only when there's more than one thread. */}
         <BottomSwitcher
