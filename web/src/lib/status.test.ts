@@ -51,7 +51,7 @@ describe("deriveStatus — no-daemon grading by elapsed time", () => {
 
     const stale = deriveStatus(noDaemon({ daemonLastSeenAt: NOW - 14 * 60 * 60 * 1000 }));
     expect(stale.key).toBe("offline-stale");
-    expect(stale.title).toBe("Session offline");
+    expect(stale.title).toBe("Session offline · 14h ago"); // pill carries the time-since
     expect(stale.dataState).toBe("offline");
     expect(stale.detail).toContain("Last active 14h ago");
     expect(stale.canAct).toBe(false);

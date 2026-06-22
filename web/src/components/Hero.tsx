@@ -11,6 +11,7 @@ export function Hero({
   status,
   elapsed,
   flash,
+  flashAlert,
   recording,
   visualizerActive,
   canvasRef,
@@ -26,6 +27,7 @@ export function Hero({
   status: StatusView;
   elapsed: number;
   flash: string | null;
+  flashAlert?: boolean;
   recording: boolean;
   visualizerActive: boolean;
   // Undefined on an off-screen pager page — only the active page wires the live recording canvas.
@@ -47,7 +49,7 @@ export function Hero({
     <section className="relative flex shrink-0 flex-col items-center gap-5 rounded-b-card bg-gradient-to-b from-canvas-deep/70 to-canvas px-5 pb-7 pt-3">
       <StatusVisual status={status} recording={recording} visualizerActive={visualizerActive} canvasRef={canvasRef} />
 
-      <StatusIndicator status={status} elapsed={elapsed} flash={flash} />
+      <StatusIndicator status={status} elapsed={elapsed} flash={flash} flashAlert={flashAlert} />
 
       <div className="w-full max-w-sm pt-1">
         <Controls

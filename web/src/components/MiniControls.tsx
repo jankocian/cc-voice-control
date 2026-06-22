@@ -18,6 +18,8 @@ export function MiniControls({
   working,
   recording,
   shown,
+  flash,
+  flashAlert = false,
   onMic,
   onSteer,
   onInterrupt,
@@ -30,6 +32,9 @@ export function MiniControls({
   working: boolean;
   recording: boolean;
   shown: boolean;
+  flash?: string | null;
+  // A red "alert" flash mirrored from the hero, so it's visible while the hero is scrolled away.
+  flashAlert?: boolean;
   onMic: () => void;
   onSteer: () => void;
   onInterrupt: () => void;
@@ -38,6 +43,7 @@ export function MiniControls({
   onStopTask: () => void;
 }) {
   const { dataState, title } = status;
+  const alertFlash = flashAlert && flash ? flash : null;
   const busy = recording || working || dataState === "speaking" || dataState === "sending";
   const dotTone =
     dataState === "recording"
@@ -66,10 +72,16 @@ export function MiniControls({
         {/* Status */}
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span
-            className={cn("size-2.5 shrink-0 rounded-full", dotTone, busy && "animate-pulse-ring")}
+            className={cn(
+              "size-2.5 shrink-0 rounded-full",
+              alertFlash ? "bg-danger" : dotTone,
+              busy && !alertFlash && "animate-pulse-ring"
+            )}
             aria-hidden="true"
           />
-          {working ? (
+          {alertFlash ? (
+            <span className="truncate text-sm font-semibold text-danger">{alertFlash}</span>
+          ) : working ? (
             <span className="shrink-0 font-mono text-sm font-semibold tabular-nums text-ink">
               {formatClock(elapsed)}
             </span>

@@ -23,7 +23,7 @@ type Deps = {
   sendDaemon: Bridge["sendDaemon"];
   bridgeReady: Bridge["bridgeReady"];
   stopPlayback: () => void;
-  showFlash: (message: string) => void;
+  showFlash: (message: string, tone?: "info" | "alert") => void;
 };
 
 // The shared mic + working-state commands, all acting on the active thread. Owns the recorder
@@ -105,8 +105,10 @@ export function useVoiceControls({
   // (spawn_pending) only once the workspace actually opens, so the phone follows a real spawn.
   const onSpawn = useCallback(() => {
     const threadId = activeThreadIdRef.current;
+    // Spawn routes through the ACTIVE thread's daemon — if it isn't reachable, there's no one to open a
+    // pane. Make that unmissable (red) instead of a quiet note that reads like a normal status.
     if (!threadId || !sendDaemon(threadId, { type: "spawn_thread" })) {
-      showFlash("Start voice in a pane first");
+      showFlash("Start a new session from a connected thread", "alert");
       return;
     }
     showFlash("Opening a new session…");

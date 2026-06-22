@@ -6,7 +6,7 @@ import { SettingsMenu } from "./components/SettingsMenu";
 import { ThreadPager } from "./components/ThreadPager";
 import { TopBar } from "./components/TopBar";
 import { useBridge } from "./hooks/useBridge";
-import { useElapsed, useNow } from "./hooks/useElapsed";
+import { useNow } from "./hooks/useElapsed";
 import { useFlash } from "./hooks/useFlash";
 import { usePlayback } from "./hooks/usePlayback";
 import { useTheme } from "./hooks/useTheme";
@@ -15,7 +15,7 @@ import { useThreads } from "./hooks/useThreads";
 import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
 import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
-import type { SessionCredentials } from "./lib/session";
+import { readThreadHint, type SessionCredentials } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
 
 // How long after tapping "+" we keep following the spawn (focus the next new thread). Long enough for a
@@ -23,7 +23,7 @@ import { deriveStatus, gradeThread } from "./lib/status";
 const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
 
 export function App({ credentials }: { credentials: SessionCredentials }) {
-  const { flash, show: showFlash } = useFlash();
+  const { flash, flashTone, show: showFlash } = useFlash();
 
   const threads = useThreads();
   const { activeThreadId } = threads;
@@ -139,6 +139,28 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   );
   switchThreadRef.current = switchThread;
 
+  // Deep link / refresh persistence via the URL fragment (#t=<threadId>). On load we honour it ONCE the
+  // wanted thread shows up in the roster (a scanned pane's QR carries its own thread; a refresh restores
+  // the last one) — falling through to the connected-default pick otherwise. As the user switches threads
+  // we keep the fragment in step (replaceState, so it survives refresh without spamming history).
+  const wantedThreadRef = useRef<ThreadId | null>(readThreadHint());
+  useEffect(() => {
+    const want = wantedThreadRef.current;
+    if (!want) return;
+    if (threads.threads.some((t) => t.threadId === want)) {
+      wantedThreadRef.current = null;
+      switchThread(want);
+    }
+  }, [threads.threads, switchThread]);
+  useEffect(() => {
+    if (!activeThreadId) return;
+    try {
+      history.replaceState(null, "", `#t=${encodeURIComponent(activeThreadId)}`);
+    } catch {
+      /* fragment is a nice-to-have; ignore if blocked */
+    }
+  }, [activeThreadId]);
+
   // The shared mic + working-state controls, acting on the active thread.
   const voice = useVoiceControls({
     canvasRef,
@@ -190,8 +212,17 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     flash
   });
 
-  const elapsed = useElapsed(status.dataState === "working");
   const working = status.dataState === "working";
+  // Working timer from an ACTUAL timestamp — the active thread's latest user prompt — not a local
+  // stopwatch, so it stays correct + stable across thread switches and refreshes instead of restarting
+  // at 0. `workingNow` ticks each second while working; clamp ≥0 against small laptop↔phone clock skew.
+  const workingNow = useNow(working);
+  const workingSince = useMemo(() => {
+    if (!working) return 0;
+    const msgs = pagerThreads.find((p) => p.threadId === activeThreadId)?.messages;
+    return msgs?.find((m) => m.kind === "you")?.timestamp ?? 0;
+  }, [working, pagerThreads, activeThreadId]);
+  const elapsed = working && workingSince > 0 ? Math.max(0, Math.floor((workingNow - workingSince) / 1000)) : 0;
 
   // Switcher rows: each roster thread with its unread badge + #10-graded dot tone.
   const switcherRows: ThreadRow[] = useMemo(
@@ -224,6 +255,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       status={status}
       elapsed={elapsed}
       flash={flash}
+      flashAlert={flashTone === "alert"}
       recording={isActive && voice.recording}
       visualizerActive={isActive && voice.visualizerActive}
       canvasRef={isActive ? canvasRef : undefined}
@@ -267,6 +299,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           working={working}
           recording={voice.recording}
           shown={condensed}
+          flash={flash}
+          flashAlert={flashTone === "alert"}
           onMic={voice.onMic}
           onSteer={voice.onSteer}
           onInterrupt={voice.onInterrupt}

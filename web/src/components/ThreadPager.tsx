@@ -116,20 +116,21 @@ export function ThreadPager({
     return () => window.clearTimeout(done);
   }, [activeThreadId]);
 
-  // Desktop drag-to-swipe: native touch already pages the pager, but a mouse/pen can't drag a scroll
-  // container, so we pan it manually. We only hijack once a horizontal drag clearly dominates, so a
-  // click, text selection, and vertical scrolling all still work. On release the nearest page snaps in
-  // and is activated. `programmaticRef` is held high for the whole drag so the centre observer can't
-  // fight it, and a one-shot click guard stops the release from registering as a tap (e.g. toggling a
-  // message's audio).
+  // Drag-to-swipe for BOTH touch and mouse. Native horizontal scroll-snap is unreliable here because the
+  // inner page scroller declares `touch-action: pan-y` (so it owns vertical) — which on iOS blocks a
+  // horizontal swipe that STARTS on the message content from ever reaching the pager, so the swipe felt
+  // dead. We pan the pager manually instead: only hijack once a drag is clearly horizontal (vertical
+  // scroll + text selection are left alone), then on release snap to + activate the nearest page.
+  // `programmaticRef` is held high for the whole drag so the centre observer can't fight it, and a
+  // one-shot click guard stops the release from registering as a tap (e.g. toggling a message's audio).
   const dragRef = useRef<{ x: number; y: number; left: number; active: boolean } | null>(null);
   const suppressClickRef = useRef(false);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     suppressClickRef.current = false;
     // Only arm drag-paging when there's somewhere to page to — so a single-thread user keeps normal
-    // horizontal text selection. Touch pages natively; ignore non-primary buttons.
-    if (threads.length < 2 || e.pointerType === "touch" || e.button !== 0) return;
+    // horizontal text selection. Ignore secondary mouse buttons (touch/pen report button 0).
+    if (threads.length < 2 || e.button !== 0) return;
     const pager = pagerRef.current;
     if (!pager) return;
     dragRef.current = { x: e.clientX, y: e.clientY, left: pager.scrollLeft, active: false };

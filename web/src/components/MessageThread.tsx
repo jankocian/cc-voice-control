@@ -28,7 +28,9 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
   }
 
   return (
-    <div className="flex flex-col gap-4 px-4 pb-6">
+    // Generous bottom padding so the last turn scrolls clear of the always-on bottom switcher + dots
+    // (which float over the scroll area) instead of hiding behind them.
+    <div className="flex flex-col gap-4 px-4 pb-28">
       {messages.map((message) => {
         if (message.kind === "you") {
           return <MessageBubble key={message.id} side="user" body={message.body} time={message.time} delivered />;
