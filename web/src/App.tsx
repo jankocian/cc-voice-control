@@ -16,9 +16,10 @@ import { useThreadMessages } from "./hooks/useThreadMessages";
 import { useThreads } from "./hooks/useThreads";
 import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
+import { initialThread, storeActiveThread } from "./lib/active-thread";
 import { newestPlayableReply } from "./lib/messages";
 import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
-import { readThreadHint, type Session } from "./lib/session";
+import type { Session } from "./lib/session";
 import { deriveStatus, gradeThread, type StatusView } from "./lib/status";
 import { cn } from "./lib/utils";
 
@@ -39,9 +40,11 @@ export function App({ session }: { session: Session }) {
   const [expired, setExpired] = useState<"stale" | "expired" | null>(null);
   const onExpired = useCallback((reason: "stale" | "expired") => setExpired(reason), []);
 
-  // Restore the thread from the URL query (?t=<id>) on first load — seeded into the store so the
-  // roster snapshot focuses it directly, before the carousel renders (no swipe blip). Read once.
-  const threads = useThreads(readThreadHint());
+  // The thread to focus on load: the last one we stored (localStorage), or a fresh `?t=` deep link. Resolved
+  // ONCE (it consumes the deep link) and seeded into the store so the roster snapshot focuses it directly,
+  // before the carousel renders (no swipe blip).
+  const initialThreadId = useMemo(() => initialThread(), []);
+  const threads = useThreads(initialThreadId);
   const { activeThreadId } = threads;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -341,12 +344,9 @@ export function App({ session }: { session: Session }) {
   }, [sendDaemon, showFlash, resolveSpawnToast]);
   handleSpawnRef.current = handleSpawn;
 
-  // Deep link / refresh persistence via the URL query (?t=<threadId>). The fragment is reserved for the
-  // #secret, so the thread hint rides in the query (a non-secret routing id). On load we honour it ONCE the
-  // wanted thread shows up in the roster (a refresh restores the last one) — falling through to the
-  // connected-default pick otherwise. As the user switches threads we keep the query in step (replaceState,
-  // so it survives refresh without spamming history), preserving the fragment.
-  const wantedThreadRef = useRef<ThreadId | null>(readThreadHint());
+  // Honour the resolved initial thread ONCE it shows up in the roster (the restored/deep-linked thread may
+  // not be present on the first render) — falling through to the connected-default pick otherwise.
+  const wantedThreadRef = useRef<ThreadId | null>(initialThreadId);
   useEffect(() => {
     const want = wantedThreadRef.current;
     if (!want) return;
@@ -355,14 +355,10 @@ export function App({ session }: { session: Session }) {
       switchThread(want);
     }
   }, [threads.threads, switchThread]);
+  // Persist the selected thread to localStorage so a refresh / PWA relaunch restores it. The URL is left
+  // untouched (no replaceState) — a static URL is what keeps the page safe to pin as a standalone PWA.
   useEffect(() => {
-    if (!activeThreadId) return;
-    try {
-      // Update the ?t= query but keep the fragment (the #secret) intact.
-      history.replaceState(null, "", `?t=${encodeURIComponent(activeThreadId)}${location.hash}`);
-    } catch {
-      /* the hint is a nice-to-have; ignore if blocked */
-    }
+    if (activeThreadId) storeActiveThread(activeThreadId);
   }, [activeThreadId]);
 
   // The shared mic + working-state controls, acting on the active thread.
