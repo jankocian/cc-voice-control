@@ -3,7 +3,10 @@ import { Hero } from "@/components/Hero";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
 import { MiniControls } from "@/components/MiniControls";
+import { ThreadPager } from "@/components/ThreadPager";
 import { TopBar } from "@/components/TopBar";
+import type { Message } from "@/lib/messages";
+import type { ThreadId } from "@/lib/protocol";
 import { deriveStatus, type StatusInputs } from "@/lib/status";
 
 // Presentation-only demo harness for the visual-verification loop. `?demo=<state>`
@@ -103,6 +106,61 @@ const DEMO_THREAD = [
 ];
 
 export function DemoApp({ state }: { state: string }) {
+  if (state === "pager") return <PagerDemo />;
+  return <StateDemo state={state} />;
+}
+
+// Exercises the real Embla <ThreadPager> with a few threads so swipe/paging can be verified offline.
+function PagerDemo() {
+  const [active, setActive] = useState<ThreadId>("alpha");
+  const noop = () => {};
+  const ids: ThreadId[] = ["alpha", "bravo", "charlie"];
+  const pages = ids.map((id) => ({
+    threadId: id,
+    messages: Array.from({ length: 6 }, (_, i) => ({
+      id: `${id}-${i}`,
+      kind: (i % 2 === 0 ? "you" : "claude") as Message["kind"],
+      requestId: `${id}-${i}`,
+      timestamp: i,
+      title: id,
+      body: `[${id}] message ${i + 1}`,
+      time: "12:00 AM"
+    }))
+  }));
+  const playback = {
+    playingId: null,
+    loadedId: null,
+    position: 0,
+    duration: 0,
+    playableIds: new Set<string>(),
+    onPlay: noop,
+    onReplay: noop,
+    onSeek: noop
+  };
+  return (
+    <div className="flex h-full flex-col bg-canvas px-safe">
+      <TopBar />
+      <div className="relative min-h-0 flex-1">
+        <ThreadPager
+          threads={pages}
+          activeThreadId={active}
+          renderHero={(isActive) => (
+            <div className="grid h-40 place-items-center text-3xl font-bold text-ink" data-hero={active}>
+              {active}
+              {isActive ? " ●" : ""}
+            </div>
+          )}
+          playback={playback}
+          onActivate={setActive}
+          activeScrollRootRef={noop}
+          activeSentinelRef={noop}
+        />
+      </div>
+    </div>
+  );
+}
+
+function StateDemo({ state }: { state: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const heroSentinelRef = useRef<HTMLDivElement>(null);

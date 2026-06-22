@@ -25,7 +25,9 @@ const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
 export function App({ credentials }: { credentials: SessionCredentials }) {
   const { flash, flashTone, show: showFlash } = useFlash();
 
-  const threads = useThreads();
+  // Restore the thread from the URL fragment (#t=<id>) on first load — seeded into the store so the
+  // roster snapshot focuses it directly, before the carousel renders (no swipe blip). Read once.
+  const threads = useThreads(readThreadHint());
   const { activeThreadId } = threads;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);

@@ -25,8 +25,10 @@ export type Threads = {
 // React owner of the per-thread store (roster + unread + active). All mutation goes through
 // the pure reducers in lib/threads so the rules stay testable; this hook is just the React
 // binding + the roster-event dispatch.
-export function useThreads(): Threads {
-  const [state, setState] = useState<ThreadsState>(initialThreadsState);
+// `preferredThreadId` (from the URL fragment) is the thread to restore on first load — seeded into the
+// store so the roster snapshot focuses it directly (no post-render switch / swipe blip).
+export function useThreads(preferredThreadId?: string | null): Threads {
+  const [state, setState] = useState<ThreadsState>(() => ({ ...initialThreadsState, preferredThreadId }));
 
   const applyRosterEvent = useCallback((event: RosterEvent): void => {
     setState((prev) => {

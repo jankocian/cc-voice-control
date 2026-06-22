@@ -14,6 +14,10 @@ export type ThreadsState = {
   threads: RosterThread[];
   activeThreadId: ThreadId | null;
   unread: Map<ThreadId, number>;
+  // The thread to focus on first load when it's present (from the URL fragment — see readThreadHint),
+  // so resuming the saved thread happens BEFORE the carousel renders, with no swipe blip. Only used by
+  // pickActive on a roster snapshot; ignored once a thread is active.
+  preferredThreadId?: ThreadId | null;
 };
 
 export const initialThreadsState: ThreadsState = {
@@ -28,8 +32,8 @@ export const initialThreadsState: ThreadsState = {
 export function applyRoster(state: ThreadsState, threads: readonly RosterThread[]): ThreadsState {
   const next = sortRoster(threads);
   const ids = new Set(next.map((t) => t.threadId));
-  const activeThreadId = pickActive(state.activeThreadId, next, ids);
-  return { threads: next, activeThreadId, unread: pruneUnread(state.unread, ids) };
+  const activeThreadId = pickActive(state.activeThreadId, next, ids, state.preferredThreadId);
+  return { ...state, threads: next, activeThreadId, unread: pruneUnread(state.unread, ids) };
 }
 
 // Upsert one thread (a `thread_joined` — both first-seen AND a label/state/presence refresh).
@@ -83,10 +87,17 @@ function sortRoster(threads: readonly RosterThread[]): RosterThread[] {
   return [...threads].sort((a, b) => Number(!a.connected) - Number(!b.connected));
 }
 
-// Keep the same active thread across a roster swap when it survives; else focus the first CONNECTED
-// thread (so we never default into a dormant/offline pane), falling back to the first if none are live.
-function pickActive(current: ThreadId | null, threads: readonly RosterThread[], ids: Set<ThreadId>): ThreadId | null {
+// Keep the same active thread across a roster swap when it survives; else restore the saved (preferred)
+// thread if it's present, else focus the first CONNECTED thread (so we never default into a
+// dormant/offline pane), falling back to the first if none are live.
+function pickActive(
+  current: ThreadId | null,
+  threads: readonly RosterThread[],
+  ids: Set<ThreadId>,
+  preferred?: ThreadId | null
+): ThreadId | null {
   if (current && ids.has(current)) return current;
+  if (preferred && ids.has(preferred)) return preferred;
   return (threads.find((t) => t.connected) ?? threads[0])?.threadId ?? null;
 }
 
