@@ -242,9 +242,7 @@ function StateDemo({ state }: { state: string }) {
           onStopRecording={noop}
           onCancel={noop}
           onStopTask={noop}
-        >
-          {gear}
-        </MiniControls>
+        />
       </div>
 
       <div className="relative min-h-0 flex-1">

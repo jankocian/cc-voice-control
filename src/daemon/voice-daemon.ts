@@ -783,8 +783,11 @@ export class VoiceDaemon {
       if (!reply || this.spoken.has(reply.uuid)) continue;
       this.pending.splice(i, 1);
       this.remember(this.spoken, reply.uuid, SPOKEN_UUID_CAP);
-      // "off" still resolves the turn + shows the reply, but doesn't auto-play it (tap-to-play remains).
-      if (this.speakMode !== "off") void this.speak(reply.uuid, reply.text);
+      // ALWAYS synthesize the final reply — synthesis is independent of autoplay. The phone's autoplay
+      // setting decides only whether the arriving audio plays by itself or waits for a tap; it must NOT
+      // suppress synthesis (else "off" would leave nothing to tap-play — the bug this fixes). speakMode
+      // still gates auto-reading interim STEPS (see speakNewSteps), which is a separate "all" behaviour.
+      void this.speak(reply.uuid, reply.text);
     }
   }
 

@@ -41,7 +41,25 @@ export function ThreadPager({
   activeScrollRootRef: (node: HTMLDivElement | null) => void;
   activeSentinelRef: (node: HTMLDivElement | null) => void;
 }) {
-  const [emblaRef, emblaApi] = useEmblaCarousel({ align: "start", containScroll: "keepSnaps", duration: 20 });
+  const [emblaRef, emblaApi] = useEmblaCarousel({
+    align: "start",
+    containScroll: "keepSnaps",
+    duration: 20,
+    // Don't page when the horizontal drag starts inside a horizontally-scrollable element (a wide code
+    // block's overflow-x) — let that element scroll instead, so the user can reveal clipped code.
+    watchDrag: (api, evt) => {
+      let node = evt.target as HTMLElement | null;
+      const root = api.rootNode();
+      while (node && node !== root) {
+        if (node.scrollWidth > node.clientWidth + 1) {
+          const overflowX = getComputedStyle(node).overflowX;
+          if (overflowX === "auto" || overflowX === "scroll") return false;
+        }
+        node = node.parentElement;
+      }
+      return true;
+    }
+  });
   const [ready, setReady] = useState(false);
   // Read latest threads/active inside Embla's stable callbacks without re-subscribing each render.
   const threadsRef = useRef(threads);
@@ -51,6 +69,12 @@ export function ThreadPager({
   // Mirror `ready` so the stable callback can read it. Before the first reveal we JUMP (no animation) so
   // restoring the saved thread shows no swipe; once revealed, user switches (pill / dots) glide.
   const readyRef = useRef(false);
+  // True only between a user's pointer-down on the carousel and the scroll settling — so we can tell a
+  // genuine SWIPE apart from a programmatic / re-measure `select`. Without this, when the roster reorders
+  // (a thread goes offline→online, sortRoster re-sorts) the selected INDEX maps to a different thread and
+  // Embla emits `select`, which would silently switch threads with no new message. We only honour `select`
+  // as an activation when it followed a real drag.
+  const userDragRef = useRef(false);
 
   // Bring the active thread's slide into view. This is event-driven (not just a render effect) because
   // Embla re-measures its slides ASYNCHRONOUSLY (watchSlides reInits a tick after React commits): a
@@ -73,19 +97,32 @@ export function ThreadPager({
 
   useEffect(() => {
     if (!emblaApi) return;
-    // Swipe settle → the snapped slide becomes active (a programmatic scrollTo also emits `select`, but
-    // it lands on the already-active thread, so onActivate is a no-op there).
+    // A real user swipe settling → the snapped slide becomes active. Gated to genuine drags (userDragRef):
+    // a programmatic scrollTo (positionToActive) or a re-measure after a roster reorder also emits `select`,
+    // but those must NOT switch threads (the reorder case would otherwise jump to a thread with no new
+    // message — the bug this guards). `settle` clears the flag so a snap-back (no `select`) can't leak it.
+    const onPointerDown = () => {
+      userDragRef.current = true;
+    };
     const onSelect = () => {
+      if (!userDragRef.current) return;
       const id = threadsRef.current[emblaApi.selectedScrollSnap()]?.threadId;
       if (id && id !== activeThreadIdRef.current) onActivate(id);
     };
+    const onSettle = () => {
+      userDragRef.current = false;
+    };
+    emblaApi.on("pointerDown", onPointerDown);
     emblaApi.on("select", onSelect);
+    emblaApi.on("settle", onSettle);
     // Re-apply position once Embla (re)measures — the key timing fix (slides arrive after React commits).
     emblaApi.on("reInit", positionToActive);
     emblaApi.on("slidesChanged", positionToActive);
     positionToActive();
     return () => {
+      emblaApi.off("pointerDown", onPointerDown);
       emblaApi.off("select", onSelect);
+      emblaApi.off("settle", onSettle);
       emblaApi.off("reInit", positionToActive);
       emblaApi.off("slidesChanged", positionToActive);
     };

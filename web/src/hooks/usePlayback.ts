@@ -63,13 +63,25 @@ export type Playback = {
 export type UsePlaybackOptions = {
   // A fresh reply auto-plays only when not recording.
   getRecording: () => boolean;
+  // Whether autoplay is enabled (Autoplay setting ≠ "off"). When off, a fresh reply is still cached +
+  // marked playable (the daemon always synthesizes), it just doesn't play by itself — the user taps it.
+  getAutoplay?: () => boolean;
   // Fetch a reply's audio on demand (tap-to-play on a history row whose bytes aren't
   // cached). App wires this to `sendDaemon({ type: "get_audio", requestId })`; the daemon
   // answers with a `tts_audio` (replay), which lands in attachAudio and plays immediately.
   onRequestAudio?: (requestId: string) => void;
+  // Fired with the ended clip's requestId when an AUTO-played reply finishes on its own (natural end, not
+  // a pause / not a manual tap). Drives the "auto-respond" hands-free loop — App checks the requestId is a
+  // FINAL reply (not an interim step, which can also auto-play in "all" mode) before opening the mic.
+  onAutoReplyFinished?: (requestId: string) => void;
 };
 
-export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions): Playback {
+export function usePlayback({
+  getRecording,
+  getAutoplay,
+  onRequestAudio,
+  onAutoReplyFinished
+}: UsePlaybackOptions): Playback {
   const playerRef = useRef<HTMLAudioElement | null>(null);
   if (!playerRef.current) playerRef.current = new Audio();
   const player = playerRef.current;
@@ -116,8 +128,19 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
   const getRecordingRef = useRef(getRecording);
   getRecordingRef.current = getRecording;
 
+  const getAutoplayRef = useRef(getAutoplay);
+  getAutoplayRef.current = getAutoplay;
+
   const onRequestAudioRef = useRef(onRequestAudio);
   onRequestAudioRef.current = onRequestAudio;
+
+  const onAutoReplyFinishedRef = useRef(onAutoReplyFinished);
+  onAutoReplyFinishedRef.current = onAutoReplyFinished;
+
+  // True while the loaded clip is one we started AUTOMATICALLY (a fresh reply auto-play), so its natural
+  // end fires onAutoReplyFinished (auto-respond). A manual tap clears it (playEntry sets it false), so
+  // replaying an old reply by hand never opens the mic.
+  const autoStartedRef = useRef(false);
 
   // The requestId of a tap-to-play whose audio we've requested but don't have yet. When
   // that audio lands in attachAudio we play it immediately and clear this. A ref (not
@@ -166,9 +189,19 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
     };
     // Natural end / load error → tear the element down so the native session deactivates
     // and any ducked background music resumes. The row falls back to its replay control
-    // (still in playableIds); a tap reloads it fresh.
-    const onEnded = () => unload();
-    const onError = () => unload();
+    // (still in playableIds); a tap reloads it fresh. A natural end of an AUTO-played reply also
+    // fires onAutoReplyFinished (the auto-respond hands-free loop); a load error never does.
+    const onEnded = () => {
+      const wasAuto = autoStartedRef.current;
+      const endedId = currentPlayingIdRef.current;
+      autoStartedRef.current = false;
+      unload();
+      if (wasAuto && endedId) onAutoReplyFinishedRef.current?.(endedId);
+    };
+    const onError = () => {
+      autoStartedRef.current = false;
+      unload();
+    };
     const onTime = () => setPosition(player.currentTime || 0);
     const onMeta = () => setDuration(Number.isFinite(player.duration) ? player.duration : 0);
     player.addEventListener("play", onPlay);
@@ -234,6 +267,9 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
 
   const playEntry = useCallback(
     (requestId: string): void => {
+      // Any direct play (a tap / resume) is manual: clear the auto-respond flag so only an
+      // automatically-started reply's natural end opens the mic. attachAudio re-sets it after an autoplay.
+      autoStartedRef.current = false;
       if (currentPlayingIdRef.current === requestId) {
         if (player.paused) {
           if (player.ended) player.currentTime = 0;
@@ -312,8 +348,13 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
         playEntry(requestId);
         return;
       }
-      // Otherwise: auto-play a fresh reply; a missed (replayed) one waits for a tap.
-      if (!getRecordingRef.current() && !replay) playEntry(requestId);
+      // Otherwise: auto-play a fresh reply — but ONLY if autoplay is on. With autoplay off the audio is
+      // still cached + playable (above), it just waits for a tap. A missed (replayed) one also waits.
+      const autoplayOn = getAutoplayRef.current ? getAutoplayRef.current() : true;
+      if (!getRecordingRef.current() && !replay && autoplayOn) {
+        playEntry(requestId); // playEntry clears autoStartedRef; mark this one auto-started AFTER.
+        autoStartedRef.current = true;
+      }
     },
     [playEntry, clearAudioStatus]
   );

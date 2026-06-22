@@ -221,9 +221,13 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     // Keep the mic track alive for the next recording (no stopStream → no iOS re-prompt),
     // but arm the idle release so it isn't held forever once the user stops talking to us.
     scheduleIdleRelease();
-    // Leave the exclusive recording category so iOS lets background music (Spotify)
-    // resume. A reply's TTS will re-claim the session as "transient-solo" when it plays.
-    setAudioSessionType("auto");
+    // Do NOT drop to "auto" here: on iOS, leaving the recording category ENDS the held mic track,
+    // so the next record re-runs getUserMedia → a fresh permission prompt (the exact symptom). We hold
+    // "play-and-record" so the track stays live for reuse. The cost is background music stays ducked
+    // between a recording and its reply; the reply's TTS (transient-solo) resumes it, and the idle
+    // release / pagehide / unmount hand the session back to "auto" so music isn't held hostage for long.
+    // ponytail: iOS couples mic-alive with record-mode — can't both avoid re-prompts AND resume music
+    // between recordings; the user chose no-reprompt. Needs on-device verification.
     // Cancelled by the user — drop the clip silently (no clip, no error flash).
     if (canceled) return;
     if (!blob.size) {
