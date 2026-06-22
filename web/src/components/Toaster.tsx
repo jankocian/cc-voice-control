@@ -12,7 +12,9 @@ export function Toaster() {
   return (
     <Toast.Provider toastManager={toast}>
       <Toast.Portal>
-        <Toast.Viewport className="fixed inset-x-0 top-0 z-50 mx-auto flex w-full max-w-md flex-col gap-2 px-4 pt-[calc(env(safe-area-inset-top)+4.25rem)]">
+        {/* pointer-events-none so the (full-width, nav-overlapping) viewport never eats taps on the bar
+            beneath it — e.g. the settings gear; each toast re-enables pointer-events for itself. */}
+        <Toast.Viewport className="pointer-events-none fixed inset-x-0 top-0 z-50 mx-auto flex w-full max-w-md flex-col gap-2 px-4 pt-[calc(env(safe-area-inset-top)+4.25rem)]">
           <ToastList />
         </Toast.Viewport>
       </Toast.Portal>
