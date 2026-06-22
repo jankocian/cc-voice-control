@@ -1,5 +1,5 @@
 import { Toast } from "@base-ui-components/react/toast";
-import { Loader2, X } from "lucide-react";
+import { CircleAlert, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // One shared toast manager so any code — even outside React — can raise a toast: `toast.add({...})`,
@@ -30,14 +30,15 @@ function ToastList() {
         key={item.id}
         toast={item}
         className={cn(
-          "flex items-center gap-3 rounded-card border bg-surface/95 p-3 shadow-lift backdrop-blur-md",
+          "flex items-center gap-3 rounded-card border border-hairline bg-surface/95 p-3 shadow-lift backdrop-blur-md",
           "transition-[transform,opacity] duration-300 ease-soft",
           "data-[starting-style]:-translate-y-3 data-[starting-style]:opacity-0",
-          "data-[ending-style]:-translate-y-3 data-[ending-style]:opacity-0",
-          error ? "border-danger/30" : "border-hairline"
+          "data-[ending-style]:-translate-y-3 data-[ending-style]:opacity-0"
         )}
       >
+        {/* The state lives in the left icon (red for errors), not a coloured border — keeps the toast calm. */}
         {loading && <Loader2 className="size-4 shrink-0 animate-spin text-coral" aria-hidden="true" />}
+        {error && <CircleAlert className="size-4 shrink-0 text-danger" aria-hidden="true" />}
         <div className="min-w-0 flex-1">
           <Toast.Title className={cn("text-sm font-semibold leading-tight", error ? "text-danger" : "text-ink")} />
           {item.description ? <Toast.Description className="mt-0.5 text-xs leading-snug text-ink-soft" /> : null}
