@@ -101,15 +101,19 @@ export function App({ session }: { session: Session }) {
   const transcribingRef = useRef(false);
   const startRecordingRef = useRef<() => void>(() => {});
   const getAutoplay = useCallback(() => autoplayEnabledRef.current, []);
-  // Hands-free auto-respond: after ANY final reply finishes playing (autoplayed OR manually tapped), open
-  // the mic so the user can answer and just hit stop. `autoRespondRef` is just the toggle (independent of
-  // autoplay/auto-follow). Skip if already recording/sending, and only fire for a real final reply (never
-  // an interim step). Reads `pagerThreadsRef` assigned below — resolved at call time.
+  // Hands-free auto-respond: after the NEWEST final reply finishes playing (autoplayed OR manually tapped),
+  // open the mic so the user can answer and just hit stop. `autoRespondRef` is just the toggle (independent
+  // of autoplay/auto-follow). Skip if already recording/sending, only fire for a real final reply (never an
+  // interim step), and only when it's the latest turn — replaying an older reply has nothing live to answer.
+  // Reads `pagerThreadsRef` assigned below — resolved at call time.
   const onAutoReplyFinished = useCallback((requestId: string) => {
     if (!autoRespondRef.current || recordingRef.current || transcribingRef.current) return;
     const msgs = pagerThreadsRef.current.find((p) => p.threadId === activeThreadIdRef.current)?.messages ?? [];
     const msg = msgs.find((m) => m.requestId === requestId);
     if (msg?.kind !== "claude" || msg.interim) return;
+    // Only continue the conversation when this reply is the newest turn in the thread (msgs is newest-first).
+    // Replaying an older reply shouldn't open the mic — there's nothing live to answer.
+    if (msgs[0]?.requestId !== requestId) return;
     startRecordingRef.current();
   }, []);
 
