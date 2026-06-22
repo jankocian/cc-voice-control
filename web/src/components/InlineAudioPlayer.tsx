@@ -51,11 +51,15 @@ export function InlineAudioPlayer({
         {playing ? <Pause className="size-4 fill-current" /> : <Play className="size-4 fill-current translate-x-px" />}
       </button>
 
-      {/* Scrubber + times. Stops propagation so a scrub never reads as a card play/pause tap. */}
+      {/* Scrubber + times. Stops propagation so a scrub never reads as a card play/pause tap, and
+          `data-no-pager` tells the thread carousel's watchDrag to leave a horizontal scrub alone instead
+          of paging between threads (stopPropagation alone is too late — Embla's drag listener sits on an
+          ancestor and sees the native pointerdown first). */}
       {/* biome-ignore lint/a11y/noStaticElementInteractions: not a control — only guards the card tap;
           the slider + buttons inside are the actual controls. */}
       <div
         className="flex min-w-0 flex-1 items-center gap-2"
+        data-no-pager=""
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => e.stopPropagation()}
       >

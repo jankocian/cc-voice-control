@@ -145,21 +145,21 @@ export function BottomSwitcher({
           )}
         </button>
 
-        {/* Swipe indicator + 1-tap jump — only meaningful with more than one thread. */}
+        {/* Swipe indicator — DISPLAY ONLY (not tappable), only meaningful with more than one thread.
+            It sits in the iOS home-indicator zone, where the bottom edge-swipe (app switcher / close)
+            would otherwise land on a dot and switch threads by accident. Paging is by sideways swipe;
+            the pill above is the tap target. pointer-events-none lets the OS gesture pass straight
+            through, and the row is decorative (aria-hidden) — the pill/menu is the accessible switcher. */}
         {multi && (
-          <div className="flex items-center gap-1.5">
+          <div className="pointer-events-none flex items-center gap-1.5" aria-hidden="true">
             {rows.map(({ thread }) => {
               const isActive = thread.threadId === activeThreadId;
               return (
-                <button
+                <span
                   key={thread.threadId}
-                  type="button"
-                  onClick={() => onSelect(thread.threadId)}
-                  aria-label={isActive ? "Current session" : "Switch to session"}
-                  aria-current={isActive}
                   className={cn(
                     "h-1.5 shrink-0 rounded-full transition-all duration-200 ease-soft",
-                    isActive ? "w-5 bg-coral" : "w-1.5 bg-ink-faint/40 hover:bg-ink-faint/70"
+                    isActive ? "w-5 bg-coral" : "w-1.5 bg-ink-faint/40"
                   )}
                 />
               );
