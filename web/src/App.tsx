@@ -292,13 +292,22 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     resolveSpawnToast(); // clear any prior one
     spawnToastRef.current = toast.add({ title: "Spawning a new agent…", type: "loading", timeout: 0 });
     spawnTimerRef.current = window.setTimeout(() => {
-      if (!spawnToastRef.current) return;
-      toast.update(spawnToastRef.current, {
+      const id = spawnToastRef.current;
+      if (!id) return;
+      toast.update(id, {
         type: "error",
         title: "Couldn’t spawn a new agent",
         description: "It didn’t come online in time.",
         timeout: 0,
-        actionProps: { children: "Try again", onClick: () => handleSpawnRef.current() }
+        // Close THIS error toast before retrying — Toast.Action doesn't auto-close, and handleSpawn opens a
+        // fresh loading toast, so without this the stale error would linger beside it.
+        actionProps: {
+          children: "Try again",
+          onClick: () => {
+            toast.close(id);
+            handleSpawnRef.current();
+          }
+        }
       });
       spawnToastRef.current = null; // detach: the error toast now persists until dismissed / retried
     }, SPAWN_FOLLOW_TIMEOUT_MS);
