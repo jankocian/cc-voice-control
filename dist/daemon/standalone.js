@@ -3467,12 +3467,12 @@ var require_qrcode = __commonJS((exports, module) => {
     };
     qrcode2.stringToBytesFuncs = {
       default: function(s) {
-        var bytes = [];
+        var bytes2 = [];
         for (var i = 0;i < s.length; i += 1) {
           var c = s.charCodeAt(i);
-          bytes.push(c & 255);
+          bytes2.push(c & 255);
         }
-        return bytes;
+        return bytes2;
       }
     };
     qrcode2.stringToBytes = qrcode2.stringToBytesFuncs["default"];
@@ -3506,26 +3506,26 @@ var require_qrcode = __commonJS((exports, module) => {
       }();
       var unknownChar = 63;
       return function(s) {
-        var bytes = [];
+        var bytes2 = [];
         for (var i = 0;i < s.length; i += 1) {
           var c = s.charCodeAt(i);
           if (c < 128) {
-            bytes.push(c);
+            bytes2.push(c);
           } else {
             var b = unicodeMap[s.charAt(i)];
             if (typeof b == "number") {
               if ((b & 255) == b) {
-                bytes.push(b);
+                bytes2.push(b);
               } else {
-                bytes.push(b >>> 8);
-                bytes.push(b & 255);
+                bytes2.push(b >>> 8);
+                bytes2.push(b & 255);
               }
             } else {
-              bytes.push(unknownChar);
+              bytes2.push(unknownChar);
             }
           }
         }
-        return bytes;
+        return bytes2;
       };
     };
     var QRMode = {
@@ -4521,9 +4521,9 @@ var require_qrcode = __commonJS((exports, module) => {
       var b = byteArrayOutputStream();
       gif.write(b);
       var base643 = base64EncodeOutputStream();
-      var bytes = b.toByteArray();
-      for (var i = 0;i < bytes.length; i += 1) {
-        base643.writeByte(bytes[i]);
+      var bytes2 = b.toByteArray();
+      for (var i = 0;i < bytes2.length; i += 1) {
+        base643.writeByte(bytes2[i]);
       }
       base643.flush();
       return "data:image/gif;base64," + base643;
@@ -4565,14 +4565,14 @@ var require_qrcode = __commonJS((exports, module) => {
 });
 
 // src/daemon/standalone.ts
-import { appendFileSync, existsSync, mkdirSync as mkdirSync3, realpathSync, statSync, truncateSync } from "node:fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, realpathSync, statSync, truncateSync } from "node:fs";
 import { join as join2 } from "node:path";
 import { argv } from "node:process";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/daemon/config.ts
 import { createHash, randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18857,24 +18857,26 @@ config(en_default());
 var BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
 var BRIDGE_WEBSOCKET_PATH_PREFIX = "/ws";
 var BRIDGE_ROLE_QUERY_PARAM = "role";
+var BRIDGE_DAEMON_KEY_HEADER = "x-vc-daemon-key";
 var BRIDGE_THREAD_ID_QUERY_PARAM = "threadId";
-function toBridgeBrowserSessionUrl(bridgeUrl, secret) {
+function toBridgeBrowserSessionUrl(bridgeUrl, sessionId, secret) {
+  if (!secret)
+    throw new Error("secret is required");
   const url2 = new URL(bridgeUrl);
-  url2.pathname = toBridgeBrowserSessionPath(secret);
+  url2.pathname = `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeId(sessionId)}`;
+  url2.search = "";
+  url2.hash = secret;
   return url2.toString();
 }
-function toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId) {
+function toBridgeWebSocketUrl(bridgeUrl, sessionId, role, threadId) {
   const url2 = new URL(bridgeUrl);
   url2.protocol = toBridgeWebSocketProtocol(url2.protocol);
-  url2.pathname = toBridgeWebSocketPath(secret);
+  url2.pathname = toBridgeWebSocketPath(sessionId);
   writeBridgeAuthQuery(url2.searchParams, role, threadId);
   return url2.toString();
 }
-function toBridgeBrowserSessionPath(secret) {
-  return `${BRIDGE_BROWSER_SESSION_PATH_PREFIX}/${encodeSecret(secret)}`;
-}
-function toBridgeWebSocketPath(secret) {
-  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeSecret(secret)}`;
+function toBridgeWebSocketPath(sessionId) {
+  return `${BRIDGE_WEBSOCKET_PATH_PREFIX}/${encodeId(sessionId)}`;
 }
 function writeBridgeAuthQuery(searchParams, role, threadId) {
   if (role)
@@ -18885,10 +18887,10 @@ function writeBridgeAuthQuery(searchParams, role, threadId) {
 function toBridgeWebSocketProtocol(protocol) {
   return protocol === "https:" || protocol === "wss:" ? "wss:" : "ws:";
 }
-function encodeSecret(secret) {
-  if (!secret)
-    throw new Error("secret is required");
-  return encodeURIComponent(secret);
+function encodeId(id) {
+  if (!id)
+    throw new Error("sessionId is required");
+  return encodeURIComponent(id);
 }
 
 // src/daemon/config.ts
@@ -18990,12 +18992,14 @@ function writeSetupNeededRuntime(setup) {
   }, null, 2));
 }
 var SESSION_SECRET_BYTES = 16;
-var SESSION_ID_CHARS = 12;
+var DAEMON_KEY_BYTES = 32;
+var SESSION_ID_CHARS = 8;
 function sessionFilePath() {
   return join(stateDir(), "session.json");
 }
 var SessionFileSchema = exports_external.object({
   secret: exports_external.string().min(1),
+  daemonKey: exports_external.string().min(1),
   sessionId: exports_external.string().min(1),
   createdAt: exports_external.number()
 });
@@ -19009,7 +19013,16 @@ function loadOrCreateSession() {
     return existing;
   mkdirSync(stateDir(), { recursive: true });
   const secret = randomBytes(SESSION_SECRET_BYTES).toString("base64url");
-  const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+  const daemonKey = randomBytes(DAEMON_KEY_BYTES).toString("base64url");
+  const session = { secret, daemonKey, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+  if (existsSync(path)) {
+    const racer = readSessionFile(path);
+    if (racer)
+      return racer;
+    writeFileSync(path, JSON.stringify(session, null, 2), { mode: 384 });
+    chmodSync(path, 384);
+    return session;
+  }
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 384 });
   try {
@@ -19020,21 +19033,21 @@ function loadOrCreateSession() {
     } catch {}
   }
   const settled = readSessionFile(path) ?? session;
-  return { secret: settled.secret, sessionId: settled.sessionId };
+  return { secret: settled.secret, sessionId: settled.sessionId, daemonKey: settled.daemonKey };
 }
 function readSessionFile(path) {
   try {
     const parsed = SessionFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-    return { secret: parsed.secret, sessionId: parsed.sessionId };
+    return { secret: parsed.secret, sessionId: parsed.sessionId, daemonKey: parsed.daemonKey };
   } catch {
     return;
   }
 }
-function toWebSocketUrl(bridgeUrl, secret, role, threadId) {
-  return toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId);
+function toWebSocketUrl(bridgeUrl, sessionId, role, threadId) {
+  return toBridgeWebSocketUrl(bridgeUrl, sessionId, role, threadId);
 }
-function toBrowserUrl(bridgeUrl, secret) {
-  return toBridgeBrowserSessionUrl(bridgeUrl, secret);
+function toBrowserUrl(bridgeUrl, sessionId, secret) {
+  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, secret);
 }
 
 // src/daemon/voice-daemon.ts
@@ -19054,6 +19067,67 @@ var import_subprotocol = __toESM(require_subprotocol(), 1);
 var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 var wrapper_default = import_websocket.default;
+
+// src/shared/e2e.ts
+var TEXT = new TextEncoder;
+var FROM = new TextDecoder;
+var IV_BYTES = 12;
+function bytes(value) {
+  const encoded = TEXT.encode(value);
+  const out = new Uint8Array(new ArrayBuffer(encoded.byteLength));
+  out.set(encoded);
+  return out;
+}
+async function deriveKey(secret) {
+  const ikm = await crypto.subtle.importKey("raw", bytes(secret), "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({
+    name: "HKDF",
+    hash: "SHA-256",
+    salt: bytes("voice-control/e2e/v1"),
+    info: bytes("content")
+  }, ikm, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function seal(key, plaintext, aad) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: bytes(aad) }, key, bytes(plaintext));
+  return { iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) };
+}
+async function open(key, blob, aad) {
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(blob.iv), additionalData: bytes(aad) }, key, fromBase64(blob.ct));
+  return FROM.decode(plaintext);
+}
+function aad(channel, threadId) {
+  return `${channel}:${threadId}`;
+}
+async function sealJson(key, value, aad2) {
+  return seal(key, JSON.stringify(value), aad2);
+}
+async function openJson(key, blob, aad2) {
+  return JSON.parse(await open(key, blob, aad2));
+}
+function toBase64(bytes2) {
+  let binary = "";
+  for (let i = 0;i < bytes2.length; i++)
+    binary += String.fromCharCode(bytes2[i]);
+  return btoa(binary);
+}
+function fromBase64(value) {
+  const binary = atob(value);
+  const out = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0;i < binary.length; i++)
+    out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+// src/shared/serialize.ts
+function createSerializer() {
+  let tail = Promise.resolve();
+  return (task) => {
+    tail = tail.then(task).catch((error51) => {
+      console.error(`[serialize] task dropped (chain continues): ${error51 instanceof Error ? error51.message : String(error51)}`);
+    });
+  };
+}
 
 // src/daemon/bridge-heartbeat.ts
 var OPEN = 1;
@@ -19286,10 +19360,10 @@ function filenameForMime(mimeType) {
 }
 async function transcribeAudio(config2, audio, mimeType) {
   const form = new FormData;
-  const bytes = new Uint8Array(audio.byteLength);
-  bytes.set(audio);
+  const bytes2 = new Uint8Array(audio.byteLength);
+  bytes2.set(audio);
   const type = mimeType || "audio/webm";
-  form.append("file", new Blob([bytes], { type }), filenameForMime(type));
+  form.append("file", new Blob([bytes2], { type }), filenameForMime(type));
   form.append("model", config2.sttModel);
   if (config2.language)
     form.append("language", config2.language);
@@ -19665,6 +19739,7 @@ class TurnCoordinator {
 var RECONNECT_DELAY_MS = 1500;
 var BRIDGE_PING_INTERVAL_MS = 25000;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
+var PAIRING_WINDOW_MS = 90000;
 var MAX_SPEECH_CHARS = 40000;
 var MAX_PROJECTED_TURNS = 40;
 var MAX_AUDIO_ENTRIES = 20;
@@ -19677,9 +19752,9 @@ var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 function createDaemonInit(config2) {
   const surface = process.env.CMUX_SURFACE_ID;
   const threadId = surface ?? randomUUID();
-  const { secret, sessionId } = loadOrCreateSession();
-  const browserUrl = toBrowserUrl(config2.bridgeUrl, secret);
-  return { config: config2, surface, threadId, secret, sessionId, browserUrl };
+  const { secret, sessionId, daemonKey } = loadOrCreateSession();
+  const browserUrl = toBrowserUrl(config2.bridgeUrl, sessionId, secret);
+  return { config: config2, surface, threadId, secret, daemonKey, sessionId, browserUrl };
 }
 
 class VoiceDaemon {
@@ -19693,6 +19768,9 @@ class VoiceDaemon {
   healthTimer;
   stopHeartbeat;
   stopped = false;
+  pairWindowRequested = false;
+  pairingOpen = null;
+  pairingTimer;
   turns;
   audio = new Map;
   lastTranscriptPath;
@@ -19704,6 +19782,10 @@ class VoiceDaemon {
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
   label;
+  key;
+  sealedLabel;
+  enqueueSeal = createSerializer();
+  enqueueRecv = createSerializer();
   constructor(init) {
     this.init = init;
     this.label = { title: init.threadId };
@@ -19717,6 +19799,8 @@ class VoiceDaemon {
     return this.init.browserUrl;
   }
   async start() {
+    this.key = await deriveKey(this.init.secret);
+    this.sealedLabel = await this.sealLabel(this.label);
     await this.startHookListener();
     this.writeRuntime();
     this.connectBridge();
@@ -19746,7 +19830,7 @@ class VoiceDaemon {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/turn-open" && route !== "/turn-progress" && route !== "/turn-close" && route !== "/reset" && route !== "/spawn") {
+        if (route !== "/turn-open" && route !== "/turn-progress" && route !== "/turn-close" && route !== "/reset" && route !== "/pair" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -19762,6 +19846,10 @@ class VoiceDaemon {
           res.end();
           if (route === "/reset") {
             this.handleReset();
+            return;
+          }
+          if (route === "/pair") {
+            this.openPairWindow();
             return;
           }
           try {
@@ -19808,9 +19896,28 @@ class VoiceDaemon {
       writeFileSync2(qrPath(), `${renderQr(this.init.browserUrl)}
 `);
     } catch (error51) {
-      console.error(`[qr] render failed: ${error51 instanceof Error ? error51.message : String(error51)}`);
+      console.error(`[qr] render failed: ${errText(error51)}`);
     }
-    writeFileSync2(threadRuntimePath(this.init.surface), JSON.stringify({ port: this.port, pid: process.pid, surface: this.init.surface ?? null, sessionUrl: this.init.browserUrl }, null, 2));
+    writeFileSync2(threadRuntimePath(this.init.surface), JSON.stringify({
+      port: this.port,
+      pid: process.pid,
+      surface: this.init.surface ?? null,
+      sessionUrl: this.init.browserUrl,
+      pairing: this.pairingOpen
+    }, null, 2));
+  }
+  setPairingOpen(open2) {
+    if (this.pairingTimer) {
+      clearTimeout(this.pairingTimer);
+      this.pairingTimer = undefined;
+    }
+    if (open2)
+      this.pairingTimer = setTimeout(() => this.setPairingOpen(false), PAIRING_WINDOW_MS);
+    if (this.pairingOpen === open2)
+      return;
+    this.pairingOpen = open2;
+    if (this.port)
+      this.writeRuntime();
   }
   handleReset() {
     this.floor = Date.now();
@@ -19821,16 +19928,32 @@ class VoiceDaemon {
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
     this.projectAndEmit();
   }
+  openPairWindow() {
+    if (this.ws?.readyState === wrapper_default.OPEN) {
+      this.requestClaimWindow();
+      console.error("[pair] opened a device-pairing window");
+    } else {
+      this.pairWindowRequested = true;
+      console.error("[pair] bridge socket down — pairing window will open on reconnect");
+    }
+  }
+  requestClaimWindow() {
+    this.send({ channel: "control", event: { type: "open_claim_window" } });
+  }
   connectBridge() {
     if (this.stopped)
       return;
-    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon", this.init.threadId);
-    const ws = new wrapper_default(url2);
+    const url2 = toWebSocketUrl(this.init.config.bridgeUrl, this.init.sessionId, "daemon", this.init.threadId);
+    const ws = new wrapper_default(url2, { headers: { [BRIDGE_DAEMON_KEY_HEADER]: this.init.daemonKey } });
     this.ws = ws;
     ws.on("open", () => {
       this.registerThread();
       this.emitStatus();
       this.refreshLabel();
+      if (this.pairWindowRequested) {
+        this.pairWindowRequested = false;
+        this.requestClaimWindow();
+      }
       this.stopHeartbeat = startBridgeHeartbeat(ws, BRIDGE_PING_INTERVAL_MS);
     });
     ws.on("message", (raw) => {
@@ -19840,8 +19963,22 @@ class VoiceDaemon {
       } catch {
         return;
       }
-      if (envelope.channel === "daemon" && envelope.event && envelope.threadId === this.init.threadId) {
-        this.handleBrowserEvent(envelope.event).catch((error51) => this.sendError(error51));
+      if (envelope.channel === "session" && envelope.event?.type === "pairing") {
+        this.setPairingOpen(envelope.event.open);
+        return;
+      }
+      if (envelope.channel === "daemon" && envelope.enc && envelope.threadId === this.init.threadId) {
+        const enc = envelope.enc;
+        this.enqueueRecv(async () => {
+          let event;
+          try {
+            event = await openJson(this.key, enc, aad("daemon", this.init.threadId));
+          } catch (error51) {
+            console.error(`[e2e] dropped an undecryptable browser message: ${errText(error51)}`);
+            return;
+          }
+          this.handleBrowserEvent(event).catch((error51) => this.sendError(error51));
+        });
       }
     });
     ws.on("close", (code) => {
@@ -19924,7 +20061,7 @@ class VoiceDaemon {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(result));
     } catch (error51) {
-      console.error(`[spawn] request failed: ${error51 instanceof Error ? error51.message : String(error51)}`);
+      console.error(`[spawn] request failed: ${errText(error51)}`);
       res.statusCode = 500;
       res.end(JSON.stringify({ ok: false }));
     }
@@ -20153,7 +20290,7 @@ class VoiceDaemon {
       this.storeAudio(uuid3, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId: uuid3, audioBase64, mimeType });
     } catch (error51) {
-      const message = error51 instanceof Error ? error51.message : String(error51);
+      const message = errText(error51);
       console.error(`[tts] synthesis failed for ${uuid3}: ${message}`);
       this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
     }
@@ -20170,11 +20307,14 @@ class VoiceDaemon {
   buildThreadInfo() {
     return {
       threadId: this.init.threadId,
-      label: this.label,
+      label: this.sealedLabel,
       state: this.turns.isWorking() ? "working" : "idle",
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
+  }
+  sealLabel(label) {
+    return sealJson(this.key, label, aad("label", this.init.threadId));
   }
   registerThread() {
     this.send({ channel: "registry", event: { type: "thread_register", info: this.buildThreadInfo() } });
@@ -20191,6 +20331,7 @@ class VoiceDaemon {
     if (sameLabel(next, this.label))
       return;
     this.label = next;
+    this.sealedLabel = await this.sealLabel(next);
     if (this.ws?.readyState === wrapper_default.OPEN)
       this.registerThread();
   }
@@ -20205,7 +20346,11 @@ class VoiceDaemon {
       this.registerThread();
   }
   sendToBrowser(event) {
-    this.send({ channel: "browser", threadId: this.init.threadId, event });
+    const threadId = this.init.threadId;
+    this.enqueueSeal(async () => {
+      const enc = await sealJson(this.key, event, aad("browser", threadId));
+      this.send({ channel: "browser", threadId, enc });
+    });
   }
   send(envelope) {
     if (this.ws?.readyState !== wrapper_default.OPEN)
@@ -20215,7 +20360,7 @@ class VoiceDaemon {
     } catch {}
   }
   sendError(error51) {
-    this.sendToBrowser({ type: "error", message: error51 instanceof Error ? error51.message : String(error51) });
+    this.sendToBrowser({ type: "error", message: errText(error51) });
   }
   stop() {
     this.stopped = true;
@@ -20223,6 +20368,8 @@ class VoiceDaemon {
       clearTimeout(this.reconnectTimer);
     if (this.healthTimer)
       clearInterval(this.healthTimer);
+    if (this.pairingTimer)
+      clearTimeout(this.pairingTimer);
     this.stopHeartbeat?.();
     this.send({ channel: "control", event: { type: "terminate" } });
     try {
@@ -20240,6 +20387,9 @@ function sameLabel(a, b) {
 function capForSpeech(text) {
   return text.length > MAX_SPEECH_CHARS ? `${text.slice(0, MAX_SPEECH_CHARS)}…` : text;
 }
+function errText(error51) {
+  return error51 instanceof Error ? error51.message : String(error51);
+}
 
 // src/daemon/standalone.ts
 var LOG_MAX_BYTES = 1e6;
@@ -20250,7 +20400,7 @@ function installLogTee() {
   console.error = (...args) => {
     baseError(...args);
     try {
-      if (existsSync(logFile) && statSync(logFile).size > LOG_MAX_BYTES)
+      if (existsSync2(logFile) && statSync(logFile).size > LOG_MAX_BYTES)
         truncateSync(logFile, 0);
       appendFileSync(logFile, `${new Date().toISOString()} ${args.map((a) => String(a)).join(" ")}
 `);
