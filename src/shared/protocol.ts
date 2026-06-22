@@ -71,6 +71,10 @@ export type DaemonToBrowserEvent =
   // `replay` marks a reply re-sent on reconnect: the phone shows it for tap-to-play
   // instead of auto-playing it (a reply the user already missed should not start talking).
   | { type: "tts_audio"; requestId: string; audioBase64: string; mimeType: string; replay?: boolean }
+  // Audio lifecycle for a reply the daemon is voicing: "pending" while it synthesizes, "failed" if synth
+  // errored. Lets the phone show a loading indicator on the message until `tts_audio` lands, and a retry
+  // (re-request via get_audio) on failure. Not sent for replies the daemon never voices.
+  | { type: "tts_status"; requestId: string; state: "pending" | "failed" }
   // The projected conversation thread, the SINGLE channel for transcript content. The daemon re-projects
   // it from Claude's transcript on every turn event (and on `sync`) and sends the snapshot; the phone
   // reconciles by native uuid + native timestamp, so it self-heals to ground truth and can never drift,

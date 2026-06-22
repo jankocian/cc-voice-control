@@ -692,12 +692,18 @@ export class VoiceDaemon {
     if (!audio) {
       const turn = this.projectedNow().find((t) => t.uuid === uuid);
       if (turn) {
+        // Re-synthesizing on demand (tap-to-play / retry) — show the loading indicator while we do.
+        this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "pending" });
         try {
           const synth = await synthesizeSpeech(this.init.config, capForSpeech(turn.text));
           if (synth.audioBase64)
             audio = this.storeAudio(uuid, { audioBase64: synth.audioBase64, mimeType: synth.mimeType });
         } catch {
-          // fall through to the not-available error
+          // synth failed → mark the row retryable below
+        }
+        if (!audio) {
+          this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "failed" });
+          return;
         }
       }
     }
@@ -802,20 +808,19 @@ export class VoiceDaemon {
   // Synthesize a reply/step's audio, retain it (keyed by native uuid) for tap-to-play + reconnect, and
   // push it to the phone to auto-play now.
   private async speak(uuid: string, text: string): Promise<void> {
+    // Tell the phone audio is on its way so the message shows a loading indicator until it lands.
+    this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "pending" });
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (!audioBase64) return; // nothing to synthesize (empty/whitespace reply)
       this.storeAudio(uuid, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId: uuid, audioBase64, mimeType });
     } catch (error) {
-      // The text reply already reached the phone; surface the audio failure (don't swallow it) so a
-      // config/model/rate-limit problem is visible instead of "the voice just didn't arrive".
+      // The text reply already reached the phone; flag the row failed (the phone offers a retry) instead
+      // of a transient toast, so a config/model/rate-limit problem is recoverable rather than just lost.
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[tts] synthesis failed for ${uuid}: ${message}`);
-      this.sendToBrowser({
-        type: "error",
-        message: "Couldn't speak that reply — its text is shown, but audio failed."
-      });
+      this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "failed" });
     }
   }
 

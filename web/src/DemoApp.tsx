@@ -4,6 +4,7 @@ import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
 import { MiniControls } from "@/components/MiniControls";
 import { ThreadPager } from "@/components/ThreadPager";
+import { Toaster, toast } from "@/components/Toaster";
 import { TopBar } from "@/components/TopBar";
 import type { Message } from "@/lib/messages";
 import type { ThreadId } from "@/lib/protocol";
@@ -107,7 +108,31 @@ const DEMO_THREAD = [
 
 export function DemoApp({ state }: { state: string }) {
   if (state === "pager") return <PagerDemo />;
+  if (state === "toast") return <ToastDemo />;
   return <StateDemo state={state} />;
+}
+
+function ToastDemo() {
+  useEffect(() => {
+    // Defer out of the lifecycle (real callers add from event handlers, not render).
+    const id = window.setTimeout(() => {
+      toast.add({ title: "Spawning a new agent…", type: "loading", timeout: 0 });
+      toast.add({
+        title: "Couldn’t spawn a new agent",
+        description: "It didn’t come online in time.",
+        type: "error",
+        timeout: 0,
+        actionProps: { children: "Try again", onClick: () => {} }
+      });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, []);
+  return (
+    <div className="flex h-full flex-col bg-canvas px-safe">
+      <Toaster />
+      <TopBar />
+    </div>
+  );
 }
 
 // Exercises the real Embla <ThreadPager> with a few threads so swipe/paging can be verified offline.
@@ -134,6 +159,7 @@ function PagerDemo() {
     position: 0,
     duration: 0,
     playableIds: new Set<string>(),
+    audioStatus: new Map<string, "pending" | "failed">(),
     onPlay: noop,
     onReplay: noop,
     onSeek: noop

@@ -100,20 +100,6 @@ export function useVoiceControls({
     [sendDaemon, bridgeReady, showFlash, activeThreadIdRef]
   );
 
-  // The "+" affordance emits spawn_thread on the ACTIVE thread's daemon (it has the cmux trust to open
-  // another pane, at the active pane's cwd, inheriting its permission mode). The daemon arms the follow
-  // (spawn_pending) only once the workspace actually opens, so the phone follows a real spawn.
-  const onSpawn = useCallback(() => {
-    const threadId = activeThreadIdRef.current;
-    // Spawn routes through the ACTIVE thread's daemon — if it isn't reachable, there's no one to open a
-    // pane. Make that unmissable (red) instead of a quiet note that reads like a normal status.
-    if (!threadId || !sendDaemon(threadId, { type: "spawn_thread" })) {
-      showFlash("Start a new session from a connected thread", "alert");
-      return;
-    }
-    showFlash("Opening a new session…");
-  }, [sendDaemon, showFlash, activeThreadIdRef]);
-
   // Free the mic/stream when the page is hidden (iOS backgrounding).
   useEffect(() => {
     const onPageHide = () => teardown();
@@ -129,7 +115,6 @@ export function useVoiceControls({
     onInterrupt: useCallback(() => startRecording("interrupt"), [startRecording]),
     onStopRecording: useCallback(() => stop(), [stop]),
     onCancel: useCallback(() => cancel(), [cancel]),
-    onStopTask: useCallback(() => sendControl({ type: "stop_task" }), [sendControl]),
-    onSpawn
+    onStopTask: useCallback(() => sendControl({ type: "stop_task" }), [sendControl])
   };
 }
