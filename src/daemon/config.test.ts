@@ -48,7 +48,7 @@ describe("resolveConfig", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
     expect(result.config.openaiApiKey).toBe("sk-test");
-    expect(result.config.openaiVoice).toBe("marin");
+    expect(result.config.openaiVoice).toBe("cedar");
     expect(result.config.ttsModel).toBe("gpt-4o-mini-tts");
     expect(result.config.sttModel).toBe("gpt-4o-mini-transcribe");
     expect(result.config.bridgeUrl).toBe("https://voice-control.nee.rs");

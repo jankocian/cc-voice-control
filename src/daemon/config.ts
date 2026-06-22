@@ -10,7 +10,7 @@ const ConfigSchema = z.object({
   // OpenAI key, read only by the local daemon for STT + TTS. Never sent to the bridge/browser.
   openaiApiKey: z.string().min(1),
   // Voice used to read Claude Code's replies aloud (gpt-4o-mini-tts voice name).
-  openaiVoice: z.string().min(1).default("marin"),
+  openaiVoice: z.string().min(1).default("cedar"),
   // OpenAI model ids; overridable, with sensible defaults.
   ttsModel: z.string().min(1).default("gpt-4o-mini-tts"),
   sttModel: z.string().min(1).default("gpt-4o-mini-transcribe"),
