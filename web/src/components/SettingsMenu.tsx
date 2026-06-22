@@ -20,6 +20,12 @@ const THEME_OPTIONS: Option<ThemeMode>[] = [
   { value: "light", label: "Light", aria: "Light theme" }
 ];
 
+// Auto-follow: when ON, a fresh reply on a background thread auto-switches to it (and plays on land).
+const AUTO_FOLLOW_OPTIONS: Option<"off" | "on">[] = [
+  { value: "off", label: "Off", aria: "Stay on the current thread when other threads reply" },
+  { value: "on", label: "On", aria: "Auto-switch to new messages across threads" }
+];
+
 // A pill-shaped segmented control (one Base UI radio group). Picking a segment does NOT close the menu, so
 // both settings can be changed before dismissing (tap outside to close).
 function Segmented<T extends string>({
@@ -79,11 +85,15 @@ function Field<T extends string>(props: {
 export function SettingsMenu({
   speakMode,
   onSpeakModeChange,
+  autoFollow,
+  onAutoFollowChange,
   theme,
   onThemeChange
 }: {
   speakMode: SpeakMode;
   onSpeakModeChange: (mode: SpeakMode) => void;
+  autoFollow: boolean;
+  onAutoFollowChange: (on: boolean) => void;
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
 }) {
@@ -96,6 +106,12 @@ export function SettingsMenu({
         <Menu.Positioner className="z-50 outline-none" sideOffset={8} align="end">
           <Menu.Popup className="flex flex-col gap-3 rounded-bubble border border-hairline bg-surface p-3 text-ink shadow-lift outline-none">
             <Field label="Autoplay" value={speakMode} onValueChange={onSpeakModeChange} options={SPEAK_OPTIONS} />
+            <Field
+              label="Auto-follow"
+              value={autoFollow ? "on" : "off"}
+              onValueChange={(v) => onAutoFollowChange(v === "on")}
+              options={AUTO_FOLLOW_OPTIONS}
+            />
             <Field label="Theme" value={theme} onValueChange={onThemeChange} options={THEME_OPTIONS} />
           </Menu.Popup>
         </Menu.Positioner>

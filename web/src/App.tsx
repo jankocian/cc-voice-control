@@ -15,13 +15,19 @@ import { useThreadMessages } from "./hooks/useThreadMessages";
 import { useThreads } from "./hooks/useThreads";
 import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
+import { newestPlayableReply } from "./lib/messages";
 import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
 import { readThreadHint, type SessionCredentials } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
+import { cn } from "./lib/utils";
 
 // How long after tapping "+" we keep following the spawn (focus the next new thread). Long enough for a
 // fresh pane's daemon to launch + register; after this an unrelated join won't steal focus.
 const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
+
+// How long the user must be idle (no touch / scroll / tap) before a deferred auto-follow is allowed to
+// switch threads — so we never yank them away mid-interaction.
+const INTERACTION_IDLE_MS = 4_000;
 
 export function App({ credentials }: { credentials: SessionCredentials }) {
   const { flash, flashTone, show: showFlash } = useFlash();
@@ -32,6 +38,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const { activeThreadId } = threads;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // The app root — interaction listeners attach here to gate auto-follow while the user is active.
+  const appRootRef = useRef<HTMLDivElement>(null);
 
   // The active page's scroll root + hero sentinel are lifted out of the pager so the condensed bar's
   // IntersectionObserver always watches whichever thread is on screen.
@@ -81,9 +89,41 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const playback = usePlayback({ getRecording, onRequestAudio });
   const { stopPlayback } = playback;
 
+  // Auto-follow: a fresh background reply arms a one-shot follow to that thread; the effect below performs
+  // it once nothing's playing / we're not recording/sending (so it never interrupts or steals the mic).
+  // `autoFollowRef` (set below) gates it — only arm when the setting is on. Refs let the callback stay stable.
+  const [pendingFollow, setPendingFollow] = useState<ThreadId | null>(null);
+  // Bumped by the idle-window timer to force the auto-follow effect to re-evaluate after pointer activity
+  // (which doesn't itself re-render) has gone quiet.
+  const [followTick, setFollowTick] = useState(0);
+  const autoFollowRef = useRef(false);
+  // Also hold a deferred follow while the user is actively interacting (touch / scroll / tap) — being
+  // yanked to another thread mid-interaction is jarring. `lastInteractionAt` is bumped by the listeners
+  // wired below; the follow waits until the user has been idle for INTERACTION_IDLE_MS.
+  const lastInteractionAtRef = useRef(0);
+  const onBackgroundReply = useCallback((threadId: ThreadId) => {
+    if (autoFollowRef.current) setPendingFollow(threadId);
+  }, []);
+  // The active thread's in-flight mic turn settled — drive the "Resend" toast (handlers come from
+  // useVoiceControls, wired via a ref since it's created below).
+  const resendToastRef = useRef<{ raise: () => void; clear: () => void }>({ raise: () => {}, clear: () => {} });
+  const onSendOutcome = useCallback((ok: boolean) => {
+    if (ok) resendToastRef.current.clear();
+    else resendToastRef.current.raise();
+  }, []);
+
   // Per-thread conversation state + the bridge content reducer.
   const { handleContentEvent, active, activeRuntime, pagerThreads, transcribing, setTranscribingThreadId } =
-    useThreadMessages({ threads, playback, showFlash, activeThreadId, activeThreadIdRef, armSpawnFollow });
+    useThreadMessages({
+      threads,
+      playback,
+      showFlash,
+      activeThreadId,
+      activeThreadIdRef,
+      armSpawnFollow,
+      onBackgroundReply,
+      onSendOutcome
+    });
 
   // Apply every roster event, and follow a spawn into its EXACT new thread the moment it joins (matched
   // by the one-shot spawnId on its thread_joined — never a ghost or unrelated reconnect).
@@ -140,15 +180,52 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     if (activeThreadId && activeConnected) sendDaemon(activeThreadId, { type: "set_speak_mode", mode: speakMode });
   }, [speakMode, activeThreadId, activeConnected, sendDaemon]);
 
+  // Auto-follow (off / on), persisted per phone. When on, a fresh reply on a background thread auto-switches
+  // to it (and plays on land) — but only once nothing's playing and the user isn't recording/sending (the
+  // effect below defers until then). Read via a ref in the (stable) background-reply callback.
+  const [autoFollow, setAutoFollow] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("vc-auto-follow") === "true";
+    } catch {
+      return false;
+    }
+  });
+  autoFollowRef.current = autoFollow;
+  const changeAutoFollow = useCallback((on: boolean) => {
+    setAutoFollow(on);
+    try {
+      localStorage.setItem("vc-auto-follow", String(on));
+    } catch {
+      /* private mode — in-memory only */
+    }
+  }, []);
+
   // Theme (system / dark / light), persisted in localStorage + applied to <html>; nested in the settings menu.
   const { theme, setTheme } = useTheme();
 
+  // Play-on-land needs the freshest pager pages / unread / playEntry inside switchThread without churning
+  // its deps every render (which would re-arm the deep-link + spawn-follow refs).
+  const pagerThreadsRef = useRef(pagerThreads);
+  pagerThreadsRef.current = pagerThreads;
+  const unreadRef = useRef(threads.unread);
+  unreadRef.current = threads.unread;
+  const { playEntry } = playback;
+  const playEntryRef = useRef(playEntry);
+  playEntryRef.current = playEntry;
+
   // Focus a thread (pill / dropdown / swipe settle). Stop the previous thread's audio first so it
-  // doesn't keep playing under the new view — the shared player is a singleton across threads.
+  // doesn't keep playing under the new view — the shared player is a singleton across threads. Play-on-land:
+  // if we're switching to a thread that has a PENDING unread reply, autoplay its newest reply on arrival —
+  // captured BEFORE setActive clears the badge. (On first load unread is 0, so a refresh never autoplays.)
   const switchThread = useCallback(
     (threadId: ThreadId) => {
       stopPlayback();
+      const hadUnread = (unreadRef.current.get(threadId) ?? 0) > 0;
       threads.setActive(threadId);
+      if (!hadUnread) return;
+      const messages = pagerThreadsRef.current.find((p) => p.threadId === threadId)?.messages ?? [];
+      const requestId = newestPlayableReply(messages);
+      if (requestId) playEntryRef.current(requestId);
     },
     [stopPlayback, threads]
   );
@@ -214,6 +291,50 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     stopPlayback,
     showFlash
   });
+  // Let the thread-messages reducer drive the "Resend" toast (a failed/confirmed in-flight mic turn).
+  resendToastRef.current = { raise: voice.raiseResendToast, clear: voice.clearResendToast };
+
+  // Track recent user interaction (touch / scroll / tap) so a deferred auto-follow can hold off until the
+  // user is idle. Passive listeners on the app root; capture-phase for `scroll` (it doesn't bubble).
+  useEffect(() => {
+    const root = appRootRef.current;
+    if (!root) return;
+    const bump = () => {
+      lastInteractionAtRef.current = Date.now();
+    };
+    const opts = { passive: true } as const;
+    root.addEventListener("pointerdown", bump, opts);
+    root.addEventListener("pointermove", bump, opts);
+    root.addEventListener("touchstart", bump, opts);
+    root.addEventListener("wheel", bump, opts);
+    root.addEventListener("scroll", bump, { passive: true, capture: true });
+    return () => {
+      root.removeEventListener("pointerdown", bump);
+      root.removeEventListener("pointermove", bump);
+      root.removeEventListener("touchstart", bump);
+      root.removeEventListener("wheel", bump);
+      root.removeEventListener("scroll", bump, { capture: true } as EventListenerOptions);
+    };
+  }, []);
+
+  // Auto-follow: perform the armed follow once nothing's playing, we're not recording/sending, AND the
+  // user has been idle for INTERACTION_IDLE_MS — so it waits politely for the current reply to finish,
+  // never steals the mic mid-turn, and never yanks the user away while they're touching/scrolling.
+  // switchThread plays the followed thread's pending reply on land. Stays armed (deferred) until all
+  // blocking clears. Pointer activity doesn't re-render, so when only the idle window is left we re-arm a
+  // short timer that bumps `followTick` to re-evaluate after it elapses.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: followTick is an intentional re-run trigger
+  useEffect(() => {
+    if (!pendingFollow || playback.speaking || voice.recording || transcribing) return;
+    const idleFor = Date.now() - lastInteractionAtRef.current;
+    if (idleFor < INTERACTION_IDLE_MS) {
+      const timer = window.setTimeout(() => setFollowTick((t) => t + 1), INTERACTION_IDLE_MS - idleFor);
+      return () => window.clearTimeout(timer);
+    }
+    const target = pendingFollow;
+    setPendingFollow(null);
+    if (target !== activeThreadId) switchThread(target);
+  }, [pendingFollow, followTick, playback.speaking, voice.recording, transcribing, activeThreadId, switchThread]);
 
   // Bless the audio element on the first user gesture so replies autoplay reliably.
   const { unlock } = playback;
@@ -312,30 +433,33 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     />
   );
 
+  const settings = (
+    <SettingsMenu
+      speakMode={speakMode}
+      onSpeakModeChange={changeSpeakMode}
+      autoFollow={autoFollow}
+      onAutoFollowChange={changeAutoFollow}
+      theme={theme}
+      onThemeChange={setTheme}
+    />
+  );
+
   return (
-    <div className="flex h-full flex-col bg-canvas px-safe">
+    <div ref={appRootRef} className="flex h-full flex-col bg-canvas px-safe">
       <Toaster />
-      <TopBar>
-        <SettingsMenu
-          speakMode={speakMode}
-          onSpeakModeChange={changeSpeakMode}
-          theme={theme}
-          onThemeChange={setTheme}
-        />
-      </TopBar>
 
-      <div className="relative min-h-0 flex-1">
-        <ThreadPager
-          threads={pagerThreads}
-          activeThreadId={activeThreadId}
-          renderHero={renderHero}
-          playback={threadPlayback}
-          onActivate={switchThread}
-          activeScrollRootRef={setScrollRoot}
-          activeSentinelRef={setHeroSentinel}
-        />
-
-        {/* Condensed, sticky controls — slides in once the active page's hero scrolls away. */}
+      {/* One fixed-height, glass header slot shared by the nav and the condensed control bar: the nav
+          slides OUT and the condensed bar slides IN to REPLACE it (not an overlay below it) once the
+          active page's hero scrolls away — so scrolled reading gets the whole screen. */}
+      <div className="relative shrink-0 pt-safe">
+        <TopBar
+          className={cn(
+            "transition-[transform,opacity] duration-300 ease-soft",
+            condensed ? "pointer-events-none -translate-y-2 opacity-0" : "translate-y-0 opacity-100"
+          )}
+        >
+          {settings}
+        </TopBar>
         <MiniControls
           status={status}
           elapsed={elapsed}
@@ -350,6 +474,20 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           onStopRecording={voice.onStopRecording}
           onCancel={voice.onCancel}
           onStopTask={voice.onStopTask}
+        >
+          {settings}
+        </MiniControls>
+      </div>
+
+      <div className="relative min-h-0 flex-1">
+        <ThreadPager
+          threads={pagerThreads}
+          activeThreadId={activeThreadId}
+          renderHero={renderHero}
+          playback={threadPlayback}
+          onActivate={switchThread}
+          activeScrollRootRef={setScrollRoot}
+          activeSentinelRef={setHeroSentinel}
         />
 
         {/* Bottom "liquid glass" thread switcher + swipe dots — only when there's more than one thread. */}

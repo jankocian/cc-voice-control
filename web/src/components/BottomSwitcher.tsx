@@ -57,6 +57,8 @@ export function BottomSwitcher({
 
   const branch = branchLabel(active.thread.label);
   const multi = rows.length > 1;
+  // A subtle "you have unread elsewhere" cue on the collapsed pill — any NON-active thread with unread.
+  const hasOtherUnread = rows.some((r) => r.thread.threadId !== activeThreadId && r.unread > 0);
 
   return (
     <div
@@ -120,13 +122,14 @@ export function BottomSwitcher({
           </div>
         )}
 
-        {/* The collapsed glass pill — current thread's repo·branch. */}
+        {/* The collapsed glass pill — current thread's repo·branch. A coral dot rides the top-right corner
+            when another thread has unread (only meaningful while collapsed; the list shows the counts). */}
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-haspopup="menu"
           aria-expanded={open}
-          className="flex max-w-[85%] items-center gap-1.5 rounded-full border border-hairline/60 bg-surface/70 px-3 py-1.5 text-[13px] font-medium text-ink shadow-soft backdrop-blur-md transition-colors duration-200 ease-soft hover:bg-surface/90 active:scale-[0.98]"
+          className="relative flex max-w-[85%] items-center gap-1.5 rounded-full border border-hairline/60 bg-surface/70 px-3 py-1.5 text-[13px] font-medium text-ink shadow-soft backdrop-blur-md transition-colors duration-200 ease-soft hover:bg-surface/90 active:scale-[0.98]"
         >
           <Dot tone={active.tone} />
           <span className="truncate">{branch}</span>
@@ -134,6 +137,12 @@ export function BottomSwitcher({
             className={cn("size-3.5 shrink-0 text-ink-faint transition-transform duration-200", open && "rotate-180")}
             aria-hidden="true"
           />
+          {hasOtherUnread && !open && (
+            <span
+              className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-canvas bg-coral"
+              aria-label="Unread messages in another session"
+            />
+          )}
         </button>
 
         {/* Swipe indicator + 1-tap jump — only meaningful with more than one thread. */}
