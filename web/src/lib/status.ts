@@ -122,7 +122,7 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
   } else if (runtimeState === "working") {
     key = "working";
     dataState = "working";
-    title = "Agent is working…";
+    title = "Agent is working";
     // Intentionally NO detail line here: currentTask is the user's full (often very
     // long) transcript, which is noise under the timer. The elapsed clock + title
     // carry the state; a transient flash can still override `detail` below.
