@@ -22,7 +22,7 @@ export function StatusIndicator({
   flashAlert?: boolean;
 }) {
   const { dataState, key, title } = status;
-  // The working elapsed time lives INSIDE the pill ("Agent is working… · 0:42"), not as a separate big
+  // The working elapsed time lives INSIDE the pill ("Agent is working · 0:42"), not as a separate big
   // number — one constant-height line, so the hero never shifts as the timer appears/ticks. (elapsed is 0
   // on inactive pager slides, where we don't have that thread's running clock — then just the title shows.)
   const ready = key === "ready";
