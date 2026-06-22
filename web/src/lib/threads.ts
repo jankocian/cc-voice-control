@@ -26,7 +26,7 @@ export const initialThreadsState: ThreadsState = {
 // thread if it's still present; otherwise fall back to the first thread so the UI always has
 // a focused pane. Unread counts for threads no longer in the roster are dropped.
 export function applyRoster(state: ThreadsState, threads: readonly RosterThread[]): ThreadsState {
-  const next = [...threads];
+  const next = sortRoster(threads);
   const ids = new Set(next.map((t) => t.threadId));
   const activeThreadId = pickActive(state.activeThreadId, next, ids);
   return { threads: next, activeThreadId, unread: pruneUnread(state.unread, ids) };
@@ -37,9 +37,9 @@ export function applyRoster(state: ThreadsState, threads: readonly RosterThread[
 // the single-thread UX has a focused pane immediately.
 export function applyJoined(state: ThreadsState, thread: RosterThread): ThreadsState {
   const index = state.threads.findIndex((t) => t.threadId === thread.threadId);
-  const threads = index >= 0 ? state.threads.map((t, i) => (i === index ? thread : t)) : [...state.threads, thread];
+  const merged = index >= 0 ? state.threads.map((t, i) => (i === index ? thread : t)) : [...state.threads, thread];
   const activeThreadId = state.activeThreadId ?? thread.threadId;
-  return { ...state, threads, activeThreadId };
+  return { ...state, threads: sortRoster(merged), activeThreadId };
 }
 
 // A thread's daemon dropped (`thread_left`). Keep the thread in the roster (so it greys out
@@ -47,7 +47,7 @@ export function applyJoined(state: ThreadsState, thread: RosterThread): ThreadsS
 // reconnect, and yanking the active pane mid-read would be jarring. Just flip presence.
 export function applyLeft(state: ThreadsState, threadId: ThreadId, lastSeenAt: number): ThreadsState {
   const threads = state.threads.map((t) => (t.threadId === threadId ? { ...t, connected: false, lastSeenAt } : t));
-  return { ...state, threads };
+  return { ...state, threads: sortRoster(threads) };
 }
 
 // A content event (claude_reply / transcript) arrived for `threadId`. If it's not the active
@@ -76,11 +76,18 @@ export function activeThread(state: ThreadsState): RosterThread | undefined {
   return state.threads.find((t) => t.threadId === state.activeThreadId);
 }
 
-// Keep the same active thread across a roster swap when it survives; else focus the first
-// thread (or null when the roster is empty).
+// Offline threads (no live daemon) sort to the END so the switcher list, swipe dots, and pager all lead
+// with the actionable ones; everything else keeps its existing (≈ join/creation) order. Stable —
+// Array.prototype.sort preserves the prior order within each group.
+function sortRoster(threads: readonly RosterThread[]): RosterThread[] {
+  return [...threads].sort((a, b) => Number(!a.connected) - Number(!b.connected));
+}
+
+// Keep the same active thread across a roster swap when it survives; else focus the first CONNECTED
+// thread (so we never default into a dormant/offline pane), falling back to the first if none are live.
 function pickActive(current: ThreadId | null, threads: readonly RosterThread[], ids: Set<ThreadId>): ThreadId | null {
   if (current && ids.has(current)) return current;
-  return threads[0]?.threadId ?? null;
+  return (threads.find((t) => t.connected) ?? threads[0])?.threadId ?? null;
 }
 
 function pruneUnread(unread: Map<ThreadId, number>, keep: Set<ThreadId>): Map<ThreadId, number> {

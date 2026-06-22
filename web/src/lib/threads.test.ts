@@ -36,6 +36,16 @@ describe("applyRoster — the snapshot a (re)connecting browser receives", () =>
     expect(state.activeThreadId).toBe("a");
   });
 
+  it("sorts offline threads last and defaults to a CONNECTED thread (never a dormant pane)", () => {
+    // The QR/refresh used to land on threads[0] regardless of presence — i.e. a dormant offline thread.
+    const state = applyRoster(initialThreadsState, [
+      thread("offline", { connected: false, lastSeenAt: 1 }),
+      thread("live")
+    ]);
+    expect(state.threads.map((t) => t.threadId)).toEqual(["live", "offline"]); // offline sorted last
+    expect(state.activeThreadId).toBe("live"); // default skips the offline one
+  });
+
   it("preserves the active thread across a snapshot when it survives", () => {
     const before = switchThread(twoThreads(), "b");
     const after = applyRoster(before, [thread("a"), thread("b"), thread("c")]);

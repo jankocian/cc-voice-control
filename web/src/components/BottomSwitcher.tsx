@@ -67,7 +67,9 @@ export function BottomSwitcher({
         {open && (
           <div
             role="menu"
-            className="flex max-h-[55vh] w-72 max-w-[85vw] animate-rise flex-col overflow-y-auto rounded-card border border-hairline/70 bg-surface/80 p-1.5 shadow-lift backdrop-blur-xl"
+            // Concentric radii: outer rounded-bubble (20px) − p-1 (4px) = the rows' rounded-control (16px),
+            // so the row corners nest cleanly inside the menu's.
+            className="flex max-h-[55vh] w-72 max-w-[85vw] animate-rise flex-col overflow-y-auto rounded-bubble border border-hairline/70 bg-surface/80 p-1 shadow-lift backdrop-blur-xl"
           >
             {rows.map(({ thread, unread, tone }) => {
               const isActive = thread.threadId === activeThreadId;
@@ -99,6 +101,10 @@ export function BottomSwitcher({
               );
             })}
 
+            {/* A clean straight divider — a 1px line of its own, so the border doesn't ride the
+                New-session button's rounded corners (which read as a weirdly-curved rule). */}
+            <div className="mx-2.5 my-1 border-t border-hairline" aria-hidden="true" />
+
             <button
               type="button"
               role="menuitem"
@@ -106,7 +112,7 @@ export function BottomSwitcher({
                 setOpen(false);
                 onSpawn();
               }}
-              className="mt-1 flex w-full items-center gap-2.5 rounded-control border-t border-hairline px-2.5 py-2 text-left text-ink-soft transition-colors hover:bg-canvas-deep/40 hover:text-ink"
+              className="flex w-full items-center gap-2.5 rounded-control px-2.5 py-2 text-left text-ink-soft transition-colors hover:bg-canvas-deep/40 hover:text-ink"
             >
               <Plus className="size-4 shrink-0 text-ink-faint" />
               <span className="text-sm font-medium">New session</span>

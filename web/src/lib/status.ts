@@ -93,11 +93,13 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
       title = "Reconnecting…";
       detail = "Your laptop may just be napping — hang tight";
     } else {
-      // Gone long enough to call it: the session is offline (laptop asleep/off).
+      // Gone long enough to call it: the session is offline (laptop asleep/off). The pill carries the
+      // time-since-last-seen ("Session offline · 14h ago") so the user knows how stale it is at a glance.
       key = "offline-stale";
       dataState = "offline";
-      title = "Session offline";
-      detail = `Last active ${humanizeAgo(now - daemonLastSeenAt)}. Wake your laptop to resume, or start a new session.`;
+      const ago = humanizeAgo(now - daemonLastSeenAt);
+      title = `Session offline · ${ago}`;
+      detail = `Last active ${ago}. Wake your laptop to resume, or start a new session.`;
     }
   } else if (recording) {
     key = "recording";

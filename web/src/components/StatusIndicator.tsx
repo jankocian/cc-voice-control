@@ -12,11 +12,14 @@ import { cn } from "@/lib/utils";
 export function StatusIndicator({
   status,
   elapsed,
-  flash
+  flash,
+  flashAlert = false
 }: {
   status: StatusView;
   elapsed: number;
   flash: string | null;
+  // An "alert" flash (e.g. spawning from a disconnected thread) — render the pill red so it's noticed.
+  flashAlert?: boolean;
 }) {
   const { dataState, key, title } = status;
   const showTimer = dataState === "working";
@@ -24,9 +27,10 @@ export function StatusIndicator({
   // pill is never empty — a pill that came and went is exactly what shifted the hero's layout.
   const ready = key === "ready";
   const message = flash ?? title;
-  // Amber when there's an action for the user (daemon down / not listening); neutral
-  // white for transient flashes and every steady state.
-  const alert = key === "waiting" || key === "not-listening";
+  // Red for an alert flash (an action the user must notice). Amber for the steady attention states
+  // (daemon down / not listening). Neutral white otherwise.
+  const danger = flash !== null && flashAlert;
+  const alert = !danger && (key === "waiting" || key === "not-listening");
   // A small state-toned dot makes the steady pill read as a live indicator (never over a flash,
   // and not for the attention states — their amber/neutral copy already carries the meaning).
   const dotTone = ready
@@ -45,7 +49,7 @@ export function StatusIndicator({
       <span
         className={cn(
           "inline-flex max-w-[20rem] items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium shadow-soft backdrop-blur-md",
-          alert ? "bg-warning/12 text-warning" : "bg-surface/90 text-ink-soft"
+          danger ? "bg-danger/15 text-danger" : alert ? "bg-warning/12 text-warning" : "bg-surface/90 text-ink-soft"
         )}
       >
         {showDot && <span className={cn("size-1.5 shrink-0 rounded-full", dotTone)} />}

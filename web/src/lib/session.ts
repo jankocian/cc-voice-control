@@ -11,6 +11,19 @@ export type SessionCredentials = {
 
 const SESSION_PATH_PATTERN = /^\/s\/([^/]+)$/;
 
+// The active thread is carried in the URL fragment (`#t=<threadId>`) — never sent to the server, it's a
+// client-only hint. A scanned pane's QR encodes its own thread there (open the exact one); a plain
+// refresh restores the last one. Returns null when absent/empty.
+export function readThreadHint(loc: Location = window.location): string | null {
+  const match = loc.hash.match(/^#t=(.+)$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]) || null;
+  } catch {
+    return null;
+  }
+}
+
 export function readSessionCredentials(loc: Location = window.location): SessionCredentials | null {
   const match = loc.pathname.match(SESSION_PATH_PATTERN);
   if (!match) return null;
