@@ -50,7 +50,7 @@ export function StatusVisual({
 }) {
   const { dataState, key } = status;
   const mini = size === "mini";
-  const dots = !recording && (key === "connecting" || key === "waiting");
+  const connectingDots = !recording && (key === "connecting" || key === "waiting");
   const speaking = dataState === "speaking";
   const working = dataState === "working" || dataState === "sending";
   const ready = dataState === "ready";
@@ -62,20 +62,28 @@ export function StatusVisual({
   // shows the (red) equalizer for recording instead. So: hero → equalizer unless recording; mini →
   // equalizer for everything that isn't the travelling dots.
   const showCanvas = !mini;
-  const showEqualizer = !dots && (mini || !recording);
+  const showEqualizer = !connectingDots && (mini || !recording);
+  // "Ready / your turn" reuses the SAME equalizer elements but collapses them to uniform dots doing a
+  // staggered appear-wave (awaiting input) instead of the breathing bars — so the row visibly morphs
+  // bars↔dots as Claude goes idle/active.
+  const readyDots = ready && !recording;
 
   return (
     <div
       className={cn("relative grid place-items-center *:col-start-1 *:row-start-1", mini ? "h-7 w-16" : "h-20 w-full")}
       aria-hidden="true"
     >
-      {/* Soft aura that warms up as things get busier (hero only). */}
+      {/* Soft aura that warms up as things get busier (hero only). A wide elliptical RADIAL GRADIENT, not a
+          blurred circle: iOS Safari's blur() filter region is rectangular, so a blurred fill shows a faint
+          SQUARE halo in dark mode. A gradient has no filter region → a clean glow everywhere, and spanning
+          the full width (fading top/bottom/sides) keeps the same airy look without any clip. currentColor
+          (set by text-*) tones it; opacity sets intensity. */}
       {!mini && (
         <div
           className={cn(
-            "size-24 rounded-full blur-2xl transition-opacity duration-500",
-            speaking ? "bg-violet/15" : ready ? "bg-success/12" : "bg-coral/15",
-            recording || active ? "opacity-100" : ready ? "opacity-70" : "opacity-40"
+            "h-32 w-full bg-[radial-gradient(ellipse_at_center,currentColor,transparent_72%)] transition-opacity duration-500",
+            speaking ? "text-violet" : ready ? "text-success" : "text-coral",
+            recording || active ? "opacity-[0.18]" : ready ? "opacity-[0.12]" : "opacity-[0.07]"
           )}
         />
       )}
@@ -89,7 +97,7 @@ export function StatusVisual({
       )}
 
       {/* Connecting / waiting → three travelling dots. */}
-      {dots && (
+      {connectingDots && (
         <div className={cn("flex items-center", mini ? "gap-1.5" : "gap-2.5")}>
           <span className={cn("animate-dot-bounce rounded-full bg-coral", mini ? "size-2" : "size-3")} />
           <span
@@ -107,23 +115,25 @@ export function StatusVisual({
         </div>
       )}
 
-      {/* Otherwise → the equalizer: strong while working/speaking, a gentle green
-          breathe while ready (waiting for you to speak), calm/dim at rest. The mini bar
-          also uses it for recording (no live canvas there). */}
+      {/* The equalizer — the SAME 7 elements across states. Strong bar-pulse while working/speaking; while
+          READY they collapse to uniform dots doing a staggered appear-wave ("your turn — tap to speak");
+          calm/dim at rest. The mini bar also uses it for recording (no live canvas there). `items-center`
+          so the dots sit centred (bars are bottom-aligned by their own height). */}
       {showEqualizer && (
-        <div className={cn("flex items-end", mini ? "gap-1" : "gap-2")}>
+        <div className={cn("flex", readyDots ? "items-center" : "items-end", mini ? "gap-1" : "gap-2")}>
           {BARS.map((bar) => (
             <span
               key={bar.id}
               className={cn(
                 "origin-center rounded-full",
                 mini ? "w-1" : "w-2",
-                mini ? bar.mini : bar.h,
+                // Ready → a uniform dot (square w/h, fully round); otherwise the bar's own height.
+                readyDots ? (mini ? "h-1" : "h-2") : mini ? bar.mini : bar.h,
                 recording && mini ? "bg-danger" : tone,
                 active || (recording && mini)
                   ? cn("animate-bar", bar.delay)
-                  : ready
-                    ? cn("animate-bar-soft", bar.soft)
+                  : readyDots
+                    ? cn("animate-dot-wave", bar.soft)
                     : "scale-y-[0.35] opacity-50"
               )}
             />

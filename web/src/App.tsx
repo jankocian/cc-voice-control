@@ -94,10 +94,10 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const transcribingRef = useRef(false);
   const startRecordingRef = useRef<() => void>(() => {});
   const getAutoplay = useCallback(() => autoplayEnabledRef.current, []);
-  // Hands-free auto-respond: after a FINAL reply finishes auto-playing, open the mic so the user can answer
-  // and just hit stop. `autoRespondRef` is set below to (toggle ON ∧ autoplay ON ∧ auto-follow ON), so it
-  // already encodes every prerequisite. Skip if we're already recording/sending, and only fire for a real
-  // final reply (never an interim step). Reads `pagerThreadsRef` assigned below — resolved at call time.
+  // Hands-free auto-respond: after ANY final reply finishes playing (autoplayed OR manually tapped), open
+  // the mic so the user can answer and just hit stop. `autoRespondRef` is just the toggle (independent of
+  // autoplay/auto-follow). Skip if already recording/sending, and only fire for a real final reply (never
+  // an interim step). Reads `pagerThreadsRef` assigned below — resolved at call time.
   const onAutoReplyFinished = useCallback((requestId: string) => {
     if (!autoRespondRef.current || recordingRef.current || transcribingRef.current) return;
     const msgs = pagerThreadsRef.current.find((p) => p.threadId === activeThreadIdRef.current)?.messages ?? [];
@@ -225,19 +225,18 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     }
   }, []);
 
-  // Auto-respond (off / on), persisted. When on, the mic opens automatically right after a final reply
-  // finishes playing — a hands-free loop (listen → speak → hit stop). Only meaningful when autoplay is on
-  // AND auto-follow is on (you hear the reply on whatever thread it lands), so the toggle is shown but
-  // DISABLED otherwise; the behaviour also re-checks the prerequisites at fire time (onAutoReplyFinished).
-  const autoRespondAvailable = speakMode !== "off" && autoFollow;
+  // Auto-respond (off / on), persisted, default ON. Independent of autoplay/auto-follow: whenever ANY final
+  // reply finishes playing — autoplayed OR manually tapped — the mic opens so you can answer and just hit
+  // stop (a hands-free loop). onAutoReplyFinished gates it to a real final reply + not-already-recording.
   const [autoRespond, setAutoRespond] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("vc-auto-respond") === "true";
+      const stored = localStorage.getItem("vc-auto-respond");
+      return stored === null ? true : stored === "true";
     } catch {
-      return false;
+      return true;
     }
   });
-  autoRespondRef.current = autoRespond && autoRespondAvailable;
+  autoRespondRef.current = autoRespond;
   const changeAutoRespond = useCallback((on: boolean) => {
     setAutoRespond(on);
     try {
@@ -493,7 +492,6 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       onAutoFollowChange={changeAutoFollow}
       autoRespond={autoRespond}
       onAutoRespondChange={changeAutoRespond}
-      autoRespondAvailable={autoRespondAvailable}
       theme={theme}
       onThemeChange={setTheme}
     />

@@ -21,12 +21,16 @@ export type UseRecorderOptions = {
   onStart?: () => void;
 };
 
-// A mic track is only usable when it's live AND its source is delivering media. After an
-// iOS screen lock a freshly-granted track can come back muted (silence → empty clip) or
-// already ended, so we verify rather than trust "permission granted".
+// A held mic track is reusable as long as it's LIVE (readyState "live"). We deliberately do NOT reject a
+// momentarily-MUTED track: iOS mutes the track when the page's audio session churns (e.g. a reply plays →
+// transient-solo → ambient), and rejecting it would force a fresh getUserMedia — which on iOS Safari
+// re-shows the permission prompt EVERY time (permission isn't persisted; the only way to avoid the prompt
+// is to keep one stream alive and reuse it). Starting a recording re-claims "play-and-record", which
+// re-activates the mic and clears a transient mute, so reuse records real audio. An `ended` track is gone
+// for good (re-acquire is unavoidable then).
 function trackHealthy(stream: MediaStream | null): boolean {
   const track = stream?.getAudioTracks()[0];
-  return !!track && track.readyState === "live" && track.muted === false;
+  return !!track && track.readyState === "live";
 }
 
 export type Recorder = {
@@ -244,17 +248,47 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     onClipRef.current({ audioBase64, mimeType });
   }, [scheduleIdleRelease]);
 
+  // Drop our recording-time Media Session handlers (so a later reply's <audio> keeps the normal
+  // play/pause from media keys). Safe where the API is missing.
+  const clearMediaSession = useCallback((): void => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      for (const action of ["play", "pause", "stop"] as const) ms.setActionHandler(action, null);
+      ms.playbackState = "none";
+    } catch {
+      /* unsupported action — ignore */
+    }
+  }, []);
+
   const stop = useCallback((): void => {
     recordingRef.current = false;
     setRecording(false);
     stopVisualizer();
+    clearMediaSession();
     const recorder = mediaRecorderRef.current;
     try {
       if (recorder && recorder.state !== "inactive") recorder.stop();
     } catch {
       /* ignore */
     }
-  }, [stopVisualizer]);
+  }, [stopVisualizer, clearMediaSession]);
+
+  // Claim the Media Session while recording so a headphone / lock-screen play/pause button finishes the
+  // turn (stop → send) hands-free. We set ourselves "playing" + map play/pause/stop to stop(). iOS only
+  // routes the hardware button to whichever page is the active now-playing target, so this is best-effort
+  // there (needs on-device verification); it's a clean no-op where the API is absent.
+  const armMediaSession = useCallback((): void => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      const finish = () => stop();
+      for (const action of ["play", "pause", "stop"] as const) ms.setActionHandler(action, finish);
+      ms.playbackState = "playing";
+    } catch {
+      /* unsupported action — ignore */
+    }
+  }, [stop]);
 
   // Abort the current recording without emitting a clip. The `stop` event still
   // fires (and runs submitRecording), but canceledRef makes it discard the audio.
@@ -264,13 +298,14 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     recordingRef.current = false;
     setRecording(false);
     stopVisualizer();
+    clearMediaSession();
     const recorder = mediaRecorderRef.current;
     try {
       if (recorder && recorder.state !== "inactive") recorder.stop();
     } catch {
       /* ignore */
     }
-  }, [stopVisualizer]);
+  }, [stopVisualizer, clearMediaSession]);
 
   // Soft backgrounding (pagehide): don't release the mic — keeping the held stream means the
   // next record can reuse it with no iOS re-prompt (ensureMic re-acquires only if iOS actually
@@ -357,7 +392,8 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     recordingRef.current = true;
     setRecording(true);
     startVisualizer();
-  }, [ensureMic, stopStream, clearIdleTimer, startVisualizer, submitRecording]);
+    armMediaSession(); // headphone / lock-screen play-pause → stop + send
+  }, [ensureMic, stopStream, clearIdleTimer, startVisualizer, submitRecording, armMediaSession]);
 
   const teardown = useCallback((): void => {
     stopVisualizer();
