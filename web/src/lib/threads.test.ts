@@ -126,6 +126,12 @@ describe("bumpUnread — a reply landed on a thread", () => {
     const after = bumpUnread(twoThreads(), "a"); // a is active
     expect(unreadFor(after, "a")).toBe(0);
   });
+
+  it("adds a batch of new messages at once (and a non-positive count is a no-op)", () => {
+    const after = bumpUnread(twoThreads(), "b", 3);
+    expect(unreadFor(after, "b")).toBe(3);
+    expect(unreadFor(bumpUnread(after, "b", 0), "b")).toBe(3); // 0 → unchanged
+  });
 });
 
 describe("switchThread — focus + clear unread", () => {

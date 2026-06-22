@@ -16,8 +16,8 @@ export type Threads = {
   unread: ReadonlyMap<ThreadId, number>;
   // Fold a roster snapshot / join / leave delta into the thread list (presence + labels).
   applyRosterEvent: (event: RosterEvent) => void;
-  // A content turn landed for a thread → bump its unread badge unless it's the active one.
-  noteActivity: (threadId: ThreadId) => void;
+  // `count` new turns landed for a thread → add to its unread badge unless it's the active one.
+  noteActivity: (threadId: ThreadId, count?: number) => void;
   // Focus a thread (pill / dropdown / swipe). Clears its unread badge.
   setActive: (threadId: ThreadId) => void;
 };
@@ -43,8 +43,8 @@ export function useThreads(preferredThreadId?: string | null): Threads {
     });
   }, []);
 
-  const noteActivity = useCallback((threadId: ThreadId): void => {
-    setState((prev) => bumpUnread(prev, threadId));
+  const noteActivity = useCallback((threadId: ThreadId, count = 1): void => {
+    setState((prev) => bumpUnread(prev, threadId, count));
   }, []);
 
   const setActive = useCallback((threadId: ThreadId): void => {

@@ -46,6 +46,10 @@ export function useThreadMessages({
   // Mirror it in a ref so the stable content handler can read it without becoming a dependency.
   const transcribingRef = useRef<ThreadId | null>(null);
   transcribingRef.current = transcribingThreadId;
+  // Newest message timestamp last COUNTED per thread, so unread bumps only for genuinely-new messages —
+  // not for the full-thread restore each thread gets on (re)connect (which used to make every background
+  // thread read "1" after a refresh).
+  const seenNewestRef = useRef<Map<ThreadId, number>>(new Map());
 
   const { dropAudio, attachAudio, markPlayable, noteAudioStatus } = playback;
 
@@ -79,7 +83,18 @@ export function useThreadMessages({
             }
           }
           updateThreadMessages(setMessagesByThread, threadId, (prev) => buildThreadAndPrune(restored, prev, dropAudio));
-          noteActivity(threadId);
+          // Unread: baseline a thread the first time we see it (a reconnect/restore is not new activity),
+          // then add only messages strictly newer than the last we counted. noteActivity no-ops for the
+          // active thread, so it never accrues unread while on-screen.
+          const newestTs = restored.reduce((max, m) => (m.timestamp > max ? m.timestamp : max), 0);
+          const prevTs = seenNewestRef.current.get(threadId);
+          seenNewestRef.current.set(threadId, newestTs);
+          if (prevTs !== undefined && newestTs > prevTs) {
+            noteActivity(
+              threadId,
+              restored.reduce((n, m) => (m.timestamp > prevTs ? n + 1 : n), 0)
+            );
+          }
           return;
         }
         case "tts_audio":

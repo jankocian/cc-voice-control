@@ -54,12 +54,13 @@ export function applyLeft(state: ThreadsState, threadId: ThreadId, lastSeenAt: n
   return { ...state, threads: sortRoster(threads) };
 }
 
-// A content event (claude_reply / transcript) arrived for `threadId`. If it's not the active
-// thread, bump its unread badge; the active thread is already on-screen so it never counts.
-export function bumpUnread(state: ThreadsState, threadId: ThreadId): ThreadsState {
-  if (threadId === state.activeThreadId) return state;
+// `count` genuinely-new messages arrived for `threadId`. If it's not the active thread, add them to its
+// unread badge; the active thread is already on-screen so it never counts. The CALLER only passes new
+// messages (not a reconnect/restore), so a refresh doesn't inflate the badge — see useThreadMessages.
+export function bumpUnread(state: ThreadsState, threadId: ThreadId, count = 1): ThreadsState {
+  if (threadId === state.activeThreadId || count <= 0) return state;
   const unread = new Map(state.unread);
-  unread.set(threadId, (unread.get(threadId) ?? 0) + 1);
+  unread.set(threadId, (unread.get(threadId) ?? 0) + count);
   return { ...state, unread };
 }
 
