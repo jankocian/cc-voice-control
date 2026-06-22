@@ -7,10 +7,11 @@ import { TopBar } from "@/components/TopBar";
 import { deriveStatus, type StatusInputs } from "@/lib/status";
 
 // Presentation-only demo harness for the visual-verification loop. `?demo=<state>`
-// renders the full screen (TopBar + Hero + thread + sticky condensed controls) in a
-// fixed state with no bridge/recorder/mic — so each reference state can be
-// screenshotted offline, including the scroll → condensed-bar behaviour.
-// Not used in production (App.tsx is the real, bridge-wired entry).
+// renders the full screen (TopBar + pinned Hero + thread + sticky condensed controls) in a
+// fixed state with no bridge/recorder/mic — so each reference state can be screenshotted
+// offline, including the hero scroll-away → condensed-bar behaviour and the dark theme.
+// Mirrors App's layout (pinned, scroll-translated hero over a scroll root) so what it shows is
+// what the real app does. Not used in production (App.tsx is the real, bridge-wired entry).
 
 // Fixed clock for the demo presets so the time-graded offline states are reproducible.
 const DEMO_NOW = 1_700_000_000_000;
@@ -47,8 +48,9 @@ function buildStatus(over: Partial<StatusInputs>) {
   });
 }
 
-// A longer fake thread (newest first, like the real App) so the page actually
-// scrolls and the condensed bar can be exercised.
+// A longer fake thread (newest first, like the real App) so the page actually scrolls and the
+// condensed bar can be exercised. One row carries Markdown (bold / inline code / a fenced block) and
+// one audio row is "loaded" with a known duration; the rest are unknown-duration (no bogus 0:00).
 const DEMO_THREAD = [
   {
     id: "m8",
@@ -59,9 +61,10 @@ const DEMO_THREAD = [
   {
     id: "m7",
     side: "agent" as const,
-    body: "Done — added MAX_RETRIES with a sane default and documented it in the README.",
+    body: "Done — I **added retries** with a sane default and documented `MAX_RETRIES`:\n\n```\nexport const MAX_RETRIES = 5;\nconst backoff = base * 2 ** attempt;\n```\n\nThat covers the **webhook** path end to end.",
     time: "12:38 AM",
-    audio: true
+    audio: true,
+    loaded: true
   },
   {
     id: "m6",
@@ -109,6 +112,7 @@ export function DemoApp({ state }: { state: string }) {
   const elapsed = state === "working" ? 158 : 0;
   const working = status.dataState === "working";
 
+  // Condensed bar appears once the in-flow hero's sentinel scrolls above the top (mirrors App).
   useEffect(() => {
     const root = scrollRef.current;
     const target = heroSentinelRef.current;
@@ -122,7 +126,8 @@ export function DemoApp({ state }: { state: string }) {
     <div className="flex h-full flex-col bg-canvas px-safe">
       <TopBar />
       <div className="relative min-h-0 flex-1">
-        <main ref={scrollRef} className="flex h-full flex-col overflow-y-auto pb-safe">
+        <div ref={scrollRef} className="flex h-full flex-col overflow-y-auto pb-safe">
+          {/* The hero in normal flow — scrolls away with the content, exactly as App renders it. */}
           <Hero
             status={status}
             elapsed={elapsed}
@@ -139,7 +144,6 @@ export function DemoApp({ state }: { state: string }) {
             onCancel={noop}
             onStopTask={noop}
           />
-
           <div ref={heroSentinelRef} aria-hidden="true" className="h-px w-full shrink-0" />
 
           <div className="flex flex-col gap-4 px-4 pb-6">
@@ -147,13 +151,19 @@ export function DemoApp({ state }: { state: string }) {
               m.side === "user" ? (
                 <MessageBubble key={m.id} side="user" body={m.body} time={m.time} delivered />
               ) : (
-                <MessageBubble key={m.id} side="agent" body={m.body} time={m.time}>
+                <MessageBubble
+                  key={m.id}
+                  side="agent"
+                  body={m.body}
+                  time={m.time}
+                  onActivate={m.audio ? noop : undefined}
+                >
                   {m.audio && (
                     <InlineAudioPlayer
                       playing={false}
-                      loaded={false}
+                      loaded={Boolean(m.loaded)}
                       position={0}
-                      duration={58}
+                      duration={m.loaded ? 58 : 0}
                       onPlayPause={noop}
                       onReplay={noop}
                       onSeek={noop}
@@ -163,7 +173,7 @@ export function DemoApp({ state }: { state: string }) {
               )
             )}
           </div>
-        </main>
+        </div>
 
         <MiniControls
           status={status}

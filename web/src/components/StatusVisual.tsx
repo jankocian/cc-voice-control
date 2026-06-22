@@ -37,7 +37,8 @@ export function StatusVisual({
   status: StatusView;
   recording: boolean;
   visualizerActive: boolean;
-  canvasRef: RefObject<HTMLCanvasElement | null>;
+  // Undefined on an off-screen pager page — only the active page wires the live recording canvas.
+  canvasRef?: RefObject<HTMLCanvasElement | null>;
 }) {
   const { dataState, key } = status;
   const dots = !recording && (key === "connecting" || key === "waiting");

@@ -30,7 +30,7 @@ import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
-import { type ProjectedTurn, pairReplies } from "./transcript-projection.js";
+import { dropSessionAnnouncement, type ProjectedTurn, pairReplies } from "./transcript-projection.js";
 import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
@@ -556,7 +556,12 @@ export class VoiceDaemon {
 
   private projectedNow(): ProjectedTurn[] {
     if (!this.lastTranscriptPath) return [];
-    return projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor);
+    const turns = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter(
+      (t) => t.timestamp >= this.floor
+    );
+    // Hide the start-skill's "voice remote is live" QR/URL reply — it's noise on the phone (and must
+    // never be spoken). Matched on our own session URL, so it's prose-independent. See the helper.
+    return dropSessionAnnouncement(turns, this.init.browserUrl);
   }
 
   // Mark a just-opened turn as ours if it matches a queued voice prompt (by the hook's REAL prompt text —
