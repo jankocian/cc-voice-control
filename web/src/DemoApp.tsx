@@ -112,7 +112,8 @@ export function DemoApp({ state }: { state: string }) {
 
 // Exercises the real Embla <ThreadPager> with a few threads so swipe/paging can be verified offline.
 function PagerDemo() {
-  const [active, setActive] = useState<ThreadId>("alpha");
+  // Start on a non-first thread to mimic resuming a saved thread — it should JUMP here (no swipe blip).
+  const [active, setActive] = useState<ThreadId>("charlie");
   const noop = () => {};
   const ids: ThreadId[] = ["alpha", "bravo", "charlie"];
   const pages = ids.map((id) => ({

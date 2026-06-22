@@ -1,5 +1,5 @@
 import useEmblaCarousel from "embla-carousel-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { MessageThread, type ThreadPlayback } from "@/components/MessageThread";
 import type { Message } from "@/lib/messages";
 import type { ThreadId } from "@/lib/protocol";
@@ -41,44 +41,62 @@ export function ThreadPager({
   activeScrollRootRef: (node: HTMLDivElement | null) => void;
   activeSentinelRef: (node: HTMLDivElement | null) => void;
 }) {
-  const [emblaRef, emblaApi] = useEmblaCarousel({ align: "start", duration: 22 });
+  const [emblaRef, emblaApi] = useEmblaCarousel({ align: "start", containScroll: "keepSnaps", duration: 20 });
   const [ready, setReady] = useState(false);
-  // Read latest threads/active inside Embla's stable callback without re-subscribing each render.
+  // Read latest threads/active inside Embla's stable callbacks without re-subscribing each render.
   const threadsRef = useRef(threads);
   threadsRef.current = threads;
   const activeThreadIdRef = useRef(activeThreadId);
   activeThreadIdRef.current = activeThreadId;
-  // The first scrollTo jumps (no animation); later ones (pill / dots) glide.
-  const didPositionRef = useRef(false);
+  // Mirror `ready` so the stable callback can read it. Before the first reveal we JUMP (no animation) so
+  // restoring the saved thread shows no swipe; once revealed, user switches (pill / dots) glide.
+  const readyRef = useRef(false);
 
-  // Swipe settle → the snapped slide becomes the active thread (a programmatic scrollTo also emits
-  // `select`, but it lands on the already-active thread, so onActivate is a no-op there).
+  // Bring the active thread's slide into view. This is event-driven (not just a render effect) because
+  // Embla re-measures its slides ASYNCHRONOUSLY (watchSlides reInits a tick after React commits): a
+  // synchronous scrollTo would target a stale slide layout, then a later re-run would animate — the blip.
+  // We only act once Embla's snap count matches the threads (slides measured), jump until the first
+  // reveal, and reveal only then — so the init/restore positioning is never seen as a swipe.
+  const positionToActive = useCallback(() => {
+    if (!emblaApi) return;
+    if (emblaApi.scrollSnapList().length !== threadsRef.current.length) return; // slides not measured yet
+    const idx = activeThreadIdRef.current
+      ? threadsRef.current.findIndex((t) => t.threadId === activeThreadIdRef.current)
+      : -1;
+    if (idx < 0) return;
+    if (emblaApi.selectedScrollSnap() !== idx) emblaApi.scrollTo(idx, !readyRef.current);
+    if (!readyRef.current) {
+      readyRef.current = true;
+      setReady(true);
+    }
+  }, [emblaApi]);
+
   useEffect(() => {
     if (!emblaApi) return;
+    // Swipe settle → the snapped slide becomes active (a programmatic scrollTo also emits `select`, but
+    // it lands on the already-active thread, so onActivate is a no-op there).
     const onSelect = () => {
       const id = threadsRef.current[emblaApi.selectedScrollSnap()]?.threadId;
       if (id && id !== activeThreadIdRef.current) onActivate(id);
     };
     emblaApi.on("select", onSelect);
+    // Re-apply position once Embla (re)measures — the key timing fix (slides arrive after React commits).
+    emblaApi.on("reInit", positionToActive);
+    emblaApi.on("slidesChanged", positionToActive);
+    positionToActive();
     return () => {
       emblaApi.off("select", onSelect);
+      emblaApi.off("reInit", positionToActive);
+      emblaApi.off("slidesChanged", positionToActive);
     };
-  }, [emblaApi, onActivate]);
+  }, [emblaApi, onActivate, positionToActive]);
 
-  // External switch (pill / dots) or the initial saved-thread restore → bring that slide into view.
-  // Jump on the first positioning (no blip resuming the saved thread), animate after. Reveal once
-  // positioned so the init→jump is never seen.
+  // An external switch (pill / dots) or the saved-thread restore changed the active thread → reposition.
+  // activeThreadId/threads are intentional re-run triggers (positionToActive reads the latest via refs).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run on active/threads change
   useEffect(() => {
-    if (!emblaApi) return;
-    const idx = activeThreadId ? threads.findIndex((t) => t.threadId === activeThreadId) : -1;
-    if (idx >= 0) {
-      if (emblaApi.selectedScrollSnap() !== idx) emblaApi.scrollTo(idx, !didPositionRef.current);
-      didPositionRef.current = true; // consume the "jump" only on the first REAL positioning
-      setReady(true);
-    } else if (threads.length === 0) {
-      setReady(true); // nothing to position — reveal the empty pager
-    }
-  }, [emblaApi, activeThreadId, threads]);
+    positionToActive();
+  }, [activeThreadId, threads, positionToActive]);
 
   return (
     <div
