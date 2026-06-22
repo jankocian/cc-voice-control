@@ -106,7 +106,7 @@ export function useVoiceControls({
 
   // Destructure the recorder's STABLE methods + state (the wrapper is recreated when recording state
   // changes) so the callbacks/effects below depend on the methods, not the churning wrapper.
-  const { recording, visualizerActive, start, stop, cancel, teardown } = useRecorder({
+  const { recording, visualizerActive, start, stop, cancel, suspend } = useRecorder({
     canvasRef,
     onClip,
     onError: onRecorderError,
@@ -137,12 +137,15 @@ export function useVoiceControls({
     [sendDaemon, bridgeReady, showFlash, activeThreadIdRef]
   );
 
-  // Free the mic/stream when the page is hidden (iOS backgrounding).
+  // On iOS backgrounding, SUSPEND rather than free the mic: a brief background (locking the
+  // screen to walk, swapping apps) shouldn't drop the held stream and force a permission
+  // re-prompt on the next record. We hold the stream; the next record reuses it if iOS kept the
+  // track live, or re-acquires if iOS ended it. The recorder's own unmount cleanup hard-releases.
   useEffect(() => {
-    const onPageHide = () => teardown();
+    const onPageHide = () => suspend();
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, [teardown]);
+  }, [suspend]);
 
   return {
     recording,

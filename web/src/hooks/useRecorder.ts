@@ -39,9 +39,17 @@ export type Recorder = {
   stop: () => void;
   // Stop capture and DISCARD the clip — the user cancelled (no onClip, no error).
   cancel: () => void;
-  // Hard teardown (pagehide): stops stream + visualizer without emitting a clip.
+  // Soft backgrounding (pagehide): stop the visualizer + any in-flight recording but HOLD the
+  // mic stream so the next record reuses it (no iOS re-prompt). Idle release still applies.
+  suspend: () => void;
+  // Hard teardown (unmount): stops stream + visualizer without emitting a clip.
   teardown: () => void;
 };
+
+// iOS Safari re-prompts for the mic on every getUserMedia, so we HOLD one granted stream and
+// reuse it across recordings. To avoid pinning the mic indefinitely after the user walks away,
+// release the held stream once it's gone unused for this long (next record re-acquires).
+const IDLE_RELEASE_MS = 30 * 60 * 1000;
 
 export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorderOptions): Recorder {
   const [recording, setRecording] = useState(false);
@@ -53,6 +61,8 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   const recordingRef = useRef(false);
   // Set by cancel(): the next `stop` event drops its clip instead of submitting.
   const canceledRef = useRef(false);
+  // Idle timer: releases the held mic stream after IDLE_RELEASE_MS of no recording.
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The AudioContext is the shared, app-wide singleton (see lib/audioContext) — never
   // created or closed here, only resumed. `sourceRef` is the per-recording mic node we
@@ -69,13 +79,30 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   onErrorRef.current = onError;
   onStartRef.current = onStart;
 
+  const clearIdleTimer = useCallback((): void => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  }, []);
+
   const stopStream = useCallback((): void => {
+    clearIdleTimer();
     const stream = mediaStreamRef.current;
     if (stream) {
       for (const track of stream.getTracks()) track.stop();
       mediaStreamRef.current = null;
     }
-  }, []);
+  }, [clearIdleTimer]);
+
+  // Arm the idle release so a held-but-unused stream is let go (and its mic indicator cleared)
+  // instead of pinned forever; the next record re-acquires. Reset on every record.
+  const scheduleIdleRelease = useCallback((): void => {
+    clearIdleTimer();
+    idleTimerRef.current = setTimeout(() => {
+      if (!recordingRef.current) stopStream();
+    }, IDLE_RELEASE_MS);
+  }, [clearIdleTimer, stopStream]);
 
   // ---- visualizer (mic-reactive bars) ---------------------------------------
 
@@ -191,7 +218,9 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     const mimeType = recorder?.mimeType || "audio/webm";
     const blob = new Blob(chunksRef.current, { type: mimeType });
     chunksRef.current = [];
-    stopStream();
+    // Keep the mic track alive for the next recording (no stopStream → no iOS re-prompt),
+    // but arm the idle release so it isn't held forever once the user stops talking to us.
+    scheduleIdleRelease();
     // Leave the exclusive recording category so iOS lets background music (Spotify)
     // resume. A reply's TTS will re-claim the session as "transient-solo" when it plays.
     setAudioSessionType("auto");
@@ -209,7 +238,7 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
       return;
     }
     onClipRef.current({ audioBase64, mimeType });
-  }, [stopStream]);
+  }, [scheduleIdleRelease]);
 
   const stop = useCallback((): void => {
     recordingRef.current = false;
@@ -239,6 +268,16 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     }
   }, [stopVisualizer]);
 
+  // Soft backgrounding (pagehide): don't release the mic — keeping the held stream means the
+  // next record can reuse it with no iOS re-prompt (ensureMic re-acquires only if iOS actually
+  // ended the track). We do cancel any in-flight recording (a clip captured across a background
+  // boundary is unreliable) and arm the idle release so a long background eventually lets go.
+  const suspend = useCallback((): void => {
+    if (recordingRef.current) cancel();
+    setAudioSessionType("auto");
+    if (mediaStreamRef.current) scheduleIdleRelease();
+  }, [cancel, scheduleIdleRelease]);
+
   // Re-acquire the mic from scratch. The old track is stopped first: iOS mutes the prior
   // track of the same kind when you call getUserMedia again, and that mute is unrecoverable.
   const acquireMic = useCallback(async (): Promise<MediaStream> => {
@@ -254,6 +293,18 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     });
     return stream;
   }, [stopStream, stop]);
+
+  // Reuse the held mic stream when its track is still healthy — this is the whole point on iOS,
+  // where a fresh getUserMedia re-prompts for permission. Only re-acquire (one retry, since the
+  // device may hand back a still-muted track right after a screen lock) when there's no stream or
+  // the current one died (ended/muted).
+  const ensureMic = useCallback(async (): Promise<MediaStream> => {
+    const held = mediaStreamRef.current;
+    if (held && trackHealthy(held)) return held;
+    let stream = await acquireMic();
+    if (!trackHealthy(stream)) stream = await acquireMic();
+    return stream;
+  }, [acquireMic]);
 
   const start = useCallback(async (): Promise<void> => {
     if (!navigator.mediaDevices || !window.MediaRecorder) {
@@ -271,12 +322,11 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     } catch {
       /* visualiser is decorative; recording proceeds regardless */
     }
+    // Reset the idle release: we're recording now, so don't let go of the stream.
+    clearIdleTimer();
     let stream: MediaStream;
     try {
-      stream = await acquireMic();
-      // One retry: the device may have been relinquished during the lock and the first
-      // re-acquire can hand back a still-muted track.
-      if (!trackHealthy(stream)) stream = await acquireMic();
+      stream = await ensureMic();
     } catch {
       setAudioSessionType("auto");
       onErrorRef.current("mic-blocked");
@@ -303,7 +353,7 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     recordingRef.current = true;
     setRecording(true);
     startVisualizer();
-  }, [acquireMic, stopStream, startVisualizer, submitRecording]);
+  }, [ensureMic, stopStream, clearIdleTimer, startVisualizer, submitRecording]);
 
   const teardown = useCallback((): void => {
     stopVisualizer();
@@ -321,5 +371,5 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
   // Clean up on unmount.
   useEffect(() => teardown, [teardown]);
 
-  return { recording, visualizerActive, start, stop, cancel, teardown };
+  return { recording, visualizerActive, start, stop, cancel, suspend, teardown };
 }
