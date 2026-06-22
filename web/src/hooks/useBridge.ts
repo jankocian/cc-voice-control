@@ -57,9 +57,10 @@ export type UseBridgeOptions = {
   onEvent: (threadId: ThreadId, event: BridgeContentEvent) => void;
   // Called for roster snapshot + join/leave deltas so the app maintains the thread list.
   onRoster: (event: RosterEvent) => void;
-  // Called when the pairing window has closed and this device has no valid cookie (POST /claim → 403).
-  // The app shows "run /voice-control:pair"; reconnecting is stopped (a leaked URL can't loop its way in).
-  onExpired: () => void;
+  // Called when /claim → 403 after retries: `stale` = a cookie was present but the session no longer
+  // knows it (re-pair), `expired` = a fresh/used one-time link. The app shows the right re-pair screen;
+  // reconnecting is stopped (a leaked URL can't loop its way in).
+  onExpired: (reason: "stale" | "expired") => void;
 };
 
 export type Bridge = {
@@ -239,11 +240,11 @@ export function useBridge(options: UseBridgeOptions): Bridge {
       if (stopped) return;
       void claimSession(routingId).then((result) => {
         if (stopped) return;
-        if (result === "expired") {
+        if (result === "expired" || result === "stale") {
           // Could be the start-up race (window opening) rather than a truly closed window — retry a few
-          // times before showing the re-pair screen.
+          // times before showing the re-pair screen, preserving why (stale cookie vs used/expired link).
           if (++expiredStreak <= MAX_CLAIM_RETRIES) reconnectTimer = window.setTimeout(connect, RECONNECT_MS);
-          else onExpiredRef.current();
+          else onExpiredRef.current(result);
           return;
         }
         if (result === "error") {

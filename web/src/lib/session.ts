@@ -48,11 +48,12 @@ export function buildWebSocketUrl(routingId: string, loc: Location = window.loca
   return wsUrl.toString();
 }
 
-export type ClaimResult = "ok" | "expired" | "error";
+// `ok` → paired (cookie set/refreshed). `stale` → a cookie was sent but the session no longer knows it
+// (e.g. it was revoked while the phone was away) → re-pair. `expired` → no valid cookie + closed window
+// (a fresh/used one-time link) → re-pair. `error` → network/other, treat as transient and retry.
+export type ClaimResult = "ok" | "stale" | "expired" | "error";
 
-// Claim/refresh this device's pairing cookie before connecting. `ok` → a pairing window was open (or
-// this device is already paired) and the httpOnly cookie is set; `expired` → no window and no valid
-// cookie (show "run /voice-control:pair"); `error` → network/other, treat as transient and retry.
+// Claim/refresh this device's pairing cookie before connecting.
 export async function claimSession(routingId: string, loc: Location = window.location): Promise<ClaimResult> {
   try {
     const res = await fetch(new URL(`/claim/${encodeURIComponent(routingId)}`, loc.href).toString(), {
@@ -61,7 +62,10 @@ export async function claimSession(routingId: string, loc: Location = window.loc
       cache: "no-store"
     });
     if (res.ok) return "ok";
-    if (res.status === 403) return "expired";
+    if (res.status === 403) {
+      const body = (await res.json().catch(() => ({}))) as { reason?: string };
+      return body.reason === "stale" ? "stale" : "expired";
+    }
     return "error";
   } catch {
     return "error";

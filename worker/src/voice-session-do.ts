@@ -297,7 +297,10 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
     const decision = claimDecision(hasValidCookie, open);
     if (decision === "reject") {
-      return jsonResponse({ reason: "expired" }, 403);
+      // Distinguish "you were paired but your session lapsed" (a cookie is present but no longer
+      // recognised — e.g. revoke-on-exit wiped it) from "this is a fresh/used link" (no cookie), so the
+      // phone can show the right message. Both need a new /voice-control:pair.
+      return jsonResponse({ reason: presented ? "stale" : "expired" }, 403);
     }
     // Mint a fresh token, or re-use the already-valid one; either way (re)set the cookie so an in-use
     // device's lifetime rolls forward (claim runs on every reconnect) and doesn't expire mid-use.

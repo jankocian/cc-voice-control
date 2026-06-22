@@ -25,10 +25,11 @@ const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
 export function App({ session }: { session: Session }) {
   const { flash, show: showFlash } = useFlash();
 
-  // Set when the pairing window has closed and this device has no valid cookie — we then show the
-  // re-pair screen instead of the live UI (useBridge has already stopped reconnecting).
-  const [expired, setExpired] = useState(false);
-  const onExpired = useCallback(() => setExpired(true), []);
+  // Set when /claim is rejected for good — we then show the re-pair screen instead of the live UI
+  // (useBridge has already stopped reconnecting). The reason tailors the message: a lapsed session
+  // (had a cookie) vs a used/expired one-time link.
+  const [expired, setExpired] = useState<"stale" | "expired" | null>(null);
+  const onExpired = useCallback((reason: "stale" | "expired") => setExpired(reason), []);
 
   const threads = useThreads();
   const { activeThreadId } = threads;
@@ -238,7 +239,7 @@ export function App({ session }: { session: Session }) {
     return () => obs.disconnect();
   }, []);
 
-  if (expired) return <SessionExpired />;
+  if (expired) return <SessionExpired reason={expired} />;
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
