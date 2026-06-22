@@ -1,64 +1,84 @@
 import { describe, expect, it } from "vitest";
 import {
-  parseBridgeBrowserSessionPath,
-  parseBridgeBrowserSessionUrl,
+  isBridgeBrowserSessionPath,
+  parseBridgeClaimPath,
   parseBridgeClientRole,
   parseBridgeWebSocketPath,
   parseBridgeWebSocketUrl,
   readBridgeAuthQuery,
-  toBridgeBrowserSessionPath,
   toBridgeBrowserSessionUrl,
+  toBridgeClaimPath,
   toBridgeWebSocketPath,
   toBridgeWebSocketUrl
 } from "./bridge-contract.js";
 
 describe("bridge URL contract", () => {
-  it("builds browser session URLs from the single secret and parses the worker route shape", () => {
-    const url = toBridgeBrowserSessionUrl("https://voice.example.com/base", "secret");
+  it("carries the secret in the fragment, never the path (the worker never sees it)", () => {
+    const url = toBridgeBrowserSessionUrl("https://voice.example.com/base", "the-secret");
+    expect(url).toBe("https://voice.example.com/s#the-secret");
 
-    expect(url).toBe("https://voice.example.com/s/secret");
-    expect(parseBridgeBrowserSessionUrl(url)).toEqual({ secret: "secret" });
+    // The worker only ever sees the path; the fragment is dropped by the browser before the request.
+    const path = new URL(url).pathname;
+    expect(isBridgeBrowserSessionPath(path)).toBe(true);
+    expect(path).not.toContain("the-secret");
   });
 
-  it("maps https bridge URLs to daemon websocket URLs", () => {
-    const url = toBridgeWebSocketUrl("https://voice.example.com", "secret", "daemon");
+  it("keeps the phone URL the same length as the old /s/<secret> path (QR size unchanged)", () => {
+    const secret = "0123456789abcdefghijkl"; // 22-char base64url stand-in
+    const url = toBridgeBrowserSessionUrl("https://voice-control.nee.rs", secret);
+    expect(url).toBe(`https://voice-control.nee.rs/s#${secret}`);
+  });
 
-    expect(url).toBe("wss://voice.example.com/ws/secret?role=daemon");
-    expect(parseBridgeWebSocketUrl(url)).toEqual({ secret: "secret", role: "daemon" });
+  it("rejects an empty secret", () => {
+    expect(() => toBridgeBrowserSessionUrl("https://voice.example.com", "")).toThrow();
+  });
+
+  it("maps https bridge URLs to daemon websocket URLs routed by routingId", () => {
+    const url = toBridgeWebSocketUrl("https://voice.example.com", "abc123", "daemon");
+
+    expect(url).toBe("wss://voice.example.com/ws/abc123?role=daemon");
+    expect(parseBridgeWebSocketUrl(url)).toEqual({ routingId: "abc123", role: "daemon" });
   });
 
   it("maps http bridge URLs to browser websocket URLs", () => {
-    const url = toBridgeWebSocketUrl("http://localhost:8787", "secret", "browser");
+    const url = toBridgeWebSocketUrl("http://localhost:8787", "abc123", "browser");
 
-    expect(url).toBe("ws://localhost:8787/ws/secret?role=browser");
-    expect(parseBridgeWebSocketUrl(url)).toEqual({ secret: "secret", role: "browser" });
+    expect(url).toBe("ws://localhost:8787/ws/abc123?role=browser");
+    expect(parseBridgeWebSocketUrl(url)).toEqual({ routingId: "abc123", role: "browser" });
   });
 
-  it("keeps path construction and parsing symmetric", () => {
-    expect(toBridgeBrowserSessionPath("secret/with/slash")).toBe("/s/secret%2Fwith%2Fslash");
-    expect(parseBridgeBrowserSessionPath("/s/secret%2Fwith%2Fslash")).toBe("secret/with/slash");
+  it("keeps ws/claim path construction and parsing symmetric", () => {
+    expect(toBridgeWebSocketPath("rid")).toBe("/ws/rid");
+    expect(parseBridgeWebSocketPath("/ws/rid")).toBe("rid");
 
-    expect(toBridgeWebSocketPath("secret/with/slash")).toBe("/ws/secret%2Fwith%2Fslash");
-    expect(parseBridgeWebSocketPath("/ws/secret%2Fwith%2Fslash")).toBe("secret/with/slash");
+    expect(toBridgeClaimPath("rid")).toBe("/claim/rid");
+    expect(parseBridgeClaimPath("/claim/rid")).toBe("rid");
+  });
+
+  it("isBridgeBrowserSessionPath only matches the exact /s route", () => {
+    expect(isBridgeBrowserSessionPath("/s")).toBe(true);
+    expect(isBridgeBrowserSessionPath("/s/anything")).toBe(false);
+    expect(isBridgeBrowserSessionPath("/ws/rid")).toBe(false);
+    expect(isBridgeBrowserSessionPath("/")).toBe(false);
   });
 
   it("reads the role from websocket query params", () => {
-    const url = new URL("wss://voice.example.com/ws/secret?role=daemon");
+    const url = new URL("wss://voice.example.com/ws/rid?role=daemon");
 
     expect(readBridgeAuthQuery(url.searchParams)).toEqual({ role: "daemon" });
   });
 
   it("carries the daemon's threadId on the websocket URL (routing key, not a credential)", () => {
-    const url = toBridgeWebSocketUrl("https://voice.example.com", "secret", "daemon", "surface:7");
+    const url = toBridgeWebSocketUrl("https://voice.example.com", "rid", "daemon", "surface:7");
 
-    expect(url).toBe("wss://voice.example.com/ws/secret?role=daemon&threadId=surface%3A7");
-    expect(parseBridgeWebSocketUrl(url)).toEqual({ secret: "secret", role: "daemon", threadId: "surface:7" });
+    expect(url).toBe("wss://voice.example.com/ws/rid?role=daemon&threadId=surface%3A7");
+    expect(parseBridgeWebSocketUrl(url)).toEqual({ routingId: "rid", role: "daemon", threadId: "surface:7" });
     expect(readBridgeAuthQuery(new URL(url).searchParams)).toEqual({ role: "daemon", threadId: "surface:7" });
   });
 
   it("omits threadId for a browser socket (a browser is not bound to one thread)", () => {
-    const url = toBridgeWebSocketUrl("https://voice.example.com", "secret", "browser");
-    expect(url).toBe("wss://voice.example.com/ws/secret?role=browser");
+    const url = toBridgeWebSocketUrl("https://voice.example.com", "rid", "browser");
+    expect(url).toBe("wss://voice.example.com/ws/rid?role=browser");
     expect(parseBridgeWebSocketUrl(url)?.threadId).toBeUndefined();
   });
 
@@ -66,7 +86,7 @@ describe("bridge URL contract", () => {
     expect(parseBridgeClientRole("daemon")).toBe("daemon");
     expect(parseBridgeClientRole("browser")).toBe("browser");
     expect(parseBridgeClientRole("operator")).toBeUndefined();
-    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/secret?role=operator")).toBeUndefined();
-    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/secret")).toBeUndefined();
+    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/rid?role=operator")).toBeUndefined();
+    expect(parseBridgeWebSocketUrl("wss://voice.example.com/ws/rid")).toBeUndefined();
   });
 });

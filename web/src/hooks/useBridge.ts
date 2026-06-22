@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { aad, openJson, sealJson } from "../lib/e2e";
 import type {
   BridgeEnvelope,
   BrowserToDaemonEvent,
   DaemonToBrowserEvent,
   RosterEvent,
+  RosterThread,
   SessionRuntimeState,
-  ThreadId
+  ThreadId,
+  ThreadLabel,
+  WireRosterEvent,
+  WireRosterThread
 } from "../lib/protocol";
-import { buildWebSocketUrl } from "../lib/session";
+import { buildWebSocketUrl, claimSession } from "../lib/session";
 
 // Content events the bridge forwards to the app, tagged with the thread they belong to.
 // session_status is folded in too (it carries the per-thread runtime), so the app keeps one
@@ -41,14 +46,20 @@ export type BridgeRuntime = {
 };
 
 export type UseBridgeOptions = {
-  // The single capability secret from the URL path (/s/<secret>); used to build the
-  // /ws/<secret>?role=browser bridge socket URL.
-  secret: string;
+  // The session routing id (sha256(secret)); used to build the /ws/<routingId>?role=browser bridge
+  // socket URL and to claim the device cookie before connecting.
+  routingId: string;
+  // The end-to-end key (derived from the secret). Every content event is sealed/opened with it; the
+  // worker never has it, so it relays only ciphertext.
+  key: CryptoKey;
   // Called for history / tts_audio / error / session_status / spawn_pending events, tagged with the
   // thread (from the envelope) so the app files each under the right thread.
   onEvent: (threadId: ThreadId, event: BridgeContentEvent) => void;
   // Called for roster snapshot + join/leave deltas so the app maintains the thread list.
   onRoster: (event: RosterEvent) => void;
+  // Called when the pairing window has closed and this device has no valid cookie (POST /claim → 403).
+  // The app shows "run /voice-control:pair"; reconnecting is stopped (a leaked URL can't loop its way in).
+  onExpired: () => void;
 };
 
 export type Bridge = {
@@ -58,14 +69,43 @@ export type Bridge = {
   // True if a socket is OPEN and the named thread has a live daemon. Lets a command guard on
   // the thread it actually addresses (the shared mic/player act on the active thread).
   bridgeReady: (threadId: ThreadId | null) => boolean;
-  // Stamp the envelope with the thread to address and send. Returns false if the socket is gone.
+  // Stamp the envelope with the thread to address, seal it, and send. Returns false if the socket is
+  // gone or the thread is offline (the actual encrypt+send completes asynchronously, in order).
   sendDaemon: (threadId: ThreadId, command: DaemonCommand) => boolean;
 };
 
 const RECONNECT_MS = 1500;
+// A fresh /voice-control:start opens the pairing window a moment after the daemon connects; the phone
+// may POST /claim in the brief gap before the window is live and get a 403. Retry a few times before
+// declaring the link expired, so the happy path isn't a false "re-pair". A genuinely closed window just
+// means the re-pair screen shows after ~this many × RECONNECT_MS.
+const MAX_CLAIM_RETRIES = 4;
+
+// Decrypt the sealed label on each roster thread back into a displayable ThreadLabel. A label that
+// won't open (a forged/foreign roster, or a scheme mismatch) degrades to the threadId rather than
+// dropping the thread, so the switcher still shows it.
+async function openRosterThread(key: CryptoKey, thread: WireRosterThread): Promise<RosterThread> {
+  let label: ThreadLabel;
+  try {
+    label = await openJson<ThreadLabel>(key, thread.label, aad("label", thread.threadId));
+  } catch {
+    label = { title: thread.threadId };
+  }
+  return { ...thread, label };
+}
+
+async function openRosterEvent(key: CryptoKey, event: WireRosterEvent): Promise<RosterEvent> {
+  if (event.type === "thread_roster") {
+    return { type: "thread_roster", threads: await Promise.all(event.threads.map((t) => openRosterThread(key, t))) };
+  }
+  if (event.type === "thread_joined") {
+    return { type: "thread_joined", thread: await openRosterThread(key, event.thread) };
+  }
+  return event; // thread_left carries no label
+}
 
 export function useBridge(options: UseBridgeOptions): Bridge {
-  const { secret, onEvent, onRoster } = options;
+  const { routingId, key, onEvent, onRoster, onExpired } = options;
 
   const [connected, setConnected] = useState(false);
 
@@ -73,13 +113,21 @@ export function useBridge(options: UseBridgeOptions): Bridge {
   // Live presence per thread, mirrored from the roster so sends can guard on the addressed
   // thread without a React read. `thread_joined` (connected:true) / `thread_left` flip it.
   const connectedThreadsRef = useRef<Set<ThreadId>>(new Set());
+  // Serialize outbound seals so commands keep their order on the wire (an interrupt must not overtake
+  // the submit it follows).
+  const sendChainRef = useRef<Promise<void>>(Promise.resolve());
 
-  // Keep the latest callbacks in refs so the effect mounts once (the socket lifecycle owns the
-  // single connection; re-subscribing per render would tear it down on every keystroke).
+  // Keep the latest callbacks + key in refs so the effect mounts once (the socket lifecycle owns the
+  // single connection; re-subscribing per render would tear it down on every keystroke). The key is
+  // stable for a session, but a ref keeps the effect deps minimal.
   const onEventRef = useRef(onEvent);
   const onRosterRef = useRef(onRoster);
+  const onExpiredRef = useRef(onExpired);
+  const keyRef = useRef(key);
   onEventRef.current = onEvent;
   onRosterRef.current = onRoster;
+  onExpiredRef.current = onExpired;
+  keyRef.current = key;
 
   const bridgeReady = useCallback((threadId: ThreadId | null): boolean => {
     const socket = socketRef.current;
@@ -87,27 +135,49 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     return threadId !== null && connectedThreadsRef.current.has(threadId);
   }, []);
 
-  const sendDaemon = useCallback((threadId: ThreadId, command: DaemonCommand): boolean => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    if (!connectedThreadsRef.current.has(threadId)) return false;
-    // spawn_thread + set_speak_steps are actions/settings, not turns — they carry no requestId.
-    const event = (
-      command.type === "spawn_thread" || command.type === "set_speak_steps"
-        ? command
-        : { requestId: crypto.randomUUID(), ...command }
-    ) as BrowserToDaemonEvent;
-    try {
-      socket.send(JSON.stringify({ channel: "daemon", threadId, event } satisfies BridgeEnvelope));
-      return true;
-    } catch {
-      return false;
-    }
+  // Seal an event for one thread's daemon and send it, chained so order is preserved. Re-checks the
+  // socket after the (async) seal in case it closed meanwhile.
+  const enqueueDaemonSend = useCallback((threadId: ThreadId, event: BrowserToDaemonEvent): void => {
+    sendChainRef.current = sendChainRef.current
+      .then(async () => {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const enc = await sealJson(keyRef.current, event, aad("daemon", threadId));
+        if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ channel: "daemon", threadId, enc } satisfies BridgeEnvelope));
+        }
+      })
+      .catch(() => {
+        /* socket closing / seal failed; the reconnect path re-syncs */
+      });
   }, []);
+
+  const sendDaemon = useCallback(
+    (threadId: ThreadId, command: DaemonCommand): boolean => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+      if (!connectedThreadsRef.current.has(threadId)) return false;
+      // spawn_thread + set_speak_steps are actions/settings, not turns — they carry no requestId.
+      const event = (
+        command.type === "spawn_thread" || command.type === "set_speak_steps"
+          ? command
+          : { requestId: crypto.randomUUID(), ...command }
+      ) as BrowserToDaemonEvent;
+      enqueueDaemonSend(threadId, event);
+      return true;
+    },
+    [enqueueDaemonSend]
+  );
 
   useEffect(() => {
     let stopped = false;
     let reconnectTimer = 0;
+    // Consecutive 403s from /claim; reset on any successful claim. Distinguishes the brief start-up race
+    // (retry) from a truly closed pairing window (give up → re-pair screen).
+    let expiredStreak = 0;
+    // Serialize inbound decrypts so events apply in arrival order (a history snapshot must not be
+    // overtaken by an earlier one whose decrypt finished later).
+    let recvChain: Promise<void> = Promise.resolve();
 
     // Track which threads have a live daemon, mirroring the roster, so sendDaemon/bridgeReady
     // can guard synchronously. A fresh connect resets it (the next thread_roster repopulates).
@@ -130,12 +200,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     function syncThread(threadId: ThreadId): void {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      const sync = { type: "sync" as const, requestId: crypto.randomUUID() };
-      try {
-        socket.send(JSON.stringify({ channel: "daemon", threadId, event: sync } satisfies BridgeEnvelope));
-      } catch {
-        /* socket closing; ignore */
-      }
+      enqueueDaemonSend(threadId, { type: "sync", requestId: crypto.randomUUID() });
     }
 
     function handleRoster(event: RosterEvent): void {
@@ -149,27 +214,64 @@ export function useBridge(options: UseBridgeOptions): Bridge {
       }
     }
 
+    // Open the sealed envelope and dispatch it. Roster labels and content are both decrypted with the
+    // session key; a decryption failure means tampered/foreign data and is dropped by the caller.
+    async function handleEnvelope(envelope: BridgeEnvelope): Promise<void> {
+      if (envelope.channel === "roster") {
+        handleRoster(await openRosterEvent(keyRef.current, envelope.event));
+        return;
+      }
+      if (envelope.channel === "browser") {
+        const event = await openJson<DaemonToBrowserEvent>(
+          keyRef.current,
+          envelope.enc,
+          aad("browser", envelope.threadId)
+        );
+        onEventRef.current(envelope.threadId, event as BridgeContentEvent);
+      }
+    }
+
+    // Claim/refresh the device cookie, then open the socket. Done before EVERY (re)connect so a session
+    // revoked while the phone was away (revoke-on-exit wiped the device set) surfaces as a clean
+    // "expired" instead of an endless 401 reconnect loop. A network error during the claim is transient
+    // → retry on the usual cadence; only an explicit 403 means the pairing window is gone.
     function connect(): void {
       if (stopped) return;
-      const socket = new WebSocket(buildWebSocketUrl(secret));
+      void claimSession(routingId).then((result) => {
+        if (stopped) return;
+        if (result === "expired") {
+          // Could be the start-up race (window opening) rather than a truly closed window — retry a few
+          // times before showing the re-pair screen.
+          if (++expiredStreak <= MAX_CLAIM_RETRIES) reconnectTimer = window.setTimeout(connect, RECONNECT_MS);
+          else onExpiredRef.current();
+          return;
+        }
+        if (result === "error") {
+          reconnectTimer = window.setTimeout(connect, RECONNECT_MS);
+          return;
+        }
+        expiredStreak = 0;
+        openSocket();
+      });
+    }
+
+    function openSocket(): void {
+      if (stopped) return;
+      const socket = new WebSocket(buildWebSocketUrl(routingId));
       socketRef.current = socket;
 
       socket.addEventListener("message", (messageEvent) => {
-        let envelope: BridgeEnvelope | undefined;
+        let envelope: BridgeEnvelope;
         try {
           envelope = JSON.parse(messageEvent.data as string) as BridgeEnvelope;
         } catch {
           return;
         }
-        if (!envelope) return;
-        if (envelope.channel === "roster") {
-          handleRoster(envelope.event);
-          return;
-        }
-        if (envelope.channel === "browser") {
-          // Every content event is tagged with its thread; the app files it under that thread.
-          onEventRef.current(envelope.threadId, envelope.event as BridgeContentEvent);
-        }
+        recvChain = recvChain
+          .then(() => handleEnvelope(envelope))
+          .catch(() => {
+            /* drop an undecryptable / foreign message */
+          });
       });
 
       socket.addEventListener("open", () => {
@@ -214,7 +316,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         }
       }
     };
-  }, [secret]);
+  }, [routingId, enqueueDaemonSend]);
 
   return { connected, bridgeReady, sendDaemon };
 }

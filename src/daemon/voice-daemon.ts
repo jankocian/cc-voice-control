@@ -4,6 +4,8 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { BRIDGE_DAEMON_KEY_HEADER } from "../shared/bridge-contract.js";
+import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
 import type {
   BridgeEnvelope,
   BrowserToDaemonEvent,
@@ -12,11 +14,13 @@ import type {
   InjectMode,
   SessionState,
   ThreadId,
-  ThreadInfo
+  ThreadInfo,
+  WireThreadInfo
 } from "../shared/protocol.js";
 import { startBridgeHeartbeat } from "./bridge-heartbeat.js";
 import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
 import {
+  deriveRoutingId,
   loadOrCreateSession,
   qrPath,
   runtimeDir,
@@ -79,9 +83,15 @@ export type DaemonInit = {
   // Non-secret per-pane routing key (CMUX_SURFACE_ID, or a uuid outside cmux). Tags every event; a
   // reconnecting pane re-registers to the SAME slot. NOT the session secret.
   threadId: ThreadId;
-  // The MACHINE-level secret (session.json) that routes AND authorizes the session. Shared by every
-  // pane → identical phone URL/QR. Carried in the URL path, never sent as a separate value.
+  // The MACHINE-level secret (session.json). Shared by every pane → identical phone URL/QR. It rides
+  // in the URL FRAGMENT (never sent to the worker) and is the key the phone and daemon derive their
+  // end-to-end encryption key from. The daemon never sends it to the bridge.
   secret: string;
+  // sha256(secret) (hex) — the only session id the worker sees; routes the session's Durable Object.
+  routingId: string;
+  // Daemon-role auth secret (session.json, never in any URL). Sent as a connect header so the bridge can
+  // tell the real local daemon apart from a leaked-URL holder (who has `secret` but not this).
+  daemonKey: string;
   sessionId: string; // short, non-secret hash of `secret` — safe to relay/log
   browserUrl: string;
 };
@@ -91,9 +101,9 @@ export type DaemonInit = {
 export function createDaemonInit(config: VoiceRemoteConfig): DaemonInit {
   const surface = process.env.CMUX_SURFACE_ID;
   const threadId = surface ?? randomUUID();
-  const { secret, sessionId } = loadOrCreateSession();
+  const { secret, sessionId, daemonKey } = loadOrCreateSession();
   const browserUrl = toBrowserUrl(config.bridgeUrl, secret);
-  return { config, surface, threadId, secret, sessionId, browserUrl };
+  return { config, surface, threadId, secret, routingId: deriveRoutingId(secret), daemonKey, sessionId, browserUrl };
 }
 
 /**
@@ -117,6 +127,18 @@ export class VoiceDaemon {
   // Stops the current bridge socket's ping/pong keepalive; re-armed on every (re)connect.
   private stopHeartbeat?: () => void;
   private stopped = false;
+
+  // Device pairing: open a claim window on the FIRST bridge connect (a fresh `/voice-control:start`),
+  // but NOT on background reconnects — else every Wi-Fi flap / redeploy would reopen pairing and a
+  // leaked URL could be claimed without the user intending it. `/voice-control:pair` opens one on
+  // demand for an extra device; if the socket is mid-reconnect when it does, the request is deferred
+  // to the next connect.
+  private everConnected = false;
+  private pairWindowRequested = false;
+  // A spawned pane (phone "+" / the spawn skill) joins an ALREADY-paired session, so its first connect
+  // must NOT auto-open a pairing window (that would let a leaked URL pair during routine multi-pane use).
+  // Only a user-run /voice-control:start (not a spawn) or an explicit /voice-control:pair opens one.
+  private readonly wasSpawned = Boolean(process.env.VOICE_SPAWN_ID);
 
   // The voice injection queue + idle-gate (inject one spoken prompt at a time while Claude is idle) and
   // working-state tracker. It does NOT touch conversation content — the transcript drives that. See
@@ -156,6 +178,14 @@ export class VoiceDaemon {
   // on the health tick when it changes; starts with a cheap sync fallback so registration never blocks.
   private label: ThreadInfo["label"];
 
+  // End-to-end encryption: the AES key derived from the session secret (the worker never has it), and
+  // the SEALED label cached so the (sync) registerThread can send it without awaiting. Outbound content
+  // is sealed through a promise chain so concurrent sends keep their order (history snapshots must not
+  // be overtaken by a later one). Both set in start() before the first send.
+  private key!: CryptoKey;
+  private sealedLabel!: EncBlob;
+  private sealChain: Promise<void> = Promise.resolve();
+
   constructor(init: DaemonInit) {
     this.init = init;
     this.label = { title: init.threadId };
@@ -171,6 +201,10 @@ export class VoiceDaemon {
   }
 
   async start(): Promise<void> {
+    // Derive the E2E key + seal the initial label BEFORE connecting, so the first thread_register (sent
+    // synchronously on socket open) already carries a sealed label and content can be sealed immediately.
+    this.key = await deriveKey(this.init.secret);
+    this.sealedLabel = await this.sealLabel(this.label);
     await this.startHookListener();
     this.writeRuntime();
     this.connectBridge();
@@ -234,6 +268,7 @@ export class VoiceDaemon {
           route !== "/turn-progress" &&
           route !== "/turn-close" &&
           route !== "/reset" &&
+          route !== "/pair" &&
           route !== "/spawn"
         ) {
           res.statusCode = 404;
@@ -253,6 +288,10 @@ export class VoiceDaemon {
           res.end();
           if (route === "/reset") {
             this.handleReset();
+            return;
+          }
+          if (route === "/pair") {
+            this.openPairWindow();
             return;
           }
           try {
@@ -337,14 +376,29 @@ export class VoiceDaemon {
     this.projectAndEmit();
   }
 
+  // Handle a /pair POST (the /voice-control:pair skill): open a device-pairing window so an additional
+  // phone can claim a device cookie. Sent now if the bridge socket is up, else deferred to the next
+  // connect (so `pair` works even during a brief reconnect).
+  private openPairWindow(): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send({ channel: "control", event: { type: "open_claim_window" } });
+      console.error("[pair] opened a device-pairing window");
+    } else {
+      this.pairWindowRequested = true;
+      console.error("[pair] bridge socket down — pairing window will open on reconnect");
+    }
+  }
+
   // ---- bridge ----------------------------------------------------------------
 
   private connectBridge(): void {
     if (this.stopped) return;
     // Pass the threadId on the connect URL so the DO attaches it before the first message —
     // browser→daemon routing keys on it from the very first send.
-    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.secret, "daemon", this.init.threadId);
-    const ws = new WebSocket(url);
+    const url = toWebSocketUrl(this.init.config.bridgeUrl, this.init.routingId, "daemon", this.init.threadId);
+    // Authenticate the daemon role with the machine-local daemonKey (never in the URL), via a header so
+    // it stays out of access logs. The bridge pins it on first connect (trust-on-first-use).
+    const ws = new WebSocket(url, { headers: { [BRIDGE_DAEMON_KEY_HEADER]: this.init.daemonKey } });
     this.ws = ws;
 
     ws.on("open", () => {
@@ -353,20 +407,32 @@ export class VoiceDaemon {
       this.registerThread();
       this.emitStatus();
       void this.refreshLabel();
+      // Open a device-pairing window when the user just ran /voice-control:start (first connect of a
+      // non-spawned daemon) or asked for one via /voice-control:pair while the socket was down. NOT on
+      // plain reconnects, and NOT for a spawned pane (it joins an already-paired session).
+      const firstConnect = !this.everConnected;
+      this.everConnected = true;
+      if ((firstConnect && !this.wasSpawned) || this.pairWindowRequested) {
+        this.pairWindowRequested = false;
+        this.send({ channel: "control", event: { type: "open_claim_window" } });
+      }
       // Keep this socket alive + detect a half-open drop (zombie OPEN that never fires close).
       this.stopHeartbeat = startBridgeHeartbeat(ws, BRIDGE_PING_INTERVAL_MS);
     });
     ws.on("message", (raw) => {
-      let envelope: { channel?: string; threadId?: ThreadId; event?: BrowserToDaemonEvent };
+      let envelope: { channel?: string; threadId?: ThreadId; enc?: EncBlob };
       try {
         envelope = JSON.parse(raw.toString());
       } catch {
         return;
       }
-      // Only act on events addressed to THIS thread (the DO routes browser→one daemon by
-      // threadId, but guard here too so a mis-tagged envelope can't drive the wrong pane).
-      if (envelope.channel === "daemon" && envelope.event && envelope.threadId === this.init.threadId) {
-        this.handleBrowserEvent(envelope.event).catch((error) => this.sendError(error));
+      // Only act on events addressed to THIS thread (the DO routes browser→one daemon by threadId, but
+      // guard here too so a mis-tagged envelope can't drive the wrong pane). The payload is sealed —
+      // decrypt with the shared key; a decryption failure means tampered/foreign data, so ignore it.
+      if (envelope.channel === "daemon" && envelope.enc && envelope.threadId === this.init.threadId) {
+        openJson<BrowserToDaemonEvent>(this.key, envelope.enc, aad("daemon", this.init.threadId))
+          .then((event) => this.handleBrowserEvent(event))
+          .catch((error) => console.error(`[e2e] dropped an undecryptable browser message: ${errText(error)}`));
       }
     });
     ws.on("close", (code) => {
@@ -734,14 +800,18 @@ export class VoiceDaemon {
 
   // Snapshot of this thread for the DO roster: id + label + live state/listening. The DO
   // stores this and serves it to phones; the daemon keeps no roster of its own.
-  private buildThreadInfo(): ThreadInfo {
+  private buildThreadInfo(): WireThreadInfo {
     return {
       threadId: this.init.threadId,
-      label: this.label,
+      label: this.sealedLabel, // sealed (EncBlob): the worker stores/relays it without reading it
       state: this.turns.isWorking() ? "working" : "idle",
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
+  }
+
+  private sealLabel(label: ThreadInfo["label"]): Promise<EncBlob> {
+    return sealJson(this.key, label, aad("label", this.init.threadId));
   }
 
   // Tell the DO about this thread (register on connect, refresh on label/state change). The DO
@@ -766,6 +836,7 @@ export class VoiceDaemon {
     const next = await computeLabel(cwd, this.init.surface, this.init.threadId);
     if (sameLabel(next, this.label)) return;
     this.label = next;
+    this.sealedLabel = await this.sealLabel(next); // reseal so the next register carries the new label
     if (this.ws?.readyState === WebSocket.OPEN) this.registerThread();
   }
 
@@ -786,8 +857,16 @@ export class VoiceDaemon {
   }
 
   private sendToBrowser(event: DaemonToBrowserEvent): void {
-    // Tag every outbound event with this daemon's threadId so the phone/DO attribute it correctly.
-    this.send({ channel: "browser", threadId: this.init.threadId, event });
+    // Seal the event end-to-end (the worker relays only ciphertext), tagged with this daemon's threadId
+    // so the phone/DO attribute it correctly. Chained so concurrent sends keep their order — a later
+    // history snapshot must never overtake an earlier one on the wire.
+    const threadId = this.init.threadId;
+    this.sealChain = this.sealChain
+      .then(async () => {
+        const enc = await sealJson(this.key, event, aad("browser", threadId));
+        this.send({ channel: "browser", threadId, enc });
+      })
+      .catch((error) => console.error(`[e2e] failed to seal an outbound event: ${errText(error)}`));
   }
 
   private send(envelope: BridgeEnvelope): void {
@@ -837,4 +916,8 @@ function sameLabel(a: ThreadInfo["label"], b: ThreadInfo["label"]): boolean {
 // unbounded TTS calls. Real replies pass untouched.
 function capForSpeech(text: string): string {
   return text.length > MAX_SPEECH_CHARS ? `${text.slice(0, MAX_SPEECH_CHARS)}…` : text;
+}
+
+function errText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

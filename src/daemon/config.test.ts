@@ -2,23 +2,36 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadOrCreateSession, resolveConfig, threadRuntimePath, toBrowserUrl, toWebSocketUrl } from "./config.js";
+import {
+  deriveRoutingId,
+  loadOrCreateSession,
+  resolveConfig,
+  threadRuntimePath,
+  toBrowserUrl,
+  toWebSocketUrl
+} from "./config.js";
 
 describe("voice remote URL helpers", () => {
-  it("creates browser session URLs from the single secret", () => {
-    expect(toBrowserUrl("https://voice.example.com/base", "secret")).toBe("https://voice.example.com/s/secret");
+  it("puts the secret in the fragment of the browser URL (never the path the worker sees)", () => {
+    expect(toBrowserUrl("https://voice.example.com/base", "secret")).toBe("https://voice.example.com/s#secret");
   });
 
-  it("creates daemon websocket URLs from https bridge URLs", () => {
-    expect(toWebSocketUrl("https://voice.example.com", "secret", "daemon")).toBe(
-      "wss://voice.example.com/ws/secret?role=daemon"
+  it("creates daemon websocket URLs routed by routingId from https bridge URLs", () => {
+    expect(toWebSocketUrl("https://voice.example.com", "rid", "daemon")).toBe(
+      "wss://voice.example.com/ws/rid?role=daemon"
     );
   });
 
   it("creates local websocket URLs from http bridge URLs", () => {
-    expect(toWebSocketUrl("http://localhost:8787", "secret", "browser")).toBe(
-      "ws://localhost:8787/ws/secret?role=browser"
-    );
+    expect(toWebSocketUrl("http://localhost:8787", "rid", "browser")).toBe("ws://localhost:8787/ws/rid?role=browser");
+  });
+});
+
+describe("deriveRoutingId", () => {
+  it("is sha256(secret) as lowercase hex — must match the browser's WebCrypto derivation", () => {
+    // sha256("secret") — pinned so a divergence from the web client's derivation is caught here.
+    expect(deriveRoutingId("secret")).toBe("2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b");
+    expect(deriveRoutingId("secret")).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
@@ -111,6 +124,10 @@ describe("loadOrCreateSession (one machine secret, shared by every pane)", () =>
     // sessionId is the short, non-secret hash label — distinct from the secret itself.
     expect(first.secret).not.toBe(first.sessionId);
     expect(first.sessionId.length).toBeGreaterThan(0);
+    // daemonKey is a second, independent capability secret — stable across calls and not the secret.
+    expect(first.daemonKey).toBe(second.daemonKey);
+    expect(first.daemonKey.length).toBeGreaterThan(0);
+    expect(first.daemonKey).not.toBe(first.secret);
   });
 
   it("writes session.json with 0600 permissions (it holds the capability secret)", () => {
@@ -123,6 +140,7 @@ describe("loadOrCreateSession (one machine secret, shared by every pane)", () =>
     const session = loadOrCreateSession();
     const onDisk = JSON.parse(readFileSync(join(dir, "session.json"), "utf8"));
     expect(onDisk.secret).toBe(session.secret);
+    expect(onDisk.daemonKey).toBe(session.daemonKey);
     expect(onDisk.sessionId).toBe(session.sessionId);
     expect(typeof onDisk.createdAt).toBe("number");
   });

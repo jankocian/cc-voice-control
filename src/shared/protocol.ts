@@ -1,5 +1,8 @@
-// Wire protocol shared by the daemon and the phone page. Only the events actually
-// exchanged are defined here — the bridge relays these envelopes verbatim.
+// Wire protocol shared by the daemon and the phone page. The bridge relays these envelopes verbatim and
+// CANNOT read their content: conversational events (browser/daemon channels) cross the wire as a sealed
+// `enc` blob, and the thread label is sealed too — the worker stores/forwards both opaquely. See e2e.ts.
+
+import type { EncBlob } from "./e2e.js";
 
 // Non-secret, stable per pane: the cmux surface UUID (CMUX_SURFACE_ID), or a per-process
 // uuid when launched outside cmux. Safe on the wire and in the DO — it is NOT the session
@@ -81,7 +84,10 @@ export type DaemonToBrowserEvent =
   | { type: "error"; requestId?: string; message: string };
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.
-export type BridgeControlEvent = { type: "terminate" };
+//  - `terminate`: end this thread (the DO expires the session on the last one).
+//  - `open_claim_window`: open a short device-pairing window so a phone can claim a device cookie
+//    (sent on the daemon's first connect and on /voice-control:pair). See worker/src/claim.ts.
+export type BridgeControlEvent = { type: "terminate" } | { type: "open_claim_window" };
 
 export type BridgeClientRole = "daemon" | "browser";
 
@@ -120,29 +126,44 @@ export type ThreadInfo = {
 // `lastSeenAt` = epoch-ms its socket last closed (null = currently connected / never gone).
 export type RosterThread = ThreadInfo & { connected: boolean; lastSeenAt: number | null };
 
+// ---- app vs wire (the label is sealed on the wire) -----------------------------------
+//
+// `ThreadInfo`/`RosterThread`/the registry+roster events above are the DECRYPTED (app) shapes the daemon
+// computes and the phone displays. On the wire — and in the worker's storage — the label is a sealed
+// `EncBlob` the worker can't read; the `Wire*` shapes below are what actually cross the socket. The
+// daemon seals its label before sending; the phone opens it back into a `ThreadLabel` before display.
+export type WireThreadInfo = Omit<ThreadInfo, "label"> & { label: EncBlob };
+export type WireRosterThread = Omit<RosterThread, "label"> & { label: EncBlob };
+
 // Daemon → DO (registry channel): register on connect, refresh as the label/state changes.
 export type ThreadRegister = { type: "thread_register"; info: ThreadInfo };
+export type WireThreadRegister = { type: "thread_register"; info: WireThreadInfo };
 
 // DO → browser (roster channel): full roster on browser connect; deltas as threads come/go.
 export type ThreadRoster = { type: "thread_roster"; threads: RosterThread[] };
 export type ThreadJoined = { type: "thread_joined"; thread: RosterThread };
 export type ThreadLeft = { type: "thread_left"; threadId: ThreadId; lastSeenAt: number };
+export type WireThreadRoster = { type: "thread_roster"; threads: WireRosterThread[] };
+export type WireThreadJoined = { type: "thread_joined"; thread: WireRosterThread };
 
 export type RegistryEvent = ThreadRegister;
 export type RosterEvent = ThreadRoster | ThreadJoined | ThreadLeft;
+export type WireRegistryEvent = WireThreadRegister;
+export type WireRosterEvent = WireThreadRoster | WireThreadJoined | ThreadLeft;
 
-// The bridge relays these envelopes. `threadId` is the routing key: browser→daemon targets
-// the one matching daemon socket; daemon→browser is tagged with the daemon's own threadId so
-// the phone files each event under the right thread. Existing event shapes are unchanged —
-// only the envelope grew a tag.
+// The bridge relays these envelopes. `threadId` is the routing key: browser→daemon targets the one
+// matching daemon socket; daemon→browser is tagged with the daemon's own threadId so the phone files
+// each event under the right thread. Conversational content (browser/daemon channels) is a sealed
+// `enc` blob — the worker routes by channel/threadId without ever reading it (see e2e.ts). Control is
+// plaintext (no content); registry/roster are structural with the label sealed inside.
 export type BridgeEnvelope =
-  // browser → ONE thread's daemon (`threadId` = the selected thread).
-  | { channel: "daemon"; threadId: ThreadId; event: BrowserToDaemonEvent }
-  // a thread's daemon → browser(s), tagged with that daemon's threadId.
-  | { channel: "browser"; threadId: ThreadId; event: DaemonToBrowserEvent }
-  // daemon → DO, unchanged (terminate this thread; the DO expires the session on the last).
+  // browser → ONE thread's daemon (`threadId` = the selected thread); sealed BrowserToDaemonEvent.
+  | { channel: "daemon"; threadId: ThreadId; enc: EncBlob }
+  // a thread's daemon → browser(s), tagged with that daemon's threadId; sealed DaemonToBrowserEvent.
+  | { channel: "browser"; threadId: ThreadId; enc: EncBlob }
+  // daemon → DO (terminate this thread / open a pairing window). No content; the DO acts on it.
   | { channel: "control"; event: BridgeControlEvent }
-  // daemon → DO registry (register/refresh this thread's label + state).
-  | { channel: "registry"; event: RegistryEvent }
-  // DO → browser(s): roster snapshot + join/leave deltas.
-  | { channel: "roster"; event: RosterEvent };
+  // daemon → DO registry (register/refresh this thread's sealed label + plaintext state).
+  | { channel: "registry"; event: WireRegistryEvent }
+  // DO → browser(s): roster snapshot + join/leave deltas (sealed labels).
+  | { channel: "roster"; event: WireRosterEvent };

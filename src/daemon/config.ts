@@ -209,11 +209,17 @@ export function writeSetupNeededRuntime(setup: ConfigSetupNeeded): void {
  * Replaces the per-activation randomBytes(16) that gave each pane a different URL.
  *
  *   $CLAUDE_PLUGIN_DATA/session.json  (mode 0600, like config.json)
- *   { "secret": "<base64url 128-bit>", "sessionId": "<sha256(secret)[:12]>", "createdAt": <ms> }
+ *   { "secret": "...", "daemonKey": "...", "sessionId": "...", "createdAt": <ms> }
+ *
+ * `daemonKey` is a SECOND, independent secret that authenticates the daemon ROLE to the bridge. It is
+ * never put in any URL/QR and is not derivable from `secret`, so a leaked phone URL (which carries only
+ * `secret`, in the fragment) cannot impersonate a daemon to re-open a pairing window or terminate the
+ * session. The bridge pins it to the session on the first daemon connect (trust-on-first-use).
  */
-export type MachineSession = { secret: string; sessionId: string };
+export type MachineSession = { secret: string; sessionId: string; daemonKey: string };
 
 const SESSION_SECRET_BYTES = 16; // 128 bits — uncrackable by online guessing; keeps the QR small.
+const DAEMON_KEY_BYTES = 32; // daemon-role auth secret (never leaves the machine except to the bridge).
 const SESSION_ID_CHARS = 12; // short, non-secret label derived from the secret's hash.
 
 function sessionFilePath(): string {
@@ -222,6 +228,7 @@ function sessionFilePath(): string {
 
 const SessionFileSchema = z.object({
   secret: z.string().min(1),
+  daemonKey: z.string().min(1),
   sessionId: z.string().min(1),
   createdAt: z.number()
 });
@@ -245,7 +252,8 @@ export function loadOrCreateSession(): MachineSession {
 
   mkdirSync(stateDir(), { recursive: true });
   const secret = randomBytes(SESSION_SECRET_BYTES).toString("base64url");
-  const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+  const daemonKey = randomBytes(DAEMON_KEY_BYTES).toString("base64url");
+  const session = { secret, daemonKey, sessionId: deriveSessionId(secret), createdAt: Date.now() };
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 0o600 });
   // linkSync is atomic AND exclusive (fails if the target exists), unlike rename which overwrites.
@@ -263,20 +271,34 @@ export function loadOrCreateSession(): MachineSession {
     }
   }
   const settled = readSessionFile(path) ?? session;
-  return { secret: settled.secret, sessionId: settled.sessionId };
+  return { secret: settled.secret, sessionId: settled.sessionId, daemonKey: settled.daemonKey };
 }
 
 function readSessionFile(path: string): MachineSession | undefined {
   try {
     const parsed = SessionFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-    return { secret: parsed.secret, sessionId: parsed.sessionId };
+    return { secret: parsed.secret, sessionId: parsed.sessionId, daemonKey: parsed.daemonKey };
   } catch {
     return undefined; // absent or malformed → caller mints.
   }
 }
 
-export function toWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole, threadId?: string): string {
-  return toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId);
+// The session's routing id = sha256(secret) (hex). One-way derivative of the secret: it routes the
+// session (the worker maps it to a Durable Object) but reveals nothing about the secret, so it is the
+// only session identifier ever sent to the worker. The browser derives the same value from the secret
+// it reads out of the URL fragment (see web/src/lib/session.ts), so both ends reach the same DO without
+// the worker ever seeing the secret. Must match the browser's derivation exactly (sha256 → lowercase hex).
+export function deriveRoutingId(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+export function toWebSocketUrl(
+  bridgeUrl: string,
+  routingId: string,
+  role: BridgeClientRole,
+  threadId?: string
+): string {
+  return toBridgeWebSocketUrl(bridgeUrl, routingId, role, threadId);
 }
 
 export function toBrowserUrl(bridgeUrl: string, secret: string): string {

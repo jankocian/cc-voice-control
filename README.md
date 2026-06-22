@@ -76,17 +76,28 @@ daemon  ── ③ OpenAI TTS ──►  bridge ──►  phone speaks the repl
 
 This plugin is small on purpose so you can audit it. The trust boundaries:
 
-- **The bridge (`worker/`) is a dumb relay.** It authenticates a session by a hashed
-  token, relays WebSocket messages between the phone and the daemon, and stores
-  nothing else. It never sees your OpenAI key or your transcripts in plaintext
-  beyond passing the envelope through. See `worker/src/index.ts`.
+- **The bridge (`worker/`) can't read your content.** Conversational messages (prompts,
+  replies, transcripts, audio) and the thread label cross the bridge **end-to-end encrypted**:
+  the phone and the daemon each derive an AES-GCM key from the session secret (HKDF), and the
+  worker only ever relays ciphertext plus routing metadata (which thread, message type, timing).
+  The secret never reaches the worker — it rides in the URL **fragment** (`/s#<secret>`), which
+  browsers don't send to a server, and the worker routes by `routingId = sha256(secret)`. So even
+  a compromised bridge can't read prompts, replies, repo/branch labels, or audio. See
+  `src/shared/e2e.ts` and `worker/src/voice-session-do.ts`.
+- **A leaked link can't be used to join later.** Connecting a device needs a short, user-opened
+  **pairing window** (`/voice-control:start`, or `/voice-control:pair` for an extra device). During
+  it the phone mints a per-device `HttpOnly` cookie; afterwards the link alone is dead, so a stolen
+  screenshot / URL / chat history grants no access. The daemon role is authenticated by a separate
+  `daemonKey` (in `session.json`, never in any URL), so a leaked link can't impersonate a daemon to
+  re-open the window. Revoke-on-exit still wipes the session shortly after the last pane disconnects.
+  See `worker/src/claim.ts`.
 - **The OpenAI key stays local.** Only the daemon reads the config file and calls
   `api.openai.com` (STT + TTS). The key is never sent to the bridge or the phone.
   See `src/daemon/openai.ts` — those are the only outbound calls the daemon makes
   besides the bridge WebSocket.
 - **The phone page loads no third-party code.** Audio is captured with `MediaRecorder`,
-  replies play from in-memory `blob:` URLs, and the page CSP is `'self'`-only with a
-  per-request nonce (`default-src 'self'; connect-src 'self'; …`). See `worker/src/index.ts`.
+  replies play from in-memory `blob:` URLs, and the page CSP is `'self'`-only
+  (`default-src 'self'; connect-src 'self'; …`). See `worker/src/session-assets.ts`.
 - **Injection is plain cmux CLI** (`cmux send` / `send-key`) into the pane the daemon
   runs in. No system config is modified. See `src/daemon/cmux.ts`.
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
+import { SessionExpired } from "./components/SessionExpired";
 import { StepsToggle } from "./components/StepsToggle";
 import { ThreadPager } from "./components/ThreadPager";
 import { type ThreadRow, ThreadSwitcher } from "./components/ThreadSwitcher";
@@ -14,15 +15,20 @@ import { useThreads } from "./hooks/useThreads";
 import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
 import type { RosterEvent, ThreadId } from "./lib/protocol";
-import type { SessionCredentials } from "./lib/session";
+import type { Session } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
 
 // How long after tapping "+" we keep following the spawn (focus the next new thread). Long enough for a
 // fresh pane's daemon to launch + register; after this an unrelated join won't steal focus.
 const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
 
-export function App({ credentials }: { credentials: SessionCredentials }) {
+export function App({ session }: { session: Session }) {
   const { flash, show: showFlash } = useFlash();
+
+  // Set when the pairing window has closed and this device has no valid cookie — we then show the
+  // re-pair screen instead of the live UI (useBridge has already stopped reconnecting).
+  const [expired, setExpired] = useState(false);
+  const onExpired = useCallback(() => setExpired(true), []);
 
   const threads = useThreads();
   const { activeThreadId } = threads;
@@ -87,7 +93,13 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [threads]
   );
 
-  const bridge = useBridge({ secret: credentials.secret, onEvent: handleContentEvent, onRoster });
+  const bridge = useBridge({
+    routingId: session.routingId,
+    key: session.key,
+    onEvent: handleContentEvent,
+    onRoster,
+    onExpired
+  });
   const { connected, bridgeReady, sendDaemon } = bridge;
   sendDaemonRef.current = sendDaemon;
 
@@ -225,6 +237,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     obs.observe(node);
     return () => obs.disconnect();
   }, []);
+
+  if (expired) return <SessionExpired />;
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">

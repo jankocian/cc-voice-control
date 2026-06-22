@@ -2,7 +2,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { InvalidSession } from "./components/InvalidSession";
-import { readSessionCredentials } from "./lib/session";
+import { deriveKey } from "./lib/e2e";
+import { deriveRoutingId, readSessionCredentials } from "./lib/session";
 import "./index.css";
 
 const root = document.getElementById("app");
@@ -35,8 +36,33 @@ if (root) {
     });
   } else {
     const credentials = readSessionCredentials();
-    createRoot(root).render(
-      <StrictMode>{credentials ? <App credentials={credentials} /> : <InvalidSession />}</StrictMode>
-    );
+    if (!credentials) {
+      createRoot(root).render(
+        <StrictMode>
+          <InvalidSession />
+        </StrictMode>
+      );
+    } else {
+      // Derive the routing id + the end-to-end key from the fragment secret (both ~instant) before
+      // mounting, so the app has everything it needs to claim a device cookie, open the socket, and
+      // seal/open content. The worker never sees the secret or the key. If derivation fails (e.g.
+      // crypto.subtle is unavailable on an insecure-context deploy), fall back to InvalidSession rather
+      // than a blank page.
+      void Promise.all([deriveRoutingId(credentials.secret), deriveKey(credentials.secret)])
+        .then(([routingId, key]) => {
+          createRoot(root).render(
+            <StrictMode>
+              <App session={{ routingId, key }} />
+            </StrictMode>
+          );
+        })
+        .catch(() => {
+          createRoot(root).render(
+            <StrictMode>
+              <InvalidSession />
+            </StrictMode>
+          );
+        });
+    }
   }
 }
