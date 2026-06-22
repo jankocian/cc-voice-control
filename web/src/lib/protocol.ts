@@ -12,6 +12,7 @@ export type {
   RosterThread,
   SessionRuntimeState,
   SessionState,
+  SpeakMode,
   ThreadId,
   ThreadInfo,
   ThreadJoined,

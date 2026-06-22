@@ -2,18 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BottomSwitcher, type ThreadRow } from "./components/BottomSwitcher";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
-import { StepsToggle } from "./components/StepsToggle";
+import { SettingsMenu } from "./components/SettingsMenu";
 import { ThreadPager } from "./components/ThreadPager";
 import { TopBar } from "./components/TopBar";
 import { useBridge } from "./hooks/useBridge";
 import { useElapsed, useNow } from "./hooks/useElapsed";
 import { useFlash } from "./hooks/useFlash";
 import { usePlayback } from "./hooks/usePlayback";
+import { useTheme } from "./hooks/useTheme";
 import { useThreadMessages } from "./hooks/useThreadMessages";
 import { useThreads } from "./hooks/useThreads";
 import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
-import type { RosterEvent, ThreadId } from "./lib/protocol";
+import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
 import type { SessionCredentials } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
 
@@ -101,29 +102,31 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     if (!connected) setTranscribingThreadId(null);
   }, [connected, setTranscribingThreadId]);
 
-  // "Read every step": persisted per phone. Tell the active thread's daemon the current mode — re-sent when
-  // it (re)connects or the active thread changes, since the daemon defaults to off on a fresh process.
-  const [speakSteps, setSpeakSteps] = useState<boolean>(() => {
+  // Autoplay mode (off / final / all), persisted per phone. Tell the active thread's daemon the current
+  // mode — re-sent when it (re)connects or the active thread changes, since the daemon defaults to "final"
+  // on a fresh process.
+  const [speakMode, setSpeakMode] = useState<SpeakMode>(() => {
     try {
-      return localStorage.getItem("vc-speak-steps") === "1";
+      const saved = localStorage.getItem("vc-speak-mode");
+      return saved === "off" || saved === "final" || saved === "all" ? saved : "final";
     } catch {
-      return false;
+      return "final";
     }
   });
-  const toggleSteps = useCallback(() => {
-    setSpeakSteps((on) => {
-      const next = !on;
-      try {
-        localStorage.setItem("vc-speak-steps", next ? "1" : "0");
-      } catch {
-        /* private mode — in-memory only */
-      }
-      return next;
-    });
+  const changeSpeakMode = useCallback((mode: SpeakMode) => {
+    setSpeakMode(mode);
+    try {
+      localStorage.setItem("vc-speak-mode", mode);
+    } catch {
+      /* private mode — in-memory only */
+    }
   }, []);
   useEffect(() => {
-    if (activeThreadId && activeConnected) sendDaemon(activeThreadId, { type: "set_speak_steps", on: speakSteps });
-  }, [speakSteps, activeThreadId, activeConnected, sendDaemon]);
+    if (activeThreadId && activeConnected) sendDaemon(activeThreadId, { type: "set_speak_mode", mode: speakMode });
+  }, [speakMode, activeThreadId, activeConnected, sendDaemon]);
+
+  // Theme (system / dark / light), persisted in localStorage + applied to <html>; nested in the settings menu.
+  const { theme, setTheme } = useTheme();
 
   // Focus a thread (pill / dropdown / swipe settle). Stop the previous thread's audio first so it
   // doesn't keep playing under the new view — the shared player is a singleton across threads.
@@ -238,7 +241,12 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
       <TopBar>
-        <StepsToggle on={speakSteps} onToggle={toggleSteps} />
+        <SettingsMenu
+          speakMode={speakMode}
+          onSpeakModeChange={changeSpeakMode}
+          theme={theme}
+          onThemeChange={setTheme}
+        />
       </TopBar>
 
       <div className="relative min-h-0 flex-1">

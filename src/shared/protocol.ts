@@ -21,6 +21,9 @@ export type SessionState = {
 // the running turn (Esc) and run immediately.
 export type InjectMode = "queue" | "interrupt";
 
+// What the daemon auto-plays on a voice turn: nothing, just the final reply, or every step too.
+export type SpeakMode = "off" | "final" | "all";
+
 // One conversational turn projected from Claude Code's transcript (see transcript-projection.ts). The
 // transcript is the source of truth, so a turn IS a native record: `requestId` is its native `uuid`
 // (identity + dedup key) and `timestamp` is its native record time (order key) — both stable across
@@ -39,7 +42,7 @@ export type HistoryTurn = {
   hasAudio: boolean;
   // A "step": assistant narration written before a tool call (e.g. "I'll read the file first"), vs a
   // user turn or a FINAL reply. The phone shows steps dimmer and never auto-plays them unless the user
-  // opted into "read every step" (set_speak_steps). Absent/false for user turns and final replies.
+  // opted into "read every step" (set_speak_mode "all"). Absent/false for user turns and final replies.
   interim?: boolean;
 };
 
@@ -54,10 +57,10 @@ export type BrowserToDaemonEvent =
   // Fetch the audio for a specific reply/step on demand (tap-to-play on a row whose bytes aren't cached
   // locally). The daemon synthesizes it on demand if needed and answers with a `tts_audio` carrying `replay`.
   | { type: "get_audio"; requestId: string }
-  // Set whether the daemon also speaks Claude's interim STEPS aloud (the phone's "read every step" toggle).
-  // Off by default — only final replies of voice turns auto-play. Re-sent on connect so the daemon matches
-  // the phone's saved preference. `on=false` returns to final-only.
-  | { type: "set_speak_steps"; on: boolean }
+  // The phone's autoplay preference for voice turns: "off" speaks nothing (tap-to-play only), "final"
+  // speaks just the final reply (default), "all" also speaks each interim step as it appears. Re-sent on
+  // connect so the daemon matches the phone's saved preference.
+  | { type: "set_speak_mode"; mode: SpeakMode }
   // Open a NEW cmux workspace running Claude + /voice-control:start, so it joins this same
   // session as a new thread (same QR). Routed to the ACTIVE thread's daemon, which has the
   // cmux trust to spawn for its machine. `cwd` defaults to the spawning daemon's cwd.

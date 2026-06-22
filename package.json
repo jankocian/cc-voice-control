@@ -1,6 +1,6 @@
 {
   "name": "cc-voice-control",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Voice remote for an interactive Claude Code session: phone push-to-talk, a Cloudflare bridge, and a local daemon that types transcripts into your cmux Claude pane and speaks replies back via OpenAI.",
   "type": "module",
   "scripts": {
