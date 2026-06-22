@@ -25,7 +25,12 @@ export function StatusIndicator({
   // Ready/connected gets a steady "all good" badge too — not just transient flashes
   // and attention states — so the green-wave hero always has a matching readout.
   const ready = key === "ready";
-  const message = flash ?? (attention ? title : ready ? `${title} · ${detail}` : null);
+  // The in-progress states (transcribing the clip → the agent working) surface their
+  // title too, so "loading" is never silent. Without it those states showed only a
+  // bare equalizer/timer that read as idle — the turn looked done while Claude was just
+  // starting. Recording/speaking stay text-free (the mic UI / playing audio is obvious).
+  const busy = dataState === "sending" || dataState === "working";
+  const message = flash ?? (attention || busy ? title : ready ? `${title} · ${detail}` : null);
   // Amber when there's an action for the user (daemon down / not listening); neutral
   // white for transient flashes and the steady ready badge.
   const alert = key === "waiting" || key === "not-listening";

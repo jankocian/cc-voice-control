@@ -14,6 +14,7 @@ import type {
   ThreadId,
   ThreadInfo
 } from "../shared/protocol.js";
+import { startBridgeHeartbeat } from "./bridge-heartbeat.js";
 import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
 import {
   loadOrCreateSession,
@@ -45,6 +46,10 @@ type PendingVoice = { id: string; text: string; ts: number; opened?: boolean; us
 
 // Reconnect backoff for transient bridge drops (a terminal 1008 close is handled separately).
 const RECONNECT_DELAY_MS = 1500;
+// Bridge keepalive interval. Pinging well under any network/NAT idle timeout keeps the socket warm and
+// catches a half-open drop within ~2 ticks (see bridge-heartbeat.ts). Cheap: Cloudflare auto-pongs
+// without waking the hibernated Durable Object.
+const BRIDGE_PING_INTERVAL_MS = 25_000;
 // How often the daemon re-resolves its cmux pane so `listening` self-heals.
 const CMUX_HEALTH_INTERVAL_MS = 5000;
 // Safety ceiling on speech length (synthesizeSpeech chunks past the per-call TTS limit) so a runaway
@@ -109,6 +114,8 @@ export class VoiceDaemon {
   private cmuxReachable = true;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private healthTimer?: ReturnType<typeof setInterval>;
+  // Stops the current bridge socket's ping/pong keepalive; re-armed on every (re)connect.
+  private stopHeartbeat?: () => void;
   private stopped = false;
 
   // The voice injection queue + idle-gate (inject one spoken prompt at a time while Claude is idle) and
@@ -329,6 +336,8 @@ export class VoiceDaemon {
       this.registerThread();
       this.emitStatus();
       void this.refreshLabel();
+      // Keep this socket alive + detect a half-open drop (zombie OPEN that never fires close).
+      this.stopHeartbeat = startBridgeHeartbeat(ws, BRIDGE_PING_INTERVAL_MS);
     });
     ws.on("message", (raw) => {
       let envelope: { channel?: string; threadId?: ThreadId; event?: BrowserToDaemonEvent };
@@ -344,6 +353,8 @@ export class VoiceDaemon {
       }
     });
     ws.on("close", (code) => {
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = undefined;
       if (this.stopped || this.ws !== ws) return;
       this.ws = undefined;
       // 1008 = the bridge ended the session. Reconnecting would just be rejected, so
@@ -737,6 +748,7 @@ export class VoiceDaemon {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.healthTimer) clearInterval(this.healthTimer);
+    this.stopHeartbeat?.();
     // Tell the bridge to drop the session so a leaked URL can't reconnect. Best-effort:
     // if the socket is already gone the session is inert anyway (no daemon to relay to).
     this.send({ channel: "control", event: { type: "terminate" } });
