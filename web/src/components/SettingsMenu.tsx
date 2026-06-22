@@ -10,9 +10,9 @@ type Option<T extends string> = { value: T; label: string; aria: string };
 // Autoplay = whether a reply plays by itself. Replies are ALWAYS synthesized; "Off" just means tap to hear
 // (the audio is ready either way) — it never silences synthesis. "Everything" also auto-reads each step.
 const SPEAK_OPTIONS: Option<SpeakMode>[] = [
-  { value: "off", label: "Off", aria: "Don't play replies automatically — tap a reply to hear it" },
   { value: "final", label: "Final reply", aria: "Auto-play the final reply" },
-  { value: "all", label: "Everything", aria: "Auto-play the final reply and every step" }
+  { value: "all", label: "Everything", aria: "Auto-play the final reply and every step" },
+  { value: "off", label: "Off", aria: "Don't play replies automatically — tap a reply to hear it" }
 ];
 
 const THEME_OPTIONS: Option<ThemeMode>[] = [
@@ -21,16 +21,16 @@ const THEME_OPTIONS: Option<ThemeMode>[] = [
   { value: "light", label: "Light", aria: "Light theme" }
 ];
 
-// Auto-follow: when ON, a fresh reply on a background thread auto-switches to it (and plays on land).
-const AUTO_FOLLOW_OPTIONS: Option<"off" | "on">[] = [
-  { value: "off", label: "Off", aria: "Stay on the current thread when other threads reply" },
-  { value: "on", label: "On", aria: "Auto-switch to new messages across threads" }
-];
-
 // Auto-respond (hands-free): when ON, the mic opens automatically after a reply finishes playing.
 const AUTO_RESPOND_OPTIONS: Option<"off" | "on">[] = [
-  { value: "off", label: "Off", aria: "Don't open the mic automatically after a reply" },
-  { value: "on", label: "On", aria: "Open the mic automatically after a reply finishes playing" }
+  { value: "on", label: "On", aria: "Open the mic automatically after a reply finishes playing" },
+  { value: "off", label: "Off", aria: "Don't open the mic automatically after a reply" }
+];
+
+// Auto-follow: when ON, a fresh reply on a background thread auto-switches to it (and plays on land).
+const AUTO_FOLLOW_OPTIONS: Option<"off" | "on">[] = [
+  { value: "on", label: "On", aria: "Auto-switch to new messages across threads" },
+  { value: "off", label: "Off", aria: "Stay on the current thread when other threads reply" }
 ];
 
 // A pill-shaped segmented control (one Base UI radio group). Picking a segment does NOT close the menu, so
@@ -77,13 +77,11 @@ function Field<T extends string>(props: {
   value: T;
   onValueChange: (value: T) => void;
   options: Option<T>[];
-  hint?: string;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-xs font-semibold text-ink-soft">{props.label}</span>
       <Segmented value={props.value} onValueChange={props.onValueChange} options={props.options} />
-      {props.hint && <span className="text-[11px] leading-tight text-ink-faint">{props.hint}</span>}
     </div>
   );
 }
@@ -120,17 +118,16 @@ export function SettingsMenu({
           <Menu.Popup className="flex flex-col gap-3 rounded-bubble border border-hairline bg-surface p-3 text-ink shadow-lift outline-none">
             <Field label="Autoplay" value={speakMode} onValueChange={onSpeakModeChange} options={SPEAK_OPTIONS} />
             <Field
-              label="Auto-follow"
-              value={autoFollow ? "on" : "off"}
-              onValueChange={(v) => onAutoFollowChange(v === "on")}
-              options={AUTO_FOLLOW_OPTIONS}
-            />
-            <Field
               label="Auto-respond"
               value={autoRespond ? "on" : "off"}
               onValueChange={(v) => onAutoRespondChange(v === "on")}
               options={AUTO_RESPOND_OPTIONS}
-              hint="Opens the mic right after any reply finishes — listen, speak, hit stop."
+            />
+            <Field
+              label="Auto-follow"
+              value={autoFollow ? "on" : "off"}
+              onValueChange={(v) => onAutoFollowChange(v === "on")}
+              options={AUTO_FOLLOW_OPTIONS}
             />
             <Field label="Theme" value={theme} onValueChange={onThemeChange} options={THEME_OPTIONS} />
           </Menu.Popup>
