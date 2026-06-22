@@ -20128,8 +20128,7 @@ class VoiceDaemon {
         continue;
       this.pending.splice(i, 1);
       this.remember(this.spoken, reply.uuid, SPOKEN_UUID_CAP);
-      if (this.speakMode !== "off")
-        this.speak(reply.uuid, reply.text);
+      this.speak(reply.uuid, reply.text);
     }
   }
   findReply(turns, entry) {
