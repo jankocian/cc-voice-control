@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { pairReplies, projectTurns, type TranscriptRecord } from "./transcript-projection.js";
+import {
+  dropSessionAnnouncement,
+  type ProjectedTurn,
+  pairReplies,
+  projectTurns,
+  type TranscriptRecord
+} from "./transcript-projection.js";
 
 // Record shapes mirror real Claude Code transcript JSONL (verified against live sessions): top-level
 // type/uuid/timestamp/isSidechain/isMeta/promptSource + nested message{role,content,stop_reason}.
@@ -149,5 +155,45 @@ describe("pairReplies — voice TTS targeting", () => {
   it("returns no pairs when there is no reply yet", () => {
     const turns = projectTurns([user("u1", "2026-06-21T15:00:01.000Z", "hi", { promptSource: "typed" })]);
     expect(pairReplies(turns)).toEqual([]);
+  });
+});
+
+describe("dropSessionAnnouncement — hide the start-skill QR/URL reply", () => {
+  const SESSION_URL = "https://voice-control.nee.rs/s/SnSV7GD38MgW9TT1vsUV0Q";
+  const turn = (uuid: string, role: ProjectedTurn["role"], text: string): ProjectedTurn => ({
+    uuid,
+    timestamp: 0,
+    role,
+    text,
+    interim: false
+  });
+
+  it("drops the claude reply that embeds our own session URL, keeping everything else", () => {
+    const turns = [
+      turn("u1", "user", "howdy"),
+      turn(
+        "a1",
+        "claude",
+        `The voice remote is live. Scan this:\n\`\`\`\n[QR]\n\`\`\`\nTap/copy fallback: ${SESSION_URL}`
+      ),
+      turn("u2", "user", "do the thing"),
+      turn("a2", "claude", "On it.")
+    ];
+    expect(dropSessionAnnouncement(turns, SESSION_URL).map((t) => t.uuid)).toEqual(["u1", "u2", "a2"]);
+  });
+
+  it("never touches a real message that doesn't contain the URL (even reworded announcement copy needs it)", () => {
+    const turns = [turn("a1", "claude", "The walkie-talkie is live — scan the QR above.")];
+    expect(dropSessionAnnouncement(turns, SESSION_URL)).toEqual(turns);
+  });
+
+  it("never drops a user turn even if it quotes the URL", () => {
+    const turns = [turn("u1", "user", `open ${SESSION_URL}`)];
+    expect(dropSessionAnnouncement(turns, SESSION_URL)).toEqual(turns);
+  });
+
+  it("is a no-op without a session URL", () => {
+    const turns = [turn("a1", "claude", "anything")];
+    expect(dropSessionAnnouncement(turns, "")).toEqual(turns);
   });
 });

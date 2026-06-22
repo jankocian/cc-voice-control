@@ -107,6 +107,19 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
   return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
 }
 
+/**
+ * Drop the start-skill announcement (the "voice remote is live" QR + URL reply) from a projection. We key
+ * on the daemon's OWN session URL — a value the daemon minted and the skill always prints as the tap/copy
+ * fallback — never on the surrounding prose, so reworded copy still filters and a normal reply can't match
+ * (the URL carries the 128-bit session secret). Belt-and-suspenders against the QR being shown OR spoken;
+ * applied to every projection so it works for a brand-new session and one that's been running for hours.
+ * ponytail: substring match on the URL; if the skill ever stops printing the URL, also pass the secret.
+ */
+export function dropSessionAnnouncement(turns: ProjectedTurn[], sessionUrl: string): ProjectedTurn[] {
+  if (!sessionUrl) return turns;
+  return turns.filter((t) => !(t.role === "claude" && t.text.includes(sessionUrl)));
+}
+
 /** Pair every FINAL claude reply with the user prompt it answers (its nearest preceding user turn). The
  *  daemon uses this to decide voice TTS: speak a reply iff its prompt is one we injected. Interim steps are
  *  excluded — they're never the turn's "reply" and are only spoken under "read every step". Oldest-first. */

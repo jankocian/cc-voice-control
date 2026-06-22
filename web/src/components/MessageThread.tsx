@@ -51,7 +51,13 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
         const loaded = playback.loadedId === id;
 
         return (
-          <MessageBubble key={message.id} side="agent" body={message.body} time={message.time}>
+          <MessageBubble
+            key={message.id}
+            side="agent"
+            body={message.body}
+            time={message.time}
+            onActivate={playable && message.requestId ? () => playback.onPlay(message.requestId as string) : undefined}
+          >
             {playable && message.requestId && (
               <InlineAudioPlayer
                 playing={playback.playingId === message.requestId}

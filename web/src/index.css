@@ -120,6 +120,81 @@
 }
 
 /* ============================================================================
+   DARK THEME
+   The whole UI is token-driven, so flipping the palette here flips every component
+   — no per-component `dark:` classes. Warm and dim, same two accents; the soft bubble
+   fills become deep tints and the *-ink text on them goes light. The shadcn bridge +
+   shadow tokens below all read these vars, so they flip for free.
+
+   Applied two ways (the declarations are intentionally repeated — CSS can't share a
+   block across a media query and a class):
+     • OS prefers dark and the user hasn't explicitly chosen light → pre-paint, no JS,
+       no flash. The strict CSP (script-src 'self') rules out an inline no-flash script,
+       so this media query IS the no-flash path.
+     • user toggled dark (`.dark` on <html>, set by <ThemeToggle>) → explicit override.
+   Toggling `.light` forces light even under an OS-dark preference.
+   Unlayered, so these win over @theme's :root defaults.
+   ========================================================================= */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    color-scheme: dark;
+
+    --color-canvas: #181621;
+    --color-canvas-deep: #110f18;
+    --color-surface: #242131;
+    --color-hairline: #322e3f;
+
+    --color-ink: #f3f0ea;
+    --color-ink-soft: #b4afc1;
+    --color-ink-faint: #7b7690;
+
+    --color-coral: #fb7a45;
+    --color-coral-ink: #ffb38c;
+    --color-coral-soft: #3a2418;
+    --color-violet: #9d8df3;
+    --color-violet-ink: #cabffb;
+    --color-violet-soft: #29243f;
+
+    --color-success: #34d27c;
+    --color-danger: #ff5b50;
+    --color-warning: #f6b13f;
+
+    --shadow-card: 0 12px 32px -16px rgba(0, 0, 0, 0.6);
+    --shadow-soft: 0 2px 12px -6px rgba(0, 0, 0, 0.5);
+    --shadow-lift: 0 18px 44px -20px rgba(0, 0, 0, 0.7);
+    --shadow-mic: 0 14px 30px -12px rgba(251, 122, 69, 0.45);
+  }
+}
+:root.dark {
+  color-scheme: dark;
+
+  --color-canvas: #181621;
+  --color-canvas-deep: #110f18;
+  --color-surface: #242131;
+  --color-hairline: #322e3f;
+
+  --color-ink: #f3f0ea;
+  --color-ink-soft: #b4afc1;
+  --color-ink-faint: #7b7690;
+
+  --color-coral: #fb7a45;
+  --color-coral-ink: #ffb38c;
+  --color-coral-soft: #3a2418;
+  --color-violet: #9d8df3;
+  --color-violet-ink: #cabffb;
+  --color-violet-soft: #29243f;
+
+  --color-success: #34d27c;
+  --color-danger: #ff5b50;
+  --color-warning: #f6b13f;
+
+  --shadow-card: 0 12px 32px -16px rgba(0, 0, 0, 0.6);
+  --shadow-soft: 0 2px 12px -6px rgba(0, 0, 0, 0.5);
+  --shadow-lift: 0 18px 44px -20px rgba(0, 0, 0, 0.7);
+  --shadow-mic: 0 14px 30px -12px rgba(251, 122, 69, 0.45);
+}
+
+/* ============================================================================
    shadcn / Base UI semantic token bridge.
    Maps shadcn's contract onto our palette so any shadcn/Base-UI component
    (Button, Slider, etc.) inherits the warm light look automatically.

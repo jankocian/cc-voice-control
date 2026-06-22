@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BottomSwitcher, type ThreadRow } from "./components/BottomSwitcher";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
 import { StepsToggle } from "./components/StepsToggle";
 import { ThreadPager } from "./components/ThreadPager";
-import { type ThreadRow, ThreadSwitcher } from "./components/ThreadSwitcher";
 import { TopBar } from "./components/TopBar";
 import { useBridge } from "./hooks/useBridge";
 import { useElapsed, useNow } from "./hooks/useElapsed";
@@ -157,8 +157,9 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     return () => window.removeEventListener("pointerdown", onFirstTap);
   }, [unlock]);
 
-  // Reveal the condensed controls when the active page's hero (its sentinel) leaves the viewport.
-  // Re-runs when the active scroll root / sentinel change (i.e. when the active thread switches).
+  // Reveal the condensed controls once the active page's hero (its in-flow sentinel) scrolls above the
+  // top. The hero lives in the page's scroll flow now (no pinned overlay), so this is the only thing left
+  // to wire. Re-runs when the active scroll root / sentinel change (i.e. when the active thread switches).
   useEffect(() => {
     if (!scrollRoot || !heroSentinel) return;
     setCondensed(false);
@@ -211,68 +212,45 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     onSeek: playback.seekEntry
   };
 
-  // The shared hero is ONE instance (one mic/canvas/controls), pinned over the top of the pager and
-  // acting on the active thread. Each pager page reserves a spacer of its measured height so a thread's
-  // messages start below it and scroll up under it (preserving the scroll-away → condensed behaviour).
-  const heroRef = useRef<HTMLDivElement>(null);
-  const [heroHeight, setHeroHeight] = useState(0);
-  useEffect(() => {
-    const node = heroRef.current;
-    if (!node) return;
-    const measure = () => setHeroHeight(node.offsetHeight);
-    measure();
-    const obs = new ResizeObserver(measure);
-    obs.observe(node);
-    return () => obs.disconnect();
-  }, []);
+  // The hero is rendered IN THE FLOW at the top of each pager page (so it scrolls away like a normal
+  // header — never a pinned overlay covering the messages/scrollbar). Its status/controls always act on
+  // the active thread; only the on-screen page gets the live mic + canvas wired, so the visualizer paints
+  // once and a swipe still shows a hero on the incoming page.
+  const renderHero = (isActive: boolean) => (
+    <Hero
+      status={status}
+      elapsed={elapsed}
+      flash={flash}
+      recording={isActive && voice.recording}
+      visualizerActive={isActive && voice.visualizerActive}
+      canvasRef={isActive ? canvasRef : undefined}
+      speedLabel={playback.formattedRate}
+      onCycleSpeed={playback.cycleSpeed}
+      onMic={voice.onMic}
+      onSteer={voice.onSteer}
+      onInterrupt={voice.onInterrupt}
+      onStopRecording={voice.onStopRecording}
+      onCancel={voice.onCancel}
+      onStopTask={voice.onStopTask}
+    />
+  );
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
       <TopBar>
-        <div className="flex items-center gap-2">
-          <StepsToggle on={speakSteps} onToggle={toggleSteps} />
-          <ThreadSwitcher
-            rows={switcherRows}
-            activeThreadId={activeThreadId}
-            onSelect={switchThread}
-            onSpawn={voice.onSpawn}
-          />
-        </div>
+        <StepsToggle on={speakSteps} onToggle={toggleSteps} />
       </TopBar>
 
       <div className="relative min-h-0 flex-1">
         <ThreadPager
           threads={pagerThreads}
           activeThreadId={activeThreadId}
-          heroHeight={heroHeight}
+          renderHero={renderHero}
           playback={threadPlayback}
           onActivate={switchThread}
           activeScrollRootRef={setScrollRoot}
           activeSentinelRef={setHeroSentinel}
         />
-
-        {/* The single shared hero, pinned over the top of the pager so it sits on whichever thread is
-            active. One mic/canvas/control cluster; its status is the active thread's. */}
-        <div ref={heroRef} className="pointer-events-none absolute inset-x-0 top-0 z-10">
-          <div className="pointer-events-auto">
-            <Hero
-              status={status}
-              elapsed={elapsed}
-              flash={flash}
-              recording={voice.recording}
-              visualizerActive={voice.visualizerActive}
-              canvasRef={canvasRef}
-              speedLabel={playback.formattedRate}
-              onCycleSpeed={playback.cycleSpeed}
-              onMic={voice.onMic}
-              onSteer={voice.onSteer}
-              onInterrupt={voice.onInterrupt}
-              onStopRecording={voice.onStopRecording}
-              onCancel={voice.onCancel}
-              onStopTask={voice.onStopTask}
-            />
-          </div>
-        </div>
 
         {/* Condensed, sticky controls — slides in once the active page's hero scrolls away. */}
         <MiniControls
@@ -287,6 +265,14 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           onStopRecording={voice.onStopRecording}
           onCancel={voice.onCancel}
           onStopTask={voice.onStopTask}
+        />
+
+        {/* Bottom "liquid glass" thread switcher + swipe dots — only when there's more than one thread. */}
+        <BottomSwitcher
+          rows={switcherRows}
+          activeThreadId={activeThreadId}
+          onSelect={switchThread}
+          onSpawn={voice.onSpawn}
         />
       </div>
     </div>

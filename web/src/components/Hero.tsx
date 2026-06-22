@@ -28,7 +28,8 @@ export function Hero({
   flash: string | null;
   recording: boolean;
   visualizerActive: boolean;
-  canvasRef: RefObject<HTMLCanvasElement | null>;
+  // Undefined on an off-screen pager page — only the active page wires the live recording canvas.
+  canvasRef?: RefObject<HTMLCanvasElement | null>;
   speedLabel: string;
   onCycleSpeed: () => void;
   onMic: () => void;

@@ -1,4 +1,10 @@
-import { useEffect, useRef } from "react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useRef
+} from "react";
 import { MessageThread, type ThreadPlayback } from "@/components/MessageThread";
 import type { Message } from "@/lib/messages";
 import type { ThreadId } from "@/lib/protocol";
@@ -14,6 +20,9 @@ const SETTLE_EPSILON_PX = 1;
 // the guard clears early and the observer just re-activates the target page on settle —
 // self-correcting, never wrong.
 const PROGRAMMATIC_SCROLL_MS = 400;
+// Horizontal movement (px) before a mouse/pen press becomes a page-drag — keeps a click/text-select
+// or a vertical scroll from being stolen as a swipe.
+const DRAG_THRESHOLD_PX = 8;
 
 export type PagerThread = {
   threadId: ThreadId;
@@ -22,9 +31,11 @@ export type PagerThread = {
 
 // Horizontal CSS scroll-snap pager: one page per thread, swiped natively (momentum + snap, zero
 // JS gesture code, no carousel lib — design §8.3). Each page is its own VERTICAL scroller holding
-// that thread's message list, so each thread keeps an independent scroll position. The single
-// shared hero (one mic/canvas) is pinned over the top of the active page by App; each page leaves
-// a `heroHeight` spacer so its messages start below the hero and scroll up under it.
+// that thread's hero + message list, so each thread keeps an independent scroll position. The hero
+// is rendered IN THE FLOW at the top of each page (via `renderHero`) — not a pinned overlay — so it
+// scrolls away with the content like a normal header and never covers the messages or the scrollbar.
+// `renderHero(isActive)` lets App wire the live mic/canvas to the ACTIVE page only; off-screen pages
+// render an idle hero so a swipe stays visually continuous.
 //
 // Swipe ↔ active-thread sync is two-way: a settle on a page makes it active (IntersectionObserver
 // per page — the same primitive App already uses for the condensed bar); selecting a thread in
@@ -38,7 +49,7 @@ export type PagerThread = {
 export function ThreadPager({
   threads,
   activeThreadId,
-  heroHeight,
+  renderHero,
   playback,
   onActivate,
   activeScrollRootRef,
@@ -46,8 +57,8 @@ export function ThreadPager({
 }: {
   threads: PagerThread[];
   activeThreadId: ThreadId | null;
-  // Height (px) reserved at the top of each page for the pinned, shared hero.
-  heroHeight: number;
+  // Renders the in-flow hero for a page; `isActive` wires the live mic/canvas to the on-screen page.
+  renderHero: (isActive: boolean) => ReactNode;
   playback: ThreadPlayback;
   onActivate: (threadId: ThreadId) => void;
   // The active page's vertical scroll root + its hero sentinel, lifted to App so the shared
@@ -105,9 +116,75 @@ export function ThreadPager({
     return () => window.clearTimeout(done);
   }, [activeThreadId]);
 
+  // Desktop drag-to-swipe: native touch already pages the pager, but a mouse/pen can't drag a scroll
+  // container, so we pan it manually. We only hijack once a horizontal drag clearly dominates, so a
+  // click, text selection, and vertical scrolling all still work. On release the nearest page snaps in
+  // and is activated. `programmaticRef` is held high for the whole drag so the centre observer can't
+  // fight it, and a one-shot click guard stops the release from registering as a tap (e.g. toggling a
+  // message's audio).
+  const dragRef = useRef<{ x: number; y: number; left: number; active: boolean } | null>(null);
+  const suppressClickRef = useRef(false);
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    suppressClickRef.current = false;
+    // Only arm drag-paging when there's somewhere to page to — so a single-thread user keeps normal
+    // horizontal text selection. Touch pages natively; ignore non-primary buttons.
+    if (threads.length < 2 || e.pointerType === "touch" || e.button !== 0) return;
+    const pager = pagerRef.current;
+    if (!pager) return;
+    dragRef.current = { x: e.clientX, y: e.clientY, left: pager.scrollLeft, active: false };
+  };
+
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    const pager = pagerRef.current;
+    if (!drag || !pager) return;
+    const dx = e.clientX - drag.x;
+    if (!drag.active) {
+      // Wait for a clearly-horizontal drag so vertical scroll + text selection are left alone.
+      if (Math.abs(dx) < DRAG_THRESHOLD_PX || Math.abs(dx) <= Math.abs(e.clientY - drag.y)) return;
+      drag.active = true;
+      programmaticRef.current = true; // freeze the centre observer for the duration of the drag
+      pager.setPointerCapture(e.pointerId);
+      pager.classList.add("select-none");
+    }
+    e.preventDefault();
+    pager.scrollLeft = drag.left - dx;
+  };
+
+  const onPointerEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    const pager = pagerRef.current;
+    if (!drag?.active || !pager) return;
+    if (pager.hasPointerCapture(e.pointerId)) pager.releasePointerCapture(e.pointerId);
+    pager.classList.remove("select-none");
+    suppressClickRef.current = true; // the release shouldn't read as a tap on whatever's underneath
+    // Snap to + activate the nearest page (pages are full-width).
+    const idx = Math.max(0, Math.min(Math.round(pager.scrollLeft / pager.clientWidth), threads.length - 1));
+    pager.scrollTo({ left: idx * pager.clientWidth, behavior: "smooth" });
+    window.setTimeout(() => {
+      programmaticRef.current = false;
+    }, PROGRAMMATIC_SCROLL_MS);
+    const target = threads[idx]?.threadId;
+    if (target) onActivate(target);
+  };
+
+  const onClickCapture = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!suppressClickRef.current) return;
+    suppressClickRef.current = false;
+    e.stopPropagation();
+    e.preventDefault();
+  };
+
   return (
     <div
       ref={pagerRef}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onClickCapture={onClickCapture}
       className="flex h-full snap-x snap-mandatory overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-width:none] [touch-action:pan-x]"
     >
       {threads.map(({ threadId, messages }) => {
@@ -122,15 +199,15 @@ export function ThreadPager({
             }}
             className="h-full w-full shrink-0 snap-center snap-always"
           >
-            {/* The active page owns the lifted scroll-root + sentinel refs so the shared hero +
-                condensed bar track it; inactive pages keep their own scroll position. */}
+            {/* The active page owns the lifted scroll-root + sentinel refs so the condensed bar
+                tracks it; inactive pages keep their own scroll position. */}
             <div
               ref={isActive ? activeScrollRootRef : undefined}
               className="flex h-full flex-col overflow-y-auto overscroll-y-contain pb-safe [touch-action:pan-y]"
             >
-              {/* Spacer reserving room for the pinned, shared hero rendered over the pager. */}
-              <div aria-hidden="true" className="w-full shrink-0" style={{ height: heroHeight }} />
-              {/* Hero sentinel: when it scrolls up under the pinned hero on the ACTIVE page, the
+              {/* The hero, in normal flow at the top of this page — scrolls away with the messages. */}
+              {renderHero(isActive)}
+              {/* Hero sentinel: when it scrolls above the top on the ACTIVE page (hero gone), the
                   condensed bar appears. Only the active page wires it (it's the one being read). */}
               <div ref={isActive ? activeSentinelRef : undefined} aria-hidden="true" className="h-px w-full shrink-0" />
               <MessageThread messages={messages} playback={playback} />

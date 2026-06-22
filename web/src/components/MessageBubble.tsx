@@ -1,34 +1,48 @@
 import { Check } from "lucide-react";
 import type { ReactNode } from "react";
+import { renderMarkdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 
-// A chat bubble. User messages: right-aligned peach bubble, text + time + coral
-// check. Agent messages: left-aligned lavender bubble that may contain arbitrary
-// children (the inline audio player embeds here) above the text, plus a time.
+// A chat bubble. User messages: right-aligned peach bubble, plain transcribed text + time + coral
+// check. Agent messages: left-aligned lavender bubble that may contain arbitrary children (the inline
+// audio player embeds here) above the body, which is rendered as light Markdown so it reads like the
+// terminal. `onActivate` (agent rows with audio) makes the whole card a play/pause target — the player's
+// own controls stop propagation so they aren't double-triggered.
 export function MessageBubble({
   side,
   body,
   time,
   delivered,
+  onActivate,
   children
 }: {
   side: "user" | "agent";
   body: string;
   time: string;
   delivered?: boolean;
+  onActivate?: () => void;
   children?: ReactNode;
 }) {
   const isUser = side === "user";
   return (
     <div className={cn("flex w-full flex-col", isUser ? "items-end" : "items-start")}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only play/pause affordance — the
+          inline play button (with aria-label) is the keyboard/AT control, so the card stays role-free. */}
       <div
+        onClick={onActivate}
         className={cn(
           "max-w-[82%] rounded-bubble px-4 py-3 text-[15px] leading-relaxed shadow-soft",
-          isUser ? "rounded-br-md bg-coral-soft text-ink" : "rounded-bl-md bg-violet-soft text-ink"
+          isUser ? "rounded-br-md bg-coral-soft text-ink" : "rounded-bl-md bg-violet-soft text-ink",
+          onActivate && "cursor-pointer"
         )}
       >
         {children && <div className="mb-2">{children}</div>}
-        {body && <p className="whitespace-pre-wrap break-words">{body}</p>}
+        {body &&
+          (isUser ? (
+            <p className="whitespace-pre-wrap break-words">{body}</p>
+          ) : (
+            <div className="break-words">{renderMarkdown(body)}</div>
+          ))}
       </div>
 
       <div
