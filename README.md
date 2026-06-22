@@ -85,9 +85,10 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
   a compromised bridge can't read prompts, replies, repo/branch labels, or audio. See
   `src/shared/e2e.ts` and `worker/src/voice-session-do.ts`.
 - **A leaked link can't be used to join later.** Connecting a device needs a short, user-opened
-  **pairing window** (`/voice-control:start`, or `/voice-control:pair` for an extra device). During
-  it the phone mints a per-device `HttpOnly` cookie; afterwards the link alone is dead, so a stolen
-  screenshot / URL / chat history grants no access. The daemon role is authenticated by a separate
+  **pairing window** (`/voice-control:start`, or `/voice-control:pair` for an extra device). The link
+  is **single-use** — the first device to open it within the window pairs and mints a per-device
+  `HttpOnly` cookie, then the link is dead; so a stolen screenshot / URL / chat history grants no
+  access, and a racing second device loses to the first. The daemon role is authenticated by a separate
   `daemonKey` (in `session.json`, never in any URL), so a leaked link can't impersonate a daemon to
   re-open the window. Revoke-on-exit still wipes the session shortly after the last pane disconnects.
   See `worker/src/claim.ts`.

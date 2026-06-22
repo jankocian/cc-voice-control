@@ -305,6 +305,11 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     const token = decision === "mint" ? mintDeviceToken() : (presented as string);
     if (decision === "mint") {
       await this.ctx.storage.put(deviceStorageKey(await hashToken(token)), { createdAt: Date.now() });
+      // Single-use: the first device to pair closes the window, so a leaked URL can't be claimed by a
+      // racing second device even within the 90s. The DO serializes requests, so this is atomic — a
+      // simultaneous second claim finds the window already gone. (The window still also expires on its
+      // own after CLAIM_WINDOW_MS if never used.) Re-pairing another device needs a fresh /pair.
+      await this.ctx.storage.delete(CLAIM_WINDOW_KEY);
     }
     const secure = new URL(request.url).protocol === "https:";
     return jsonResponse({ ok: true }, 200, { "set-cookie": buildSetCookie(cookieName, token, secure) });

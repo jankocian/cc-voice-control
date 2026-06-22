@@ -50,6 +50,11 @@ per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcri
   HttpOnly; SameSite=Strict; Path=/; Max-Age=30d` (`Secure` except on local http dev). Outside a window
   with no valid cookie → `403`; the phone shows "run /voice-control:pair". An already-paired device is
   re-allowed and its cookie lifetime refreshed (rolling expiry).
+- **The link is single-use.** The first successful claim closes the window (the DO deletes the window
+  key, atomically since it serializes requests), so a second device racing the same link — even within
+  the 90s — gets `403`. The window still also expires on its own if never used. Pairing another device
+  needs a fresh `/voice-control:pair`. (Trade-off: if a claim's `200` is lost in transit the window is
+  spent, so that device must re-pair — rare and recoverable.)
 - The browser WebSocket upgrade **requires** a valid device cookie (`401` otherwise). The phone retries a
   few times on an initial `403` to absorb the brief start-up race before the window is live.
 - **The daemon role is authenticated separately**, by `daemonKey` — a second secret in `session.json`,
@@ -66,7 +71,8 @@ per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcri
 | Attacker has… | Result |
 |---|---|
 | The chat history (relayed messages) | No credential is in it (cookie is `HttpOnly`, never relayed) → safe |
-| A screenshot of the URL/QR (incl. `#secret`), window closed | `/claim` → 403; can't open a window (no `daemonKey`) → no cookie → locked out |
+| A screenshot of the URL/QR (incl. `#secret`), window closed or already used | `/claim` → 403; can't open a window (no `daemonKey`) → no cookie → locked out |
+| The live URL while a window is open, racing the real device | single-use: whoever's first closes the window; the loser gets 403 |
 | A compromised worker | Sees only ciphertext + routing metadata → can't read content |
 | `routingId` but not the cookie / `daemonKey` | Browser upgrade → 401; daemon upgrade → 401 |
 

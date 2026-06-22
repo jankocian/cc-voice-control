@@ -4,11 +4,12 @@ disable-model-invocation: true
 allowed-tools: Bash
 ---
 
-Connecting a device is gated: the session URL/QR only lets a device in during a brief **pairing
-window**, and once a device is in it stays in via a per-device cookie (so a leaked link or
-screenshotted QR can't grant access later). `/voice-control:start` opens that window automatically the
-first time; run **this** command to open another window for an **additional** device (or to re-pair one
-that was wiped when the session was fully stopped).
+Connecting a device is gated: the session URL/QR is a **single-use** pairing link — it works only
+during a brief window AND only until the first device claims it, then it's dead (a paired device stays
+in via a per-device cookie). So a leaked link or screenshotted QR can't grant access later.
+`/voice-control:start` opens the first window automatically; run **this** command to open a fresh
+single-use link for an **additional** device (or to re-pair one that was wiped when the session was
+fully stopped, or a pairing that failed mid-handshake).
 
 1. **Open a pairing window on this pane's daemon, then read back the QR + URL.** This pane's daemon
    (the per-pane runtime file `runtime/<CMUX_SURFACE_ID>.json`) must be running. Run **exactly**:
@@ -32,10 +33,10 @@ that was wiped when the session was fully stopped).
 2. **If you see `PAIRING_OPEN`**, a ~90-second pairing window is now open. Present the QR + URL:
    - **Reproduce the QR block character-for-character inside a fenced code block** (` ``` `) so it stays
      scannable, and show the `sessionUrl` beneath it as a tap/copy fallback.
-   - Tell the user clearly: **scan or open it on the new device within about 90 seconds** — after that
-     the window closes and the link stops working until they run `/voice-control:pair` again. Once the
-     device connects it stays connected (it remembers via a cookie), so they only do this once per
-     device.
+   - Tell the user clearly: **scan or open it on the new device within about 90 seconds**, and note it's
+     **single-use** — the first device to open it pairs, and then the link is dead (even within the 90s).
+     After that they'd run `/voice-control:pair` again for a new device. Once a device connects it stays
+     connected (it remembers via a cookie), so they only do this once per device.
 
 3. **If you see `NO_SESSION`**, there's no voice remote running in this pane — tell the user to run
    `/voice-control:start` here first (or run `/voice-control:pair` in a pane that already has one).

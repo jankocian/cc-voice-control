@@ -59,9 +59,10 @@ then shows a scannable QR code + the phone URL. State lives in the plugin's own 
    - Show the `sessionUrl` directly beneath it as a tap/copy fallback (desktop, or if the scan fails).
    - Tell them to scan or open it and tap to speak — their words arrive here as normal user messages
      and replies are spoken back.
-   - Mention that the link **pairs a device within about 90 seconds** of starting: scan promptly. Once
-     a device connects it stays connected (a leaked link/QR can't be used to join later). To add
-     another device afterwards, run `/voice-control:pair` for a fresh window.
+   - Mention that the link is **single-use and time-limited**: it pairs the **first** device to open it
+     within about 90 seconds, then it's dead — so scan promptly, and a leaked link/QR can't be used to
+     join later. Once a device connects it stays connected. To add another device afterwards, run
+     `/voice-control:pair` for a fresh single-use link.
    - Tell them the voice remote is now a **visible background task**: it shows up in `/tasks`, and to
      end it they can run `/voice-control:stop` or stop that task from `/tasks`.
 
