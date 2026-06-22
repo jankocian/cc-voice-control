@@ -138,3 +138,17 @@ export function pairReplies(turns: ProjectedTurn[]): { reply: ProjectedTurn; pro
   }
   return pairs;
 }
+
+/**
+ * Resolve the FINAL reply to a voice prompt we injected — the row the daemon speaks — by IDENTITY: the
+ * final (non-interim) reply whose immediately-preceding user turn IS our native prompt record, matched by
+ * `userUuid`. The daemon reads the transcript from the start of the turn (transcript-reader's `floorOffset`),
+ * so the prompt record is ALWAYS present and this is an exact match — no ordering guess, no timestamp
+ * heuristic. `pairReplies` only yields final replies, so an interim step (narration before a tool call) can
+ * never be returned, even on a long extended-thinking turn where the answer text flushes well after the
+ * steps. Returns undefined until the answer has flushed (then the caller speaks it).
+ */
+export function resolveVoiceReply(turns: ProjectedTurn[], userUuid: string | undefined): ProjectedTurn | undefined {
+  if (!userUuid) return undefined;
+  return pairReplies(turns).find((p) => p.prompt?.uuid === userUuid)?.reply;
+}
