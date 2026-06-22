@@ -32,7 +32,9 @@ function ToastList() {
         key={item.id}
         toast={item}
         className={cn(
-          "flex items-center gap-3 rounded-card border border-hairline bg-surface/95 p-3 shadow-lift backdrop-blur-md",
+          // The viewport is pointer-events-none (so it never eats taps on the nav bar beneath it); the
+          // toast MUST re-enable pointer-events for itself or its Resend / ✕ buttons would do nothing.
+          "pointer-events-auto flex items-center gap-3 rounded-card border border-hairline bg-surface/95 p-3 shadow-lift backdrop-blur-md",
           "transition-[transform,opacity] duration-300 ease-soft",
           "data-[starting-style]:-translate-y-3 data-[starting-style]:opacity-0",
           "data-[ending-style]:-translate-y-3 data-[ending-style]:opacity-0"
