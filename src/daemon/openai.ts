@@ -99,6 +99,14 @@ async function synthesizeChunk(config: VoiceRemoteConfig, text: string, voiceOve
   return Buffer.from(await response.arrayBuffer());
 }
 
+// gpt-4o-mini-tts (the only model carrying the marin/cedar voices) intermittently drops the TRAILING
+// sentence from a reply's AUDIO — the text we send is complete, the mp3 comes back short (measured ~3-7 of
+// 10 replies, voice-dependent). Appending a throwaway ellipsis gives the model a disposable tail to clip
+// instead of real words; on cedar this lifts "kept the ending" from ~3/10 to ~8/10.
+// ponytail: ~80% mitigation, NOT a guarantee — the laziest fix that meaningfully helps. The bulletproof
+// fix is one TTS call per sentence (8/8 in testing), at the cost of N calls + prosody seams per reply.
+const TTS_TRAILING_SENTINEL = " …";
+
 /** Render text to speech with the OpenAI text-to-speech API. Returns base64 MP3 with
  *  mimeType "audio/mpeg". `voiceOverride` lets the phone pick a voice for the session
  *  ahead of the config default.
@@ -107,7 +115,10 @@ async function synthesizeChunk(config: VoiceRemoteConfig, text: string, voiceOve
  *  a longer reply is split on sentence boundaries (`splitForTts`) into ≤-limit chunks,
  *  each synthesized separately, and the returned mp3 buffers are concatenated. mp3 frames
  *  are self-delimiting, so `Buffer.concat` yields one continuous, gapless clip and no
- *  reply is ever truncated. Chunks run sequentially to guarantee playback order. */
+ *  reply is ever truncated. Chunks run sequentially to guarantee playback order.
+ *
+ *  A throwaway ellipsis rides the LAST chunk (see TTS_TRAILING_SENTINEL) so the model's
+ *  trailing-drop quirk eats the sentinel, not the reply's real final sentence. */
 export async function synthesizeSpeech(
   config: VoiceRemoteConfig,
   text: string,
@@ -115,9 +126,18 @@ export async function synthesizeSpeech(
 ): Promise<SynthesizedSpeech> {
   // Empty / whitespace-only input would 400 the API — nothing to say, so return empty audio.
   if (!text.trim()) return { audioBase64: "", mimeType: "audio/mpeg" };
-  // Fast path: short replies stay a single API call.
-  if (text.length <= MAX_TTS_INPUT_CHARS) {
-    const buffer = await synthesizeChunk(config, text, voiceOverride);
+
+  const chunks = splitForTts(text, MAX_TTS_INPUT_CHARS);
+  // The trailing-drop only threatens the very end of the reply, so the sentinel rides only the last chunk.
+  // Skip it if that chunk is already at the limit — a +2 over-limit input would 400 the API.
+  const last = chunks.length - 1;
+  if (last >= 0 && chunks[last].length + TTS_TRAILING_SENTINEL.length <= MAX_TTS_INPUT_CHARS) {
+    chunks[last] += TTS_TRAILING_SENTINEL;
+  }
+
+  // Fast path: a single-chunk reply stays one API call.
+  if (chunks.length === 1) {
+    const buffer = await synthesizeChunk(config, chunks[0], voiceOverride);
     return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
   }
 
@@ -127,7 +147,7 @@ export async function synthesizeSpeech(
   // but if nothing synthesized at all, surface the error so the caller's catch reacts just
   // like the single-call path did.
   const parts: Buffer[] = [];
-  for (const chunk of splitForTts(text, MAX_TTS_INPUT_CHARS)) {
+  for (const chunk of chunks) {
     try {
       parts.push(await synthesizeChunk(config, chunk, voiceOverride));
     } catch (error) {

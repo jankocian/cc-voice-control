@@ -5,7 +5,7 @@ The daemon needs one config file with your OpenAI credentials:
 ```json
 {
   "openaiApiKey": "sk-...",
-  "openaiVoice": "marin"
+  "openaiVoice": "cedar"
 }
 ```
 
@@ -25,7 +25,7 @@ chmod 600 <your-config>.json
 - `openaiApiKey` (required) — read **only** by the local daemon. It is never sent
   to Cloudflare or the browser. If it's missing, `/voice-control:start` shows a friendly
   setup prompt (with the exact file to edit) instead of starting.
-- `openaiVoice` (optional, default `marin`) — the `gpt-4o-mini-tts` voice used to read
+- `openaiVoice` (optional, default `cedar`) — the `gpt-4o-mini-tts` voice used to read
   Claude's replies aloud. OpenAI recommends `marin` or `cedar` for best quality; other
   options include `alloy`, `ash`, `coral`, `nova`, `onyx`, `sage`.
 - `ttsModel` / `sttModel` (optional) — override the default OpenAI models

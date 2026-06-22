@@ -74,7 +74,8 @@ describe("synthesizeSpeech", () => {
     expect(body).toMatchObject({
       model: "gpt-4o-mini-tts",
       voice: "marin",
-      input: "Hello there",
+      // A throwaway ellipsis rides the input so the model's trailing-drop quirk clips it, not real words.
+      input: "Hello there …",
       response_format: "mp3"
     });
     expect(body.instructions).toBeUndefined();
