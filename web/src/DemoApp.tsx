@@ -1,3 +1,4 @@
+import { Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Hero } from "@/components/Hero";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
@@ -6,9 +7,11 @@ import { MiniControls } from "@/components/MiniControls";
 import { ThreadPager } from "@/components/ThreadPager";
 import { Toaster, toast } from "@/components/Toaster";
 import { TopBar } from "@/components/TopBar";
+import { buttonVariants } from "@/components/ui/button";
 import type { Message } from "@/lib/messages";
 import type { ThreadId } from "@/lib/protocol";
 import { deriveStatus, type StatusInputs } from "@/lib/status";
+import { cn } from "@/lib/utils";
 
 // Presentation-only demo harness for the visual-verification loop. `?demo=<state>`
 // renders the full screen (TopBar + pinned Hero + thread + sticky condensed controls) in a
@@ -207,9 +210,43 @@ function StateDemo({ state }: { state: string }) {
     return () => obs.disconnect();
   }, []);
 
+  // A static gear stand-in (the real <SettingsMenu> needs App's wiring) so the condensed bar's far-right
+  // settings slot is exercised in the demo.
+  const gear = (
+    <span className={cn(buttonVariants({ variant: "surface", size: "iconSm" }))} aria-hidden="true">
+      <Settings />
+    </span>
+  );
+
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
-      <TopBar />
+      {/* The shared glass header slot: nav slides out, condensed bar slides in (mirrors App). */}
+      <div className="relative shrink-0 pt-safe">
+        <TopBar
+          className={cn(
+            "transition-[transform,opacity] duration-300 ease-soft",
+            condensed ? "pointer-events-none -translate-y-2 opacity-0" : "translate-y-0 opacity-100"
+          )}
+        >
+          {gear}
+        </TopBar>
+        <MiniControls
+          status={status}
+          elapsed={elapsed}
+          working={working}
+          recording={state === "recording"}
+          shown={condensed}
+          onMic={noop}
+          onSteer={noop}
+          onInterrupt={noop}
+          onStopRecording={noop}
+          onCancel={noop}
+          onStopTask={noop}
+        >
+          {gear}
+        </MiniControls>
+      </div>
+
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} className="flex h-full flex-col overflow-y-auto pb-safe">
           {/* The hero in normal flow — scrolls away with the content, exactly as App renders it. */}
@@ -259,20 +296,6 @@ function StateDemo({ state }: { state: string }) {
             )}
           </div>
         </div>
-
-        <MiniControls
-          status={status}
-          elapsed={elapsed}
-          working={working}
-          recording={state === "recording"}
-          shown={condensed}
-          onMic={noop}
-          onSteer={noop}
-          onInterrupt={noop}
-          onStopRecording={noop}
-          onCancel={noop}
-          onStopTask={noop}
-        />
       </div>
     </div>
   );

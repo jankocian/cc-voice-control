@@ -1,12 +1,20 @@
 import { AudioLines } from "lucide-react";
 import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
 
 // Top app bar: the "voice control" wordmark (left) and a slot for the settings menu (right) — which holds
 // the read-aloud + theme controls. The thread switcher + New session live in the bottom <BottomSwitcher>,
-// so the header stays minimal.
-export function TopBar({ children }: { children?: ReactNode }) {
+// so the header stays minimal. Floating-glass styling (like the bottom pill) so it reads as a layer over
+// the canvas; it shares the header slot with <MiniControls> and slides out (via `className`) when the
+// page is scrolled.
+export function TopBar({ children, className }: { children?: ReactNode; className?: string }) {
   return (
-    <header className="flex min-h-16 shrink-0 items-center justify-between gap-2 px-4 pt-safe">
+    <header
+      className={cn(
+        "flex min-h-16 items-center justify-between gap-2 border-b border-hairline/60 bg-surface/70 px-4 backdrop-blur-md",
+        className
+      )}
+    >
       <Wordmark />
       {children}
     </header>
