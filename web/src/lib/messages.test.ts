@@ -56,4 +56,18 @@ describe("messageFromHistory", () => {
     expect(claude.hasAudio).toBe(true);
     expect(user.hasAudio).toBe(false);
   });
+
+  it("carries the interim flag for steps (and defaults it false)", () => {
+    const step = messageFromHistory({
+      requestId: "s",
+      timestamp: 1002,
+      role: "claude",
+      text: "I'll read it",
+      hasAudio: false,
+      interim: true
+    });
+    const reply = messageFromHistory(turn("a", 1003, "claude", "done"));
+    expect(step.interim).toBe(true);
+    expect(reply.interim).toBe(false);
+  });
 });

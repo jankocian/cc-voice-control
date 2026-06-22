@@ -139,6 +139,9 @@ export class VoiceDaemon {
   private readonly pending: PendingVoice[] = [];
   private readonly spoken = new Set<string>();
   private floor = 0;
+  // The phone's "read every step" preference: when true, Claude's interim steps on VOICE turns are spoken
+  // aloud as they appear (not just the final reply). Off by default; set via set_speak_steps.
+  private speakSteps = false;
 
   // The spawning session's LIVE permission mode (forwarded each turn by the turn-open hook). A spawn
   // launches with `--permission-mode <this>` so it inherits the user's mode EXACTLY (env won't carry
@@ -226,7 +229,13 @@ export class VoiceDaemon {
         // with the REAL pre-expansion prompt + live permission mode), /turn-close (Stop → the turn's
         // reply), /reset (SessionStart on clear/compact → wipe history), /spawn (the spawn skill).
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/turn-open" && route !== "/turn-close" && route !== "/reset" && route !== "/spawn") {
+        if (
+          route !== "/turn-open" &&
+          route !== "/turn-progress" &&
+          route !== "/turn-close" &&
+          route !== "/reset" &&
+          route !== "/spawn"
+        ) {
           res.statusCode = 404;
           res.end();
           return;
@@ -262,6 +271,14 @@ export class VoiceDaemon {
               this.turns.turnOpened(realPrompt);
               this.bindVoicePrompt(realPrompt); // if this turn is one of ours, bind it to its native uuid
               this.projectAndEmit(); // the new user turn is in the transcript now → show it, keyed natively
+            } else if (route === "/turn-progress") {
+              // PreToolUse: Claude wrote a step (narration) before this tool call → re-project so it shows
+              // live, and (if opted in) speak it on a voice turn.
+              const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
+              if (transcriptPath) this.lastTranscriptPath = transcriptPath;
+              const turns = this.projectedNow();
+              this.sendToBrowser(this.historyFrom(turns));
+              this.speakNewSteps(turns);
             } else {
               const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
               if (transcriptPath) this.lastTranscriptPath = transcriptPath;
@@ -398,17 +415,14 @@ export class VoiceDaemon {
         this.emitStatus();
         if (this.lastTranscriptPath) this.projectAndEmit();
         return;
-      case "get_audio": {
-        // Tap-to-play on a row whose audio isn't cached locally: serve it from our store, or tell the
-        // phone gracefully when it has been evicted.
-        const audio = this.audio.get(event.requestId);
-        this.sendToBrowser(
-          audio
-            ? { type: "tts_audio", requestId: event.requestId, replay: true, ...audio }
-            : { type: "error", requestId: event.requestId, message: "Audio for that reply is no longer available." }
-        );
+      case "get_audio":
+        // Tap-to-play on a row whose audio isn't cached: serve it, synthesizing on demand for a step (we
+        // don't pre-synthesize every step), or tell the phone gracefully if the row is gone from the tail.
+        await this.serveAudio(event.requestId);
         return;
-      }
+      case "set_speak_steps":
+        this.speakSteps = event.on === true;
+        return;
       case "spawn_thread": {
         // The phone "+" : open a NEW cmux workspace running Claude + /voice-control:start. It reads
         // the same session.json → joins this same session as a new thread (same QR). Routed here
@@ -587,13 +601,52 @@ export class VoiceDaemon {
         timestamp: t.timestamp,
         role: t.role,
         text: t.text,
-        hasAudio: this.audio.has(t.uuid)
+        hasAudio: this.audio.has(t.uuid),
+        interim: t.interim
       })),
       ...this.pending
         .filter((p) => p.userUuid === undefined)
         .map((p) => ({ requestId: p.id, timestamp: p.ts, role: "user" as const, text: p.text, hasAudio: false }))
     ];
     return { type: "history", turns: rows };
+  }
+
+  // "read every step" is on AND a VOICE turn is in progress → speak its newly-appeared steps as they land
+  // (final replies still speak via handleTurnClose). Gated to the in-flight voice turn (steps after its
+  // prompt) so turning the toggle on doesn't read out a backlog, and a terminal-typed turn is never read.
+  private speakNewSteps(turns: ProjectedTurn[]): void {
+    if (!this.speakSteps) return;
+    const voice = this.pending.find((p) => p.opened && p.userTs !== undefined);
+    if (!voice) return;
+    for (const t of turns) {
+      if (!t.interim || this.spoken.has(t.uuid) || t.timestamp < (voice.userTs ?? 0)) continue;
+      this.remember(this.spoken, t.uuid, MAX_AUDIO_ENTRIES * 4);
+      void this.speak(t.uuid, t.text);
+    }
+  }
+
+  // Serve a row's audio to the phone: from the store, else synthesize it on demand (a step isn't
+  // pre-synthesized) by looking its text up in the current projection. A miss (row gone from the tail)
+  // returns a graceful error.
+  private async serveAudio(uuid: string): Promise<void> {
+    let audio = this.audio.get(uuid);
+    if (!audio) {
+      const turn = this.projectedNow().find((t) => t.uuid === uuid);
+      if (turn) {
+        try {
+          const synth = await synthesizeSpeech(this.init.config, capForSpeech(turn.text));
+          if (synth.audioBase64)
+            audio = this.storeAudio(uuid, { audioBase64: synth.audioBase64, mimeType: synth.mimeType });
+        } catch {
+          // fall through to the not-available error
+        }
+      }
+    }
+    this.sendToBrowser(
+      audio
+        ? { type: "tts_audio", requestId: uuid, replay: true, ...audio }
+        : { type: "error", requestId: uuid, message: "Audio for that reply is no longer available." }
+    );
   }
 
   // After a turn closes: wait until every voice turn we're tracking has its reply flushed (positive
@@ -636,18 +689,24 @@ export class VoiceDaemon {
     return turns.find((t) => t.role === "claude" && t.timestamp > (entry.userTs ?? 0) && !this.spoken.has(t.uuid));
   }
 
-  // Synthesize a reply's audio, retain it (keyed by native reply uuid) for tap-to-play + reconnect, and
+  // Retain synthesized audio keyed by native uuid, evicting the oldest past the cap.
+  private storeAudio(uuid: string, audio: Audio): Audio {
+    this.audio.set(uuid, audio);
+    while (this.audio.size > MAX_AUDIO_ENTRIES) {
+      const oldest = this.audio.keys().next().value;
+      if (oldest === undefined) break;
+      this.audio.delete(oldest);
+    }
+    return audio;
+  }
+
+  // Synthesize a reply/step's audio, retain it (keyed by native uuid) for tap-to-play + reconnect, and
   // push it to the phone to auto-play now.
   private async speak(uuid: string, text: string): Promise<void> {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (!audioBase64) return; // nothing to synthesize (empty/whitespace reply)
-      this.audio.set(uuid, { audioBase64, mimeType });
-      while (this.audio.size > MAX_AUDIO_ENTRIES) {
-        const oldest = this.audio.keys().next().value;
-        if (oldest === undefined) break;
-        this.audio.delete(oldest);
-      }
+      this.storeAudio(uuid, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId: uuid, audioBase64, mimeType });
     } catch (error) {
       // The text reply already reached the phone; surface the audio failure (don't swallow it) so a

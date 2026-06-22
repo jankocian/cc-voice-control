@@ -19,6 +19,10 @@ export type ProjectedTurn = {
   timestamp: number; // native record timestamp (epoch ms) — order key
   role: ProjectedRole;
   text: string;
+  // A "step": assistant text written before a tool call (stop_reason "tool_use") — Claude narrating what
+  // it's about to do, vs `false` for a user turn or a FINAL reply. Steps are shown dimmer and not spoken
+  // unless the phone opts into "read every step". Always false for user turns.
+  interim: boolean;
 };
 
 // Only the transcript fields we read; records carry many more.
@@ -68,13 +72,16 @@ function isRealUserTurn(r: TranscriptRecord): boolean {
   return text.length > 0 && !text.startsWith("/");
 }
 
-// A finished assistant reply with shown/spoken text. A tool-call pause (stop_reason "tool_use") or a
-// thinking-only record carries no terminal text and is skipped, so we keep exactly the turn's final reply.
-function isClaudeReply(r: TranscriptRecord): boolean {
-  if (roleOf(r) !== "assistant" || r.isSidechain) return false;
+// Assistant text shown to the user: a FINAL reply (terminal stop_reason) or an interim STEP — the
+// narration Claude writes before a tool call (stop_reason "tool_use"). Thinking-only and tool-only records
+// carry no text, so they're skipped: we surface the short narration lines but never raw thinking, tool
+// calls, or tool output. Returns undefined for anything that isn't shown text.
+function claudeText(r: TranscriptRecord): { text: string; interim: boolean } | undefined {
+  if (roleOf(r) !== "assistant" || r.isSidechain) return undefined;
+  const text = extractText(r.message?.content);
+  if (!text) return undefined;
   const stop = r.message?.stop_reason;
-  if (!stop || stop === "tool_use") return false;
-  return extractText(r.message?.content).length > 0;
+  return { text, interim: !(stop === "end_turn" || stop === "max_tokens") };
 }
 
 /**
@@ -86,9 +93,13 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
   const turns: ProjectedTurn[] = [];
   for (const r of records) {
     if (!r.uuid) continue;
-    const role: ProjectedRole | undefined = isRealUserTurn(r) ? "user" : isClaudeReply(r) ? "claude" : undefined;
-    if (!role) continue;
-    turns.push({ uuid: r.uuid, timestamp: toEpoch(r.timestamp), role, text: extractText(r.message?.content) });
+    const ts = toEpoch(r.timestamp);
+    if (isRealUserTurn(r)) {
+      turns.push({ uuid: r.uuid, timestamp: ts, role: "user", text: extractText(r.message?.content), interim: false });
+    } else {
+      const c = claudeText(r);
+      if (c) turns.push({ uuid: r.uuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
+    }
   }
   // Records are already in chronological (file) order; sort by native timestamp defensively so a row can
   // never appear out of order even if the tail is read mid-write, then keep the newest window.
@@ -96,12 +107,13 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
   return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
 }
 
-/** Pair every claude reply with the user prompt it answers (its nearest preceding user turn). The daemon
- *  uses this to decide voice TTS: speak a reply iff its prompt is one we injected. Oldest-first. */
+/** Pair every FINAL claude reply with the user prompt it answers (its nearest preceding user turn). The
+ *  daemon uses this to decide voice TTS: speak a reply iff its prompt is one we injected. Interim steps are
+ *  excluded — they're never the turn's "reply" and are only spoken under "read every step". Oldest-first. */
 export function pairReplies(turns: ProjectedTurn[]): { reply: ProjectedTurn; prompt?: ProjectedTurn }[] {
   const pairs: { reply: ProjectedTurn; prompt?: ProjectedTurn }[] = [];
   for (let i = 0; i < turns.length; i++) {
-    if (turns[i].role !== "claude") continue;
+    if (turns[i].role !== "claude" || turns[i].interim) continue;
     let prompt: ProjectedTurn | undefined;
     for (let j = i - 1; j >= 0; j--) {
       if (turns[j].role === "user") {

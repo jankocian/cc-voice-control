@@ -37,6 +37,10 @@ export type HistoryTurn = {
   // True for a reply whose synthesized audio is still retained (fetchable). The phone renders such rows
   // as tap-to-play even before the audio bytes have been requested.
   hasAudio: boolean;
+  // A "step": assistant narration written before a tool call (e.g. "I'll read the file first"), vs a
+  // user turn or a FINAL reply. The phone shows steps dimmer and never auto-plays them unless the user
+  // opted into "read every step" (set_speak_steps). Absent/false for user turns and final replies.
+  interim?: boolean;
 };
 
 export type BrowserToDaemonEvent =
@@ -47,9 +51,13 @@ export type BrowserToDaemonEvent =
   // Sent on (re)connect. The daemon answers with a `history` event (the full retained
   // thread), so the phone restores its conversation after a refresh / on a 2nd browser.
   | { type: "sync"; requestId: string }
-  // Fetch the audio for a specific reply on demand (tap-to-play on a history row whose
-  // bytes aren't cached locally). The daemon answers with a `tts_audio` carrying `replay`.
+  // Fetch the audio for a specific reply/step on demand (tap-to-play on a row whose bytes aren't cached
+  // locally). The daemon synthesizes it on demand if needed and answers with a `tts_audio` carrying `replay`.
   | { type: "get_audio"; requestId: string }
+  // Set whether the daemon also speaks Claude's interim STEPS aloud (the phone's "read every step" toggle).
+  // Off by default — only final replies of voice turns auto-play. Re-sent on connect so the daemon matches
+  // the phone's saved preference. `on=false` returns to final-only.
+  | { type: "set_speak_steps"; on: boolean }
   // Open a NEW cmux workspace running Claude + /voice-control:start, so it joins this same
   // session as a new thread (same QR). Routed to the ACTIVE thread's daemon, which has the
   // cmux trust to spawn for its machine. `cwd` defaults to the spawning daemon's cwd.

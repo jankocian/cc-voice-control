@@ -1,5 +1,6 @@
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
+import { StepRow } from "@/components/StepRow";
 import type { Message } from "@/lib/messages";
 
 export type ThreadPlayback = {
@@ -31,6 +32,18 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
       {messages.map((message) => {
         if (message.kind === "you") {
           return <MessageBubble key={message.id} side="user" body={message.body} time={message.time} delivered />;
+        }
+
+        // A step: Claude's interim narration. Dim, compact, tap-to-play (synthesized on demand).
+        if (message.interim) {
+          return (
+            <StepRow
+              key={message.id}
+              body={message.body}
+              playing={playback.playingId === message.requestId}
+              onPlay={() => playback.onPlay(message.requestId)}
+            />
+          );
         }
 
         const playable = message.requestId ? playback.playableIds.has(message.requestId) : false;
