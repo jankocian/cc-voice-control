@@ -59,6 +59,7 @@
   --animate-dot-bounce: dot-bounce 1.2s ease-in-out infinite;
   --animate-bar: bar-pulse 1s ease-in-out infinite;
   --animate-bar-soft: bar-soft 1.5s ease-in-out infinite;
+  --animate-dot-wave: dot-wave 1.6s ease-in-out infinite;
   --animate-rise: rise 0.32s var(--ease-soft) both;
 
   @keyframes pulse-ring {
@@ -104,6 +105,21 @@
     }
     50% {
       transform: scaleY(0.92);
+      opacity: 1;
+    }
+  }
+  /* The "ready / your turn" wave: a row of dots, each scaling + brightening in turn so a soft pulse
+     sweeps left→right (staggered per-dot delay in StatusVisual). Reads as "waiting for your input"
+     rather than the sound-like equalizer. */
+  @keyframes dot-wave {
+    0%,
+    55%,
+    100% {
+      transform: scale(0.55);
+      opacity: 0.3;
+    }
+    25% {
+      transform: scale(1);
       opacity: 1;
     }
   }

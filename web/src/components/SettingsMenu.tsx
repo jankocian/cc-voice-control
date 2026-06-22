@@ -38,23 +38,17 @@ const AUTO_RESPOND_OPTIONS: Option<"off" | "on">[] = [
 function Segmented<T extends string>({
   value,
   onValueChange,
-  options,
-  disabled = false
+  options
 }: {
   value: T;
   onValueChange: (value: T) => void;
   options: Option<T>[];
-  disabled?: boolean;
 }) {
   return (
     <Menu.RadioGroup
       value={value}
-      onValueChange={(next) => !disabled && onValueChange(next as T)}
-      aria-disabled={disabled}
-      className={cn(
-        "inline-flex w-fit items-center gap-0.5 self-start rounded-full bg-canvas-deep p-0.5",
-        disabled && "pointer-events-none opacity-40"
-      )}
+      onValueChange={(next) => onValueChange(next as T)}
+      className="inline-flex w-fit items-center gap-0.5 self-start rounded-full bg-canvas-deep p-0.5"
     >
       {options.map((option) => (
         <Menu.RadioItem
@@ -83,18 +77,12 @@ function Field<T extends string>(props: {
   value: T;
   onValueChange: (value: T) => void;
   options: Option<T>[];
-  disabled?: boolean;
   hint?: string;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className={cn("text-xs font-semibold text-ink-soft", props.disabled && "opacity-50")}>{props.label}</span>
-      <Segmented
-        value={props.value}
-        onValueChange={props.onValueChange}
-        options={props.options}
-        disabled={props.disabled}
-      />
+      <span className="text-xs font-semibold text-ink-soft">{props.label}</span>
+      <Segmented value={props.value} onValueChange={props.onValueChange} options={props.options} />
       {props.hint && <span className="text-[11px] leading-tight text-ink-faint">{props.hint}</span>}
     </div>
   );
@@ -110,7 +98,6 @@ export function SettingsMenu({
   onAutoFollowChange,
   autoRespond,
   onAutoRespondChange,
-  autoRespondAvailable,
   theme,
   onThemeChange
 }: {
@@ -120,8 +107,6 @@ export function SettingsMenu({
   onAutoFollowChange: (on: boolean) => void;
   autoRespond: boolean;
   onAutoRespondChange: (on: boolean) => void;
-  // Auto-respond only makes sense with autoplay on + auto-follow on; otherwise the field is shown disabled.
-  autoRespondAvailable: boolean;
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
 }) {
@@ -145,12 +130,7 @@ export function SettingsMenu({
               value={autoRespond ? "on" : "off"}
               onValueChange={(v) => onAutoRespondChange(v === "on")}
               options={AUTO_RESPOND_OPTIONS}
-              disabled={!autoRespondAvailable}
-              hint={
-                autoRespondAvailable
-                  ? "Opens the mic right after a reply — listen, speak, hit stop."
-                  : "Turn on Autoplay and Auto-follow to use this."
-              }
+              hint="Opens the mic right after any reply finishes — listen, speak, hit stop."
             />
             <Field label="Theme" value={theme} onValueChange={onThemeChange} options={THEME_OPTIONS} />
           </Menu.Popup>
