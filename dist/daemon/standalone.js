@@ -20063,11 +20063,16 @@ class VoiceDaemon {
     if (!audio) {
       const turn = this.projectedNow().find((t) => t.uuid === uuid3);
       if (turn) {
+        this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "pending" });
         try {
           const synth = await synthesizeSpeech(this.init.config, capForSpeech(turn.text));
           if (synth.audioBase64)
             audio = this.storeAudio(uuid3, { audioBase64: synth.audioBase64, mimeType: synth.mimeType });
         } catch {}
+        if (!audio) {
+          this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
+          return;
+        }
       }
     }
     this.sendToBrowser(audio ? { type: "tts_audio", requestId: uuid3, replay: true, ...audio } : { type: "error", requestId: uuid3, message: "Audio for that reply is no longer available." });
@@ -20141,6 +20146,7 @@ class VoiceDaemon {
     return audio;
   }
   async speak(uuid3, text) {
+    this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "pending" });
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (!audioBase64)
@@ -20150,10 +20156,7 @@ class VoiceDaemon {
     } catch (error51) {
       const message = error51 instanceof Error ? error51.message : String(error51);
       console.error(`[tts] synthesis failed for ${uuid3}: ${message}`);
-      this.sendToBrowser({
-        type: "error",
-        message: "Couldn't speak that reply — its text is shown, but audio failed."
-      });
+      this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
     }
   }
   remember(set2, value, cap) {
