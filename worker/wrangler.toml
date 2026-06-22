@@ -21,14 +21,14 @@ class_name = "VoiceSessionDurableObject"
 tag = "v1"
 new_sqlite_classes = ["VoiceSessionDurableObject"]
 
-# Native Cloudflare Rate Limiting binding. Gates WS-connect attempts per client IP at the top
-# of the Worker fetch (before a DO is touched) — abuse/DoS insurance, NOT the capability gate
-# (a wrong secret already lands on an empty DO). Best-effort / per-edge / eventually-consistent;
-# the worker fails OPEN if the limiter errors. The budget is SHARED across everything behind one
-# NAT egress IP: the phone (frequent iOS background/foreground reconnects) PLUS every pane's
-# daemon (each reconnects on a worker redeploy). 60/min is generous for one household while still
-# bounding a /ws/<random> spray. `period` must be 10 or 60.
+# Native Cloudflare Rate Limiting binding. Gates BOTH the WS upgrade and the POST /claim per client IP
+# at the top of the Worker fetch (before a DO is touched) — abuse/DoS insurance, NOT the capability gate
+# (a wrong routingId already lands on an empty DO). Best-effort / per-edge / eventually-consistent; the
+# worker fails OPEN if the limiter errors. The budget is SHARED across everything behind one NAT egress
+# IP: the phone now does claim + WS per (re)connect (frequent iOS background/foreground reconnects) PLUS
+# every pane's daemon (each reconnects on a worker redeploy). 120/min keeps a flapping household from
+# starving itself while still bounding a /ws|/claim/<random> spray. `period` must be 10 or 60.
 [[ratelimits]]
 name = "WS_CONNECT"
 namespace_id = "1001"
-simple = { limit = 60, period = 60 }
+simple = { limit = 120, period = 60 }

@@ -3,12 +3,13 @@
 // itself needs a Workers runtime). index.ts imports these and wires them to ctx.storage /
 // getWebSockets(); the decisions live here.
 
-import type { RosterThread, ThreadId, ThreadInfo } from "../../src/shared/protocol";
+import type { ThreadId, WireRosterThread, WireThreadInfo } from "../../src/shared/protocol";
 
 // A thread's roster entry as stored in the DO: the daemon's last-registered info minus its live
 // presence (presence is computed at read time). `lastSeenAt` is stamped when the daemon socket
-// closes; null while it is connected (or never seen leaving).
-export type StoredThread = Omit<ThreadInfo, "threadId"> & { lastSeenAt: number | null };
+// closes; null while it is connected (or never seen leaving). The label is a sealed `EncBlob` the DO
+// stores/relays opaquely (it can't read it) — so the worker never sees repo/branch/cwd names.
+export type StoredThread = Omit<WireThreadInfo, "threadId"> & { lastSeenAt: number | null };
 
 // Storage key prefix for the per-thread roster. Each thread is one small JSON entry
 // (`<prefix><threadId>`) — labels + last-seen only, never conversation content.
@@ -27,8 +28,9 @@ export function threadIdFromKey(key: string): ThreadId {
   return key.slice(ROSTER_KEY_PREFIX.length);
 }
 
-// Shape a freshly-registered thread for storage: live now, so its lastSeenAt is cleared.
-export function storedFromInfo(info: ThreadInfo): StoredThread {
+// Shape a freshly-registered thread for storage: live now, so its lastSeenAt is cleared. `label` is the
+// sealed blob the daemon sent — stored as-is.
+export function storedFromInfo(info: WireThreadInfo): StoredThread {
   return { label: info.label, state: info.state, listening: info.listening, lastSeenAt: null };
 }
 
@@ -69,8 +71,8 @@ export function buildRoster(
   stored: Map<string, StoredThread>,
   isConnected: (threadId: ThreadId) => boolean,
   now: number
-): RosterThread[] {
-  const threads: RosterThread[] = [];
+): WireRosterThread[] {
+  const threads: WireRosterThread[] = [];
   for (const [key, value] of stored) {
     const threadId = threadIdFromKey(key);
     const connected = isConnected(threadId);

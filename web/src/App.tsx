@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BottomSwitcher, type ThreadRow } from "./components/BottomSwitcher";
 import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
+import { SessionExpired } from "./components/SessionExpired";
 import { SettingsMenu } from "./components/SettingsMenu";
 import { ThreadPager } from "./components/ThreadPager";
 import { Toaster, toast } from "./components/Toaster";
@@ -17,7 +18,7 @@ import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
 import { newestPlayableReply } from "./lib/messages";
 import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
-import { readThreadHint, type SessionCredentials } from "./lib/session";
+import { readThreadHint, type Session } from "./lib/session";
 import { deriveStatus, gradeThread, type StatusView } from "./lib/status";
 import { cn } from "./lib/utils";
 
@@ -29,10 +30,16 @@ const SPAWN_FOLLOW_TIMEOUT_MS = 30_000;
 // switch threads — so we never yank them away mid-interaction.
 const INTERACTION_IDLE_MS = 4_000;
 
-export function App({ credentials }: { credentials: SessionCredentials }) {
+export function App({ session }: { session: Session }) {
   const { flash, flashTone, show: showFlash } = useFlash();
 
-  // Restore the thread from the URL fragment (#t=<id>) on first load — seeded into the store so the
+  // Set when /claim is rejected for good — we then show the re-pair screen instead of the live UI
+  // (useBridge has already stopped reconnecting). The reason tailors the message: a lapsed session
+  // (had a cookie) vs a used/expired one-time link.
+  const [expired, setExpired] = useState<"stale" | "expired" | null>(null);
+  const onExpired = useCallback((reason: "stale" | "expired") => setExpired(reason), []);
+
+  // Restore the thread from the URL query (?t=<id>) on first load — seeded into the store so the
   // roster snapshot focuses it directly, before the carousel renders (no swipe blip). Read once.
   const threads = useThreads(readThreadHint());
   const { activeThreadId } = threads;
@@ -163,7 +170,13 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [threads, resolveSpawnToast]
   );
 
-  const bridge = useBridge({ secret: credentials.secret, onEvent: handleContentEvent, onRoster });
+  const bridge = useBridge({
+    sessionId: session.sessionId,
+    key: session.key,
+    onEvent: handleContentEvent,
+    onRoster,
+    onExpired
+  });
   const { connected, bridgeReady, sendDaemon } = bridge;
   sendDaemonRef.current = sendDaemon;
 
@@ -176,6 +189,16 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   useEffect(() => {
     if (!connected) setTranscribingThreadId(null);
   }, [connected, setTranscribingThreadId]);
+
+  // If the active thread's daemon goes offline while we're waiting on its turn, the clip can't land — the
+  // bridge silently drops a command addressed to a gone daemon. Clear the "transcribing" spinner and say so
+  // (a toast, since the daemon can't send a sealed error to tell us — see the E2E channel).
+  useEffect(() => {
+    if (transcribing && active?.connected === false) {
+      setTranscribingThreadId(null);
+      toast.add({ title: "That session went offline — try again", type: "error" });
+    }
+  }, [transcribing, active?.connected, setTranscribingThreadId]);
 
   // Autoplay mode (off / final / all), persisted per phone. Tell the active thread's daemon the current
   // mode — re-sent when it (re)connects or the active thread changes, since the daemon defaults to "final"
@@ -314,10 +337,11 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   }, [sendDaemon, showFlash, resolveSpawnToast]);
   handleSpawnRef.current = handleSpawn;
 
-  // Deep link / refresh persistence via the URL fragment (#t=<threadId>). On load we honour it ONCE the
-  // wanted thread shows up in the roster (a scanned pane's QR carries its own thread; a refresh restores
-  // the last one) — falling through to the connected-default pick otherwise. As the user switches threads
-  // we keep the fragment in step (replaceState, so it survives refresh without spamming history).
+  // Deep link / refresh persistence via the URL query (?t=<threadId>). The fragment is reserved for the
+  // #secret, so the thread hint rides in the query (a non-secret routing id). On load we honour it ONCE the
+  // wanted thread shows up in the roster (a refresh restores the last one) — falling through to the
+  // connected-default pick otherwise. As the user switches threads we keep the query in step (replaceState,
+  // so it survives refresh without spamming history), preserving the fragment.
   const wantedThreadRef = useRef<ThreadId | null>(readThreadHint());
   useEffect(() => {
     const want = wantedThreadRef.current;
@@ -330,9 +354,10 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   useEffect(() => {
     if (!activeThreadId) return;
     try {
-      history.replaceState(null, "", `#t=${encodeURIComponent(activeThreadId)}`);
+      // Update the ?t= query but keep the fragment (the #secret) intact.
+      history.replaceState(null, "", `?t=${encodeURIComponent(activeThreadId)}${location.hash}`);
     } catch {
-      /* fragment is a nice-to-have; ignore if blocked */
+      /* the hint is a nice-to-have; ignore if blocked */
     }
   }, [activeThreadId]);
 
@@ -525,6 +550,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
       onThemeChange={setTheme}
     />
   );
+
+  if (expired) return <SessionExpired reason={expired} />;
 
   return (
     <div ref={appRootRef} className="flex h-full flex-col bg-canvas px-safe">

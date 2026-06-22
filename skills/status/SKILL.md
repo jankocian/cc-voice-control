@@ -34,4 +34,6 @@ Summarize for the user: **active** (running in this pane), **stopped** (no sessi
   `/voice-control:start` after saving.
 - Otherwise, if a session is present, **reproduce the QR block character-for-character inside a
   fenced code block** (so it stays scannable) and show the phone `sessionUrl` beneath it as a
-  tap/copy fallback.
+  tap/copy fallback. Note that already-connected devices keep working, but connecting a **new**
+  device needs an open pairing window — if scanning this code doesn't connect, run
+  `/voice-control:pair` to open one (~90s).

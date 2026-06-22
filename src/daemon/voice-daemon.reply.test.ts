@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
+import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
 import { synthesizeSpeech } from "./openai.js";
 import { TAIL_BYTES } from "./transcript-reader.js";
 import { VoiceDaemon } from "./voice-daemon.js";
@@ -102,13 +103,17 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
   let bridge: WebSocketServer;
   let bridgePort: number;
   let daemonOut: unknown[]; // envelopes the daemon SENDS to the bridge
-  let sendToDaemon: ((event: unknown) => void) | undefined;
+  let sendToDaemon: ((event: unknown) => Promise<void>) | undefined;
+  // The E2E key both ends derive from the session secret ("sek"); the test seals commands to the daemon and
+  // opens the daemon's sealed replies exactly as the phone would (the worker only ever sees opaque blobs).
+  let key: CryptoKey;
 
   beforeEach(async () => {
     prevDataDir = process.env.CLAUDE_PLUGIN_DATA;
     dataDir = mkdtempSync(join(tmpdir(), "voice-reply-test-"));
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
     vi.mocked(synthesizeSpeech).mockClear();
+    key = await deriveKey("sek");
 
     daemonOut = [];
     sendToDaemon = undefined; // reset so each test waits for ITS daemon's socket, not the prior one's
@@ -116,7 +121,14 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     await new Promise<void>((r) => bridge.once("listening", r));
     bridgePort = (bridge.address() as { port: number }).port;
     bridge.on("connection", (sock) => {
-      sendToDaemon = (event) => sock.send(JSON.stringify({ channel: "daemon", threadId: "SURF", event }));
+      sendToDaemon = async (event) =>
+        sock.send(
+          JSON.stringify({
+            channel: "daemon",
+            threadId: "SURF",
+            enc: await sealJson(key, event, aad("daemon", "SURF"))
+          })
+        );
       sock.on("message", (raw) => {
         try {
           daemonOut.push(JSON.parse(raw.toString()));
@@ -149,6 +161,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       surface: "SURF",
       threadId: "SURF",
       secret: "sek",
+      daemonKey: "dk",
       sessionId: "sid",
       browserUrl: "https://voice.example.com/s/sek"
     });
@@ -158,7 +171,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     const port = JSON.parse(readFileSync(join(dataDir, "runtime", "SURF.json"), "utf8")).port as number;
 
     // Phone asks for a status → the daemon enqueues + "injects" the canned prompt (a tracked voice turn).
-    sendToDaemon?.({ type: "status_request" });
+    await sendToDaemon?.({ type: "status_request" });
     await sleep(150);
     // The turn opens: the prompt is now a real user record → /turn-open records its read floor + binds it.
     writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
@@ -182,10 +195,16 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
   // a tick before it actually sends the audio to the bridge, so a one-shot check can race it.
   async function waitForTtsRequestId(): Promise<string | undefined> {
     for (let i = 0; i < 40; i++) {
-      const id = daemonOut
-        .map((e) => e as { channel?: string; event?: { type?: string; requestId?: string } })
-        .find((e) => e.channel === "browser" && e.event?.type === "tts_audio")?.event?.requestId;
-      if (id) return id;
+      // The daemon→browser payload is sealed; open each browser-channel envelope to find the tts_audio.
+      for (const env of daemonOut as { channel?: string; threadId?: string; enc?: EncBlob }[]) {
+        if (env.channel !== "browser" || !env.enc) continue;
+        const event = await openJson<{ type?: string; requestId?: string }>(
+          key,
+          env.enc,
+          aad("browser", env.threadId ?? "SURF")
+        );
+        if (event.type === "tts_audio") return event.requestId;
+      }
       await sleep(50);
     }
     return undefined;
@@ -228,6 +247,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       surface: "SURF",
       threadId: "SURF",
       secret: "sek",
+      daemonKey: "dk",
       sessionId: "sid",
       browserUrl: "https://voice.example.com/s/sek"
     });
@@ -235,7 +255,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     for (let i = 0; i < 50 && !sendToDaemon; i++) await sleep(20);
     const port = JSON.parse(readFileSync(join(dataDir, "runtime", "SURF.json"), "utf8")).port as number;
 
-    sendToDaemon?.({ type: "status_request" });
+    await sendToDaemon?.({ type: "status_request" });
     await sleep(150);
 
     // A prior turn already happened: the daemon has read the transcript once, so it knows where the file

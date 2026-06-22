@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ThreadInfo } from "../../src/shared/protocol";
+import type { WireThreadInfo } from "../../src/shared/protocol";
 import { buildRoster, isLastDaemon, rosterKey, type StoredThread, storedFromInfo, threadIdFromKey } from "./registry";
 
-const labelA = { title: "voice-control · main", repo: "voice-control", branch: "main", cwd: "voice-control" };
-const labelB = { title: "api · feat/x", repo: "api", branch: "feat/x", cwd: "api" };
+// Labels are sealed EncBlobs on the wire / in storage — the DO stores and relays them opaquely and
+// never reads their contents, so these stand-ins are all the roster logic ever sees.
+const labelA: StoredThread["label"] = { iv: "ivA", ct: "ctA" };
+const labelB: StoredThread["label"] = { iv: "ivB", ct: "ctB" };
 
 function stored(label: StoredThread["label"], lastSeenAt: number | null): StoredThread {
   return { label, state: "idle", listening: true, lastSeenAt };
@@ -18,7 +20,7 @@ describe("rosterKey / threadIdFromKey roundtrip", () => {
 
 describe("storedFromInfo", () => {
   it("clears lastSeenAt (a freshly-registered thread is live right now)", () => {
-    const info: ThreadInfo = { threadId: "s", label: labelA, state: "working", listening: false };
+    const info: WireThreadInfo = { threadId: "s", label: labelA, state: "working", listening: false };
     expect(storedFromInfo(info)).toEqual({ label: labelA, state: "working", listening: false, lastSeenAt: null });
   });
 });
