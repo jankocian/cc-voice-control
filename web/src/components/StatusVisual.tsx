@@ -81,9 +81,9 @@ export function StatusVisual({
       {!mini && (
         <div
           className={cn(
-            "h-32 w-full bg-[radial-gradient(ellipse_at_center,currentColor,transparent_72%)] transition-opacity duration-500",
+            "h-28 w-64 bg-[radial-gradient(ellipse_at_center,currentColor,transparent_65%)] transition-opacity duration-500",
             speaking ? "text-violet" : ready ? "text-success" : "text-coral",
-            recording || active ? "opacity-[0.18]" : ready ? "opacity-[0.12]" : "opacity-[0.07]"
+            recording || active ? "opacity-[0.12]" : ready ? "opacity-[0.08]" : "opacity-[0.05]"
           )}
         />
       )}
