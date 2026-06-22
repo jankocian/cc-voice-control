@@ -19467,23 +19467,28 @@ function isRealUserTurn(r) {
   const text = extractText(r.message?.content);
   return text.length > 0 && !text.startsWith("/");
 }
-function isClaudeReply(r) {
+function claudeText(r) {
   if (roleOf(r) !== "assistant" || r.isSidechain)
-    return false;
+    return;
+  const text = extractText(r.message?.content);
+  if (!text)
+    return;
   const stop = r.message?.stop_reason;
-  if (!stop || stop === "tool_use")
-    return false;
-  return extractText(r.message?.content).length > 0;
+  return { text, interim: !(stop === "end_turn" || stop === "max_tokens") };
 }
 function projectTurns(records, maxTurns = 40) {
   const turns = [];
   for (const r of records) {
     if (!r.uuid)
       continue;
-    const role = isRealUserTurn(r) ? "user" : isClaudeReply(r) ? "claude" : undefined;
-    if (!role)
-      continue;
-    turns.push({ uuid: r.uuid, timestamp: toEpoch(r.timestamp), role, text: extractText(r.message?.content) });
+    const ts = toEpoch(r.timestamp);
+    if (isRealUserTurn(r)) {
+      turns.push({ uuid: r.uuid, timestamp: ts, role: "user", text: extractText(r.message?.content), interim: false });
+    } else {
+      const c = claudeText(r);
+      if (c)
+        turns.push({ uuid: r.uuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
+    }
   }
   turns.sort((a, b) => a.timestamp - b.timestamp);
   return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
@@ -19491,7 +19496,7 @@ function projectTurns(records, maxTurns = 40) {
 function pairReplies(turns) {
   const pairs = [];
   for (let i = 0;i < turns.length; i++) {
-    if (turns[i].role !== "claude")
+    if (turns[i].role !== "claude" || turns[i].interim)
       continue;
     let prompt;
     for (let j = i - 1;j >= 0; j--) {
@@ -19681,6 +19686,7 @@ class VoiceDaemon {
   pending = [];
   spoken = new Set;
   floor = 0;
+  speakSteps = false;
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
   label;
@@ -19726,7 +19732,7 @@ class VoiceDaemon {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/turn-open" && route !== "/turn-close" && route !== "/reset" && route !== "/spawn") {
+        if (route !== "/turn-open" && route !== "/turn-progress" && route !== "/turn-close" && route !== "/reset" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -19756,6 +19762,13 @@ class VoiceDaemon {
               this.turns.turnOpened(realPrompt);
               this.bindVoicePrompt(realPrompt);
               this.projectAndEmit();
+            } else if (route === "/turn-progress") {
+              const { transcriptPath } = JSON.parse(body || "{}");
+              if (transcriptPath)
+                this.lastTranscriptPath = transcriptPath;
+              const turns = this.projectedNow();
+              this.sendToBrowser(this.historyFrom(turns));
+              this.speakNewSteps(turns);
             } else {
               const { transcriptPath } = JSON.parse(body || "{}");
               if (transcriptPath)
@@ -19853,11 +19866,12 @@ class VoiceDaemon {
         if (this.lastTranscriptPath)
           this.projectAndEmit();
         return;
-      case "get_audio": {
-        const audio = this.audio.get(event.requestId);
-        this.sendToBrowser(audio ? { type: "tts_audio", requestId: event.requestId, replay: true, ...audio } : { type: "error", requestId: event.requestId, message: "Audio for that reply is no longer available." });
+      case "get_audio":
+        await this.serveAudio(event.requestId);
         return;
-      }
+      case "set_speak_steps":
+        this.speakSteps = event.on === true;
+        return;
       case "spawn_thread": {
         const result = await this.spawnThread(event.cwd);
         if (!result.ok) {
@@ -19994,11 +20008,39 @@ class VoiceDaemon {
         timestamp: t.timestamp,
         role: t.role,
         text: t.text,
-        hasAudio: this.audio.has(t.uuid)
+        hasAudio: this.audio.has(t.uuid),
+        interim: t.interim
       })),
       ...this.pending.filter((p) => p.userUuid === undefined).map((p) => ({ requestId: p.id, timestamp: p.ts, role: "user", text: p.text, hasAudio: false }))
     ];
     return { type: "history", turns: rows };
+  }
+  speakNewSteps(turns) {
+    if (!this.speakSteps)
+      return;
+    const voice = this.pending.find((p) => p.opened && p.userTs !== undefined);
+    if (!voice)
+      return;
+    for (const t of turns) {
+      if (!t.interim || this.spoken.has(t.uuid) || t.timestamp < (voice.userTs ?? 0))
+        continue;
+      this.remember(this.spoken, t.uuid, MAX_AUDIO_ENTRIES * 4);
+      this.speak(t.uuid, t.text);
+    }
+  }
+  async serveAudio(uuid3) {
+    let audio = this.audio.get(uuid3);
+    if (!audio) {
+      const turn = this.projectedNow().find((t) => t.uuid === uuid3);
+      if (turn) {
+        try {
+          const synth = await synthesizeSpeech(this.init.config, capForSpeech(turn.text));
+          if (synth.audioBase64)
+            audio = this.storeAudio(uuid3, { audioBase64: synth.audioBase64, mimeType: synth.mimeType });
+        } catch {}
+      }
+    }
+    this.sendToBrowser(audio ? { type: "tts_audio", requestId: uuid3, replay: true, ...audio } : { type: "error", requestId: uuid3, message: "Audio for that reply is no longer available." });
   }
   async handleTurnClose() {
     if (!this.lastTranscriptPath)
@@ -20036,18 +20078,22 @@ class VoiceDaemon {
       return;
     return turns.find((t) => t.role === "claude" && t.timestamp > (entry.userTs ?? 0) && !this.spoken.has(t.uuid));
   }
+  storeAudio(uuid3, audio) {
+    this.audio.set(uuid3, audio);
+    while (this.audio.size > MAX_AUDIO_ENTRIES) {
+      const oldest = this.audio.keys().next().value;
+      if (oldest === undefined)
+        break;
+      this.audio.delete(oldest);
+    }
+    return audio;
+  }
   async speak(uuid3, text) {
     try {
       const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
       if (!audioBase64)
         return;
-      this.audio.set(uuid3, { audioBase64, mimeType });
-      while (this.audio.size > MAX_AUDIO_ENTRIES) {
-        const oldest = this.audio.keys().next().value;
-        if (oldest === undefined)
-          break;
-        this.audio.delete(oldest);
-      }
+      this.storeAudio(uuid3, { audioBase64, mimeType });
       this.sendToBrowser({ type: "tts_audio", requestId: uuid3, audioBase64, mimeType });
     } catch (error51) {
       const message = error51 instanceof Error ? error51.message : String(error51);
