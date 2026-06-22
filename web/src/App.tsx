@@ -4,6 +4,7 @@ import { Hero } from "./components/Hero";
 import { MiniControls } from "./components/MiniControls";
 import { SettingsMenu } from "./components/SettingsMenu";
 import { ThreadPager } from "./components/ThreadPager";
+import { Toaster, toast } from "./components/Toaster";
 import { TopBar } from "./components/TopBar";
 import { useBridge } from "./hooks/useBridge";
 import { useNow } from "./hooks/useElapsed";
@@ -57,6 +58,17 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     window.setTimeout(() => pendingSpawnIdsRef.current.delete(spawnId), SPAWN_FOLLOW_TIMEOUT_MS);
   }, []);
 
+  // Spawn progress toast: a persistent "Spawning a new agent…" loader from the tap until the new thread
+  // actually joins (resolved below in onRoster) or we time out into a retryable error — so the user has a
+  // clear signal during the several-second gap instead of the active thread's pill flickering.
+  const spawnToastRef = useRef<string | null>(null);
+  const spawnTimerRef = useRef(0);
+  const resolveSpawnToast = useCallback(() => {
+    if (spawnTimerRef.current) window.clearTimeout(spawnTimerRef.current);
+    if (spawnToastRef.current) toast.close(spawnToastRef.current);
+    spawnToastRef.current = null;
+  }, []);
+
   // Audio-on-demand: tapping play on a history row fetches its bytes from the ACTIVE thread's daemon.
   const sendDaemonRef = useRef<
     ((threadId: ThreadId, command: { type: "get_audio"; requestId: string }) => boolean) | null
@@ -84,10 +96,11 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
         pendingSpawnIdsRef.current.has(event.thread.spawnId)
       ) {
         pendingSpawnIdsRef.current.delete(event.thread.spawnId);
+        resolveSpawnToast(); // the new agent is online — dismiss the progress toast
         switchThreadRef.current(event.thread.threadId);
       }
     },
-    [threads]
+    [threads, resolveSpawnToast]
   );
 
   const bridge = useBridge({ secret: credentials.secret, onEvent: handleContentEvent, onRoster });
@@ -140,6 +153,32 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     [stopPlayback, threads]
   );
   switchThreadRef.current = switchThread;
+
+  // Open a new agent (the bottom switcher's "New session"). Routed to the ACTIVE thread's daemon — if it
+  // isn't reachable, make that unmissable (red pill). Otherwise raise a persistent progress toast that
+  // lives until the new thread joins (resolveSpawnToast in onRoster) or times out into a retryable error.
+  const handleSpawnRef = useRef<() => void>(() => {});
+  const handleSpawn = useCallback(() => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId || !sendDaemon(threadId, { type: "spawn_thread" })) {
+      showFlash("Start a new session from a connected thread", "alert");
+      return;
+    }
+    resolveSpawnToast(); // clear any prior one
+    spawnToastRef.current = toast.add({ title: "Spawning a new agent…", type: "loading", timeout: 0 });
+    spawnTimerRef.current = window.setTimeout(() => {
+      if (!spawnToastRef.current) return;
+      toast.update(spawnToastRef.current, {
+        type: "error",
+        title: "Couldn’t spawn a new agent",
+        description: "It didn’t come online in time.",
+        timeout: 0,
+        actionProps: { children: "Try again", onClick: () => handleSpawnRef.current() }
+      });
+      spawnToastRef.current = null; // detach: the error toast now persists until dismissed / retried
+    }, SPAWN_FOLLOW_TIMEOUT_MS);
+  }, [sendDaemon, showFlash, resolveSpawnToast]);
+  handleSpawnRef.current = handleSpawn;
 
   // Deep link / refresh persistence via the URL fragment (#t=<threadId>). On load we honour it ONCE the
   // wanted thread shows up in the roster (a scanned pane's QR carries its own thread; a refresh restores
@@ -243,6 +282,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     position: playback.position,
     duration: playback.duration,
     playableIds: playback.playableIds,
+    audioStatus: playback.audioStatus,
     onPlay: playback.playEntry,
     onReplay: playback.replayEntry,
     onSeek: playback.seekEntry
@@ -274,6 +314,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
 
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">
+      <Toaster />
       <TopBar>
         <SettingsMenu
           speakMode={speakMode}
@@ -316,7 +357,7 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
           rows={switcherRows}
           activeThreadId={activeThreadId}
           onSelect={switchThread}
-          onSpawn={voice.onSpawn}
+          onSpawn={handleSpawn}
         />
       </div>
     </div>

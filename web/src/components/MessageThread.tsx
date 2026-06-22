@@ -1,3 +1,4 @@
+import { Loader2, RotateCcw } from "lucide-react";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
 import { StepRow } from "@/components/StepRow";
@@ -9,10 +10,39 @@ export type ThreadPlayback = {
   position: number;
   duration: number;
   playableIds: ReadonlySet<string>;
+  // Per-reply audio lifecycle (pending = synthesizing, failed = retryable) for the loading/retry indicator.
+  audioStatus: ReadonlyMap<string, "pending" | "failed">;
   onPlay: (requestId: string) => void;
   onReplay: (requestId: string) => void;
   onSeek: (requestId: string, seconds: number) => void;
 };
+
+// Shown in an agent bubble while its audio is still being synthesized.
+function AudioPending() {
+  return (
+    <div className="flex items-center gap-2 text-xs font-medium text-violet-ink/70">
+      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+      <span>Generating voice…</span>
+    </div>
+  );
+}
+
+// Shown when synthesis failed — tapping re-requests it (the daemon re-synthesizes on demand).
+function AudioRetry({ onRetry }: { onRetry: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onRetry();
+      }}
+      className="flex items-center gap-1.5 rounded-full text-xs font-medium text-danger transition-colors hover:text-danger/80"
+    >
+      <RotateCcw className="size-3.5" aria-hidden="true" />
+      <span>Voice failed — tap to retry</span>
+    </button>
+  );
+}
 
 // The chat thread. `messages` are newest-first and render in that order, so the
 // latest turn sits at the top, directly under the hero. Agent rows with attached
@@ -48,8 +78,10 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
           );
         }
 
-        const playable = message.requestId ? playback.playableIds.has(message.requestId) : false;
-        const id = message.requestId ?? message.id;
+        const requestId = message.requestId;
+        const playable = requestId ? playback.playableIds.has(requestId) : false;
+        const status = requestId ? playback.audioStatus.get(requestId) : undefined;
+        const id = requestId ?? message.id;
         const loaded = playback.loadedId === id;
 
         return (
@@ -58,19 +90,23 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
             side="agent"
             body={message.body}
             time={message.time}
-            onActivate={playable && message.requestId ? () => playback.onPlay(message.requestId as string) : undefined}
+            onActivate={playable && requestId ? () => playback.onPlay(requestId) : undefined}
           >
-            {playable && message.requestId && (
+            {playable && requestId ? (
               <InlineAudioPlayer
-                playing={playback.playingId === message.requestId}
+                playing={playback.playingId === requestId}
                 loaded={loaded}
                 position={loaded ? playback.position : 0}
                 duration={loaded ? playback.duration : 0}
-                onPlayPause={() => playback.onPlay(message.requestId as string)}
-                onReplay={() => playback.onReplay(message.requestId as string)}
-                onSeek={(seconds) => playback.onSeek(message.requestId as string, seconds)}
+                onPlayPause={() => playback.onPlay(requestId)}
+                onReplay={() => playback.onReplay(requestId)}
+                onSeek={(seconds) => playback.onSeek(requestId, seconds)}
               />
-            )}
+            ) : status === "pending" ? (
+              <AudioPending />
+            ) : status === "failed" && requestId ? (
+              <AudioRetry onRetry={() => playback.onPlay(requestId)} />
+            ) : null}
           </MessageBubble>
         );
       })}

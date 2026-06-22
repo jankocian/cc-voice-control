@@ -47,7 +47,7 @@ export function useThreadMessages({
   const transcribingRef = useRef<ThreadId | null>(null);
   transcribingRef.current = transcribingThreadId;
 
-  const { dropAudio, attachAudio, markPlayable } = playback;
+  const { dropAudio, attachAudio, markPlayable, noteAudioStatus } = playback;
 
   const handleContentEvent = useCallback(
     (threadId: ThreadId, event: BridgeContentEvent) => {
@@ -92,6 +92,10 @@ export function useThreadMessages({
             event.replay === true || threadId !== activeThreadIdRef.current
           );
           return;
+        case "tts_status":
+          // Loading / failed indicator for a reply's audio (cleared when its tts_audio lands).
+          noteAudioStatus(event.requestId, event.state);
+          return;
         case "spawn_pending":
           // A daemon (the "+" or the spawn skill) opened a new session with this id; the new thread
           // echoes it in its thread_joined → App follows it.
@@ -106,7 +110,7 @@ export function useThreadMessages({
           return;
       }
     },
-    [attachAudio, dropAudio, markPlayable, showFlash, noteActivity, activeThreadIdRef, armSpawnFollow]
+    [attachAudio, dropAudio, markPlayable, noteAudioStatus, showFlash, noteActivity, activeThreadIdRef, armSpawnFollow]
   );
 
   // Release per-thread state for threads the roster fully dropped (a snapshot without them; a

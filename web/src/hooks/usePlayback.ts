@@ -34,10 +34,14 @@ export type Playback = {
   // both locally-cached audio AND history rows the daemon flags fetchable (tap-to-play
   // before the bytes arrive). See markPlayable.
   playableIds: ReadonlySet<string>;
+  // Per-reply audio lifecycle: "pending" (synthesizing) / "failed" (retryable). Absent once playable.
+  audioStatus: ReadonlyMap<string, "pending" | "failed">;
   speaking: boolean;
   playbackRate: number;
   formattedRate: string;
   attachAudio: (requestId: string, audioBase64: string, mimeType: string, replay: boolean) => void;
+  // Record a daemon `tts_status` for a reply (drives the loading / retry indicator).
+  noteAudioStatus: (requestId: string, state: "pending" | "failed") => void;
   // Mark replies the daemon still has audio for (from a `history` event) as playable, even
   // though their bytes aren't cached yet — tapping play fetches them on demand.
   markPlayable: (requestIds: readonly string[]) => void;
@@ -77,6 +81,26 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playableIds, setPlayableIds] = useState<ReadonlySet<string>>(new Set());
+  // Per-reply audio lifecycle from the daemon: "pending" while it synthesizes, "failed" on error → the
+  // message shows a loading indicator / retry until the audio lands (which clears the entry).
+  const [audioStatus, setAudioStatus] = useState<ReadonlyMap<string, "pending" | "failed">>(new Map());
+  const clearAudioStatus = useCallback((requestId: string): void => {
+    setAudioStatus((prev) => {
+      if (!prev.has(requestId)) return prev;
+      const next = new Map(prev);
+      next.delete(requestId);
+      return next;
+    });
+  }, []);
+  const noteAudioStatus = useCallback((requestId: string, state: "pending" | "failed"): void => {
+    if (!requestId) return;
+    setAudioStatus((prev) => {
+      if (prev.get(requestId) === state) return prev;
+      const next = new Map(prev);
+      next.set(requestId, state);
+      return next;
+    });
+  }, []);
   const [playbackRate, setPlaybackRate] = useState<number>(() => {
     let stored = NaN;
     try {
@@ -271,6 +295,7 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
     (requestId: string, audioBase64: string, mimeType: string, replay: boolean): void => {
       if (!requestId || !audioBase64) return;
       audioByRequest.current.set(requestId, { audioBase64, mimeType });
+      clearAudioStatus(requestId); // audio arrived → no longer pending/failed
       setPlayableIds((prev) => {
         if (prev.has(requestId)) return prev;
         const next = new Set(prev);
@@ -288,7 +313,7 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
       // Otherwise: auto-play a fresh reply; a missed (replayed) one waits for a tap.
       if (!getRecordingRef.current() && !replay) playEntry(requestId);
     },
-    [playEntry]
+    [playEntry, clearAudioStatus]
   );
 
   // History rows (hasAudio) become playable before their bytes are fetched, so the inline
@@ -358,6 +383,7 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
       }
       if (pendingPlayIdRef.current === requestId) pendingPlayIdRef.current = null;
       audioByRequest.current.delete(requestId);
+      clearAudioStatus(requestId);
       setPlayableIds((prev) => {
         if (!prev.has(requestId)) return prev;
         const next = new Set(prev);
@@ -365,7 +391,7 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
         return next;
       });
     },
-    [stopPlayback]
+    [stopPlayback, clearAudioStatus]
   );
 
   const speaking = playingId !== null;
@@ -378,10 +404,12 @@ export function usePlayback({ getRecording, onRequestAudio }: UsePlaybackOptions
     position,
     duration,
     playableIds,
+    audioStatus,
     speaking,
     playbackRate,
     formattedRate,
     attachAudio,
+    noteAudioStatus,
     markPlayable,
     playEntry,
     replayEntry,
