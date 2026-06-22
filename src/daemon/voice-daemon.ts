@@ -11,6 +11,7 @@ import type {
   HistoryTurn,
   InjectMode,
   SessionState,
+  SpeakMode,
   ThreadId,
   ThreadInfo
 } from "../shared/protocol.js";
@@ -139,9 +140,10 @@ export class VoiceDaemon {
   private readonly pending: PendingVoice[] = [];
   private readonly spoken = new Set<string>();
   private floor = 0;
-  // The phone's "read every step" preference: when true, Claude's interim steps on VOICE turns are spoken
-  // aloud as they appear (not just the final reply). Off by default; set via set_speak_steps.
-  private speakSteps = false;
+  // The phone's autoplay preference for VOICE turns: "off" speaks nothing, "final" speaks just the final
+  // reply (default — the prior behaviour), "all" also speaks each interim step. Tap-to-play works in every
+  // mode. Set via set_speak_mode.
+  private speakMode: SpeakMode = "final";
 
   // The spawning session's LIVE permission mode (forwarded each turn by the turn-open hook). A spawn
   // launches with `--permission-mode <this>` so it inherits the user's mode EXACTLY (env won't carry
@@ -420,8 +422,8 @@ export class VoiceDaemon {
         // don't pre-synthesize every step), or tell the phone gracefully if the row is gone from the tail.
         await this.serveAudio(event.requestId);
         return;
-      case "set_speak_steps":
-        this.speakSteps = event.on === true;
+      case "set_speak_mode":
+        if (event.mode === "off" || event.mode === "final" || event.mode === "all") this.speakMode = event.mode;
         return;
       case "spawn_thread": {
         // The phone "+" : open a NEW cmux workspace running Claude + /voice-control:start. It reads
@@ -620,7 +622,7 @@ export class VoiceDaemon {
   // (final replies still speak via handleTurnClose). Gated to the in-flight voice turn (steps after its
   // prompt) so turning the toggle on doesn't read out a backlog, and a terminal-typed turn is never read.
   private speakNewSteps(turns: ProjectedTurn[]): void {
-    if (!this.speakSteps) return;
+    if (this.speakMode !== "all") return;
     const voice = this.pending.find((p) => p.opened && p.userTs !== undefined);
     if (!voice) return;
     for (const t of turns) {
@@ -679,7 +681,8 @@ export class VoiceDaemon {
       if (!reply || this.spoken.has(reply.uuid)) continue;
       this.pending.splice(i, 1);
       this.remember(this.spoken, reply.uuid, MAX_AUDIO_ENTRIES * 4);
-      void this.speak(reply.uuid, reply.text);
+      // "off" still resolves the turn + shows the reply, but doesn't auto-play it (tap-to-play remains).
+      if (this.speakMode !== "off") void this.speak(reply.uuid, reply.text);
     }
   }
 

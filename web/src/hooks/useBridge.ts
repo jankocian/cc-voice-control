@@ -5,6 +5,7 @@ import type {
   DaemonToBrowserEvent,
   RosterEvent,
   SessionRuntimeState,
+  SpeakMode,
   ThreadId
 } from "../lib/protocol";
 import { buildWebSocketUrl } from "../lib/session";
@@ -23,7 +24,7 @@ export type BridgeContentEvent = Extract<
 
 // Everything the daemon would need a requestId for, minus the requestId itself (the hook mints
 // it). `get_audio` already carries its own requestId (the reply being fetched), so the hook leaves
-// it untouched. `spawn_thread` and `set_speak_steps` carry no requestId.
+// it untouched. `spawn_thread` and `set_speak_mode` carry no requestId.
 export type DaemonCommand =
   | { type: "submit_audio"; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
   | { type: "status_request" }
@@ -31,7 +32,7 @@ export type DaemonCommand =
   | { type: "stop_task" }
   | { type: "sync" }
   | { type: "get_audio"; requestId: string }
-  | { type: "set_speak_steps"; on: boolean }
+  | { type: "set_speak_mode"; mode: SpeakMode }
   | { type: "spawn_thread"; cwd?: string };
 
 export type BridgeRuntime = {
@@ -91,9 +92,9 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     if (!connectedThreadsRef.current.has(threadId)) return false;
-    // spawn_thread + set_speak_steps are actions/settings, not turns — they carry no requestId.
+    // spawn_thread + set_speak_mode are actions/settings, not turns — they carry no requestId.
     const event = (
-      command.type === "spawn_thread" || command.type === "set_speak_steps"
+      command.type === "spawn_thread" || command.type === "set_speak_mode"
         ? command
         : { requestId: crypto.randomUUID(), ...command }
     ) as BrowserToDaemonEvent;
