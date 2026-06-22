@@ -47,12 +47,14 @@ export function ThreadPager({
     align: "start",
     containScroll: "keepSnaps",
     duration: 20,
-    // Don't page when the horizontal drag starts inside a horizontally-scrollable element (a wide code
-    // block's overflow-x) — let that element scroll instead, so the user can reveal clipped code.
+    // Don't page when the horizontal drag starts inside an element that owns the gesture: a
+    // horizontally-scrollable element (a wide code block's overflow-x — let it scroll to reveal clipped
+    // code), or one marked `data-no-pager` (the audio scrubber — let it seek without also paging threads).
     watchDrag: (api, evt) => {
       let node = evt.target as HTMLElement | null;
       const root = api.rootNode();
       while (node && node !== root) {
+        if (node.hasAttribute("data-no-pager")) return false;
         if (node.scrollWidth > node.clientWidth + 1) {
           const overflowX = getComputedStyle(node).overflowX;
           if (overflowX === "auto" || overflowX === "scroll") return false;
