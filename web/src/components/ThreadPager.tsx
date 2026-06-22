@@ -32,8 +32,10 @@ export function ThreadPager({
 }: {
   threads: PagerThread[];
   activeThreadId: ThreadId | null;
-  // Renders the in-flow hero for a page; `isActive` wires the live mic/canvas to the on-screen page.
-  renderHero: (isActive: boolean) => ReactNode;
+  // Renders the in-flow hero for a page; `isActive` wires the live mic/canvas to the on-screen page, and
+  // `threadId` lets the hero show THAT thread's own status (so an off-screen slide never mirrors the
+  // active thread's pill/timer/flash).
+  renderHero: (isActive: boolean, threadId: ThreadId) => ReactNode;
   playback: ThreadPlayback;
   onActivate: (threadId: ThreadId) => void;
   // The active page's vertical scroll root + its hero sentinel, lifted to App so the shared
@@ -155,7 +157,7 @@ export function ThreadPager({
                 className="flex h-full flex-col overflow-y-auto overscroll-y-contain pb-safe"
               >
                 {/* The hero, in normal flow at the top of this slide — scrolls away with the messages. */}
-                {renderHero(isActive)}
+                {renderHero(isActive, threadId)}
                 {/* Hero sentinel: when it scrolls above the top on the ACTIVE slide (hero gone), the
                     condensed bar appears. Only the active slide wires it (it's the one being read). */}
                 <div
