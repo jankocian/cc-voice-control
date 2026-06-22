@@ -19493,6 +19493,11 @@ function projectTurns(records, maxTurns = 40) {
   turns.sort((a, b) => a.timestamp - b.timestamp);
   return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
 }
+function dropSessionAnnouncement(turns, sessionUrl) {
+  if (!sessionUrl)
+    return turns;
+  return turns.filter((t) => !(t.role === "claude" && t.text.includes(sessionUrl)));
+}
 function pairReplies(turns) {
   const pairs = [];
   for (let i = 0;i < turns.length; i++) {
@@ -19974,7 +19979,8 @@ class VoiceDaemon {
   projectedNow() {
     if (!this.lastTranscriptPath)
       return [];
-    return projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor);
+    const turns = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor);
+    return dropSessionAnnouncement(turns, this.init.browserUrl);
   }
   bindVoicePrompt(prompt) {
     const text = prompt.trim();
