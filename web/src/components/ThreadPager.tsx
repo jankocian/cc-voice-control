@@ -1,51 +1,26 @@
-import {
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-  type PointerEvent as ReactPointerEvent,
-  useEffect,
-  useRef
-} from "react";
+import useEmblaCarousel from "embla-carousel-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { MessageThread, type ThreadPlayback } from "@/components/MessageThread";
 import type { Message } from "@/lib/messages";
 import type { ThreadId } from "@/lib/protocol";
-
-// A page must be at least this visible (centered) in the pager to become the active thread on a
-// swipe-settle — also the IntersectionObserver threshold.
-const ACTIVE_PAGE_RATIO = 0.5;
-// The pager is "already on" a page when its scrollLeft is within this many px of the page offset,
-// so a pill/dropdown pick after a swipe already landed there skips a redundant programmatic scroll.
-const SETTLE_EPSILON_PX = 1;
-// Suppress the settle→onActivate observer for this long after starting a smooth programmatic scroll
-// (a pill/dropdown pick), covering the scroll animation. If it ever under-covers on a slow device,
-// the guard clears early and the observer just re-activates the target page on settle —
-// self-correcting, never wrong.
-const PROGRAMMATIC_SCROLL_MS = 400;
-// Horizontal movement (px) before a mouse/pen press becomes a page-drag — keeps a click/text-select
-// or a vertical scroll from being stolen as a swipe.
-const DRAG_THRESHOLD_PX = 8;
+import { cn } from "@/lib/utils";
 
 export type PagerThread = {
   threadId: ThreadId;
   messages: Message[];
 };
 
-// Horizontal CSS scroll-snap pager: one page per thread, swiped natively (momentum + snap, zero
-// JS gesture code, no carousel lib — design §8.3). Each page is its own VERTICAL scroller holding
-// that thread's hero + message list, so each thread keeps an independent scroll position. The hero
-// is rendered IN THE FLOW at the top of each page (via `renderHero`) — not a pinned overlay — so it
-// scrolls away with the content like a normal header and never covers the messages or the scrollbar.
-// `renderHero(isActive)` lets App wire the live mic/canvas to the ACTIVE page only; off-screen pages
-// render an idle hero so a swipe stays visually continuous.
+// Horizontal thread carousel powered by Embla — one slide per thread. Embla owns the gesture: drag /
+// momentum / snap on touch AND mouse, with built-in angle detection so a vertical drag scrolls the
+// message list inside a slide while a horizontal drag pages between threads (the hand-rolled
+// scroll-snap + touch-action version couldn't do this reliably on iOS). Each slide is its own VERTICAL
+// scroller holding that thread's in-flow hero + messages, so threads keep independent scroll positions.
+// `renderHero(isActive)` wires the live mic/canvas to the on-screen slide only.
 //
-// Swipe ↔ active-thread sync is two-way: a settle on a page makes it active (IntersectionObserver
-// per page — the same primitive App already uses for the condensed bar); selecting a thread in
-// the pill scrolls the matching page into view (the `scrollTo` effect below).
-//
-// iOS Safari gesture tuning (§11-F): the outer pager declares `touch-action: pan-x` and the inner
-// vertical scrollers `touch-action: pan-y`, so the browser routes a horizontal drag to the pager
-// and a vertical drag to the message list instead of letting them fight for the same gesture.
-// `overscroll-behavior: contain` on both axes stops a scroll hitting one scroller's edge from
-// chaining into the other (e.g. a vertical fling at the top of the list flipping the page).
+// Swipe ↔ active-thread sync is two-way: Embla's `select` makes the snapped slide active; an external
+// switch (pill / dots / saved-thread restore) calls `scrollTo`. The first positioning JUMPS (no
+// animation) and the carousel stays hidden until then, so resuming the saved thread shows no swipe blip
+// — just a subtle fade-in.
 export function ThreadPager({
   threads,
   activeThreadId,
@@ -66,156 +41,79 @@ export function ThreadPager({
   activeScrollRootRef: (node: HTMLDivElement | null) => void;
   activeSentinelRef: (node: HTMLDivElement | null) => void;
 }) {
-  const pagerRef = useRef<HTMLDivElement>(null);
-  const pageRefs = useRef(new Map<ThreadId, HTMLDivElement>());
-  // Suppress the scroll-settle -> onActivate feedback while WE are programmatically scrolling to a
-  // selected page (a pill/dropdown pick), so the observer doesn't fight the imperative scroll.
-  const programmaticRef = useRef(false);
-  // The observer reads the latest active thread through a ref so it never has to re-subscribe on a
-  // switch; re-subscribing only matters when the set of pages changes (the effect's `threads` dep).
+  const [emblaRef, emblaApi] = useEmblaCarousel({ align: "start", duration: 22 });
+  const [ready, setReady] = useState(false);
+  // Read latest threads/active inside Embla's stable callback without re-subscribing each render.
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
   const activeThreadIdRef = useRef(activeThreadId);
   activeThreadIdRef.current = activeThreadId;
+  // The first scrollTo jumps (no animation); later ones (pill / dots) glide.
+  const didPositionRef = useRef(false);
 
-  // Observe which page is centered in the pager; the most-visible one becomes active. Depends on
-  // `threads` so a join/leave re-subscribes to the new set of page nodes (we observe each thread's
-  // node, so the nodes to watch change only when the thread list does).
+  // Swipe settle → the snapped slide becomes the active thread (a programmatic scrollTo also emits
+  // `select`, but it lands on the already-active thread, so onActivate is a no-op there).
   useEffect(() => {
-    const root = pagerRef.current;
-    if (!root) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (programmaticRef.current) return;
-        for (const entry of entries) {
-          if (!entry.isIntersecting || entry.intersectionRatio < ACTIVE_PAGE_RATIO) continue;
-          const threadId = (entry.target as HTMLElement).dataset.threadId;
-          if (threadId && threadId !== activeThreadIdRef.current) onActivate(threadId);
-        }
-      },
-      { root, threshold: ACTIVE_PAGE_RATIO }
-    );
-    for (const { threadId } of threads) {
-      const node = pageRefs.current.get(threadId);
-      if (node) observer.observe(node);
-    }
-    return () => observer.disconnect();
-  }, [threads, onActivate]);
+    if (!emblaApi) return;
+    const onSelect = () => {
+      const id = threadsRef.current[emblaApi.selectedScrollSnap()]?.threadId;
+      if (id && id !== activeThreadIdRef.current) onActivate(id);
+    };
+    emblaApi.on("select", onSelect);
+    return () => {
+      emblaApi.off("select", onSelect);
+    };
+  }, [emblaApi, onActivate]);
 
-  // A pill/dropdown selection (activeThreadId changed without a swipe) scrolls the matching page
-  // into view. Guarded by `programmaticRef` so the resulting settle doesn't re-fire onActivate.
+  // External switch (pill / dots) or the initial saved-thread restore → bring that slide into view.
+  // Jump on the first positioning (no blip resuming the saved thread), animate after. Reveal once
+  // positioned so the init→jump is never seen.
   useEffect(() => {
-    if (!activeThreadId) return;
-    const page = pageRefs.current.get(activeThreadId);
-    const pager = pagerRef.current;
-    if (!page || !pager) return;
-    if (Math.abs(page.offsetLeft - pager.scrollLeft) < SETTLE_EPSILON_PX) return; // already there (a swipe)
-    programmaticRef.current = true;
-    pager.scrollTo({ left: page.offsetLeft, behavior: "smooth" });
-    const done = window.setTimeout(() => {
-      programmaticRef.current = false;
-    }, PROGRAMMATIC_SCROLL_MS);
-    return () => window.clearTimeout(done);
-  }, [activeThreadId]);
-
-  // Drag-to-swipe for BOTH touch and mouse. Native horizontal scroll-snap is unreliable here because the
-  // inner page scroller declares `touch-action: pan-y` (so it owns vertical) — which on iOS blocks a
-  // horizontal swipe that STARTS on the message content from ever reaching the pager, so the swipe felt
-  // dead. We pan the pager manually instead: only hijack once a drag is clearly horizontal (vertical
-  // scroll + text selection are left alone), then on release snap to + activate the nearest page.
-  // `programmaticRef` is held high for the whole drag so the centre observer can't fight it, and a
-  // one-shot click guard stops the release from registering as a tap (e.g. toggling a message's audio).
-  const dragRef = useRef<{ x: number; y: number; left: number; active: boolean } | null>(null);
-  const suppressClickRef = useRef(false);
-
-  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    suppressClickRef.current = false;
-    // Only arm drag-paging when there's somewhere to page to — so a single-thread user keeps normal
-    // horizontal text selection. Ignore secondary mouse buttons (touch/pen report button 0).
-    if (threads.length < 2 || e.button !== 0) return;
-    const pager = pagerRef.current;
-    if (!pager) return;
-    dragRef.current = { x: e.clientX, y: e.clientY, left: pager.scrollLeft, active: false };
-  };
-
-  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    const pager = pagerRef.current;
-    if (!drag || !pager) return;
-    const dx = e.clientX - drag.x;
-    if (!drag.active) {
-      // Wait for a clearly-horizontal drag so vertical scroll + text selection are left alone.
-      if (Math.abs(dx) < DRAG_THRESHOLD_PX || Math.abs(dx) <= Math.abs(e.clientY - drag.y)) return;
-      drag.active = true;
-      programmaticRef.current = true; // freeze the centre observer for the duration of the drag
-      pager.setPointerCapture(e.pointerId);
-      pager.classList.add("select-none");
+    if (!emblaApi) return;
+    const idx = activeThreadId ? threads.findIndex((t) => t.threadId === activeThreadId) : -1;
+    if (idx >= 0) {
+      if (emblaApi.selectedScrollSnap() !== idx) emblaApi.scrollTo(idx, !didPositionRef.current);
+      didPositionRef.current = true; // consume the "jump" only on the first REAL positioning
+      setReady(true);
+    } else if (threads.length === 0) {
+      setReady(true); // nothing to position — reveal the empty pager
     }
-    e.preventDefault();
-    pager.scrollLeft = drag.left - dx;
-  };
-
-  const onPointerEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    dragRef.current = null;
-    const pager = pagerRef.current;
-    if (!drag?.active || !pager) return;
-    if (pager.hasPointerCapture(e.pointerId)) pager.releasePointerCapture(e.pointerId);
-    pager.classList.remove("select-none");
-    suppressClickRef.current = true; // the release shouldn't read as a tap on whatever's underneath
-    // Snap to + activate the nearest page (pages are full-width).
-    const idx = Math.max(0, Math.min(Math.round(pager.scrollLeft / pager.clientWidth), threads.length - 1));
-    pager.scrollTo({ left: idx * pager.clientWidth, behavior: "smooth" });
-    window.setTimeout(() => {
-      programmaticRef.current = false;
-    }, PROGRAMMATIC_SCROLL_MS);
-    const target = threads[idx]?.threadId;
-    if (target) onActivate(target);
-  };
-
-  const onClickCapture = (e: ReactMouseEvent<HTMLDivElement>) => {
-    if (!suppressClickRef.current) return;
-    suppressClickRef.current = false;
-    e.stopPropagation();
-    e.preventDefault();
-  };
+  }, [emblaApi, activeThreadId, threads]);
 
   return (
     <div
-      ref={pagerRef}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerEnd}
-      onPointerCancel={onPointerEnd}
-      onClickCapture={onClickCapture}
-      className="flex h-full snap-x snap-mandatory overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-width:none] [touch-action:pan-x]"
+      ref={emblaRef}
+      className={cn(
+        "h-full overflow-hidden transition-opacity duration-300 ease-soft",
+        ready ? "opacity-100" : "opacity-0"
+      )}
     >
-      {threads.map(({ threadId, messages }) => {
-        const isActive = threadId === activeThreadId;
-        return (
-          <div
-            key={threadId}
-            data-thread-id={threadId}
-            ref={(node) => {
-              if (node) pageRefs.current.set(threadId, node);
-              else pageRefs.current.delete(threadId);
-            }}
-            className="h-full w-full shrink-0 snap-center snap-always"
-          >
-            {/* The active page owns the lifted scroll-root + sentinel refs so the condensed bar
-                tracks it; inactive pages keep their own scroll position. */}
-            <div
-              ref={isActive ? activeScrollRootRef : undefined}
-              className="flex h-full flex-col overflow-y-auto overscroll-y-contain pb-safe [touch-action:pan-y]"
-            >
-              {/* The hero, in normal flow at the top of this page — scrolls away with the messages. */}
-              {renderHero(isActive)}
-              {/* Hero sentinel: when it scrolls above the top on the ACTIVE page (hero gone), the
-                  condensed bar appears. Only the active page wires it (it's the one being read). */}
-              <div ref={isActive ? activeSentinelRef : undefined} aria-hidden="true" className="h-px w-full shrink-0" />
-              <MessageThread messages={messages} playback={playback} />
+      <div className="flex h-full">
+        {threads.map(({ threadId, messages }) => {
+          const isActive = threadId === activeThreadId;
+          return (
+            <div key={threadId} className="h-full min-w-0 shrink-0 grow-0 basis-full">
+              {/* The active slide owns the lifted scroll-root + sentinel refs so the condensed bar
+                  tracks it; inactive slides keep their own scroll position. */}
+              <div
+                ref={isActive ? activeScrollRootRef : undefined}
+                className="flex h-full flex-col overflow-y-auto overscroll-y-contain pb-safe"
+              >
+                {/* The hero, in normal flow at the top of this slide — scrolls away with the messages. */}
+                {renderHero(isActive)}
+                {/* Hero sentinel: when it scrolls above the top on the ACTIVE slide (hero gone), the
+                    condensed bar appears. Only the active slide wires it (it's the one being read). */}
+                <div
+                  ref={isActive ? activeSentinelRef : undefined}
+                  aria-hidden="true"
+                  className="h-px w-full shrink-0"
+                />
+                <MessageThread messages={messages} playback={playback} />
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
