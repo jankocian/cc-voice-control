@@ -41,6 +41,7 @@ describe("VoiceDaemon runtime publication", () => {
       surface: "SURF",
       threadId: "SURF",
       secret: "sek",
+      daemonKey: "dk",
       sessionId: "sid",
       browserUrl: BROWSER_URL
     });

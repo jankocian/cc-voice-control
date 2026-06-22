@@ -19,5 +19,7 @@ export type {
   ThreadLabel,
   ThreadLeft,
   ThreadRegister,
-  ThreadRoster
+  ThreadRoster,
+  WireRosterEvent,
+  WireRosterThread
 } from "../../../src/shared/protocol";

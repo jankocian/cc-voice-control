@@ -5,19 +5,21 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadOrCreateSession, resolveConfig, threadRuntimePath, toBrowserUrl, toWebSocketUrl } from "./config.js";
 
 describe("voice remote URL helpers", () => {
-  it("creates browser session URLs from the single secret", () => {
-    expect(toBrowserUrl("https://voice.example.com/base", "secret")).toBe("https://voice.example.com/s/secret");
+  it("puts the sessionId in the path and the secret in the fragment", () => {
+    expect(toBrowserUrl("https://voice.example.com/base", "ab12cd34", "secret")).toBe(
+      "https://voice.example.com/s/ab12cd34#secret"
+    );
   });
 
-  it("creates daemon websocket URLs from https bridge URLs", () => {
-    expect(toWebSocketUrl("https://voice.example.com", "secret", "daemon")).toBe(
-      "wss://voice.example.com/ws/secret?role=daemon"
+  it("creates daemon websocket URLs routed by sessionId from https bridge URLs", () => {
+    expect(toWebSocketUrl("https://voice.example.com", "ab12cd34", "daemon")).toBe(
+      "wss://voice.example.com/ws/ab12cd34?role=daemon"
     );
   });
 
   it("creates local websocket URLs from http bridge URLs", () => {
-    expect(toWebSocketUrl("http://localhost:8787", "secret", "browser")).toBe(
-      "ws://localhost:8787/ws/secret?role=browser"
+    expect(toWebSocketUrl("http://localhost:8787", "ab12cd34", "browser")).toBe(
+      "ws://localhost:8787/ws/ab12cd34?role=browser"
     );
   });
 });
@@ -111,6 +113,10 @@ describe("loadOrCreateSession (one machine secret, shared by every pane)", () =>
     // sessionId is the short, non-secret hash label — distinct from the secret itself.
     expect(first.secret).not.toBe(first.sessionId);
     expect(first.sessionId.length).toBeGreaterThan(0);
+    // daemonKey is a second, independent capability secret — stable across calls and not the secret.
+    expect(first.daemonKey).toBe(second.daemonKey);
+    expect(first.daemonKey.length).toBeGreaterThan(0);
+    expect(first.daemonKey).not.toBe(first.secret);
   });
 
   it("writes session.json with 0600 permissions (it holds the capability secret)", () => {
@@ -123,8 +129,26 @@ describe("loadOrCreateSession (one machine secret, shared by every pane)", () =>
     const session = loadOrCreateSession();
     const onDisk = JSON.parse(readFileSync(join(dir, "session.json"), "utf8"));
     expect(onDisk.secret).toBe(session.secret);
+    expect(onDisk.daemonKey).toBe(session.daemonKey);
     expect(onDisk.sessionId).toBe(session.sessionId);
     expect(typeof onDisk.createdAt).toBe("number");
+  });
+
+  it("overwrites a malformed/old session.json (no daemonKey) and PERSISTS — not a new secret each start", () => {
+    // An older build wrote { secret, sessionId, createdAt } with no daemonKey. The file is present but
+    // won't parse under the new schema; we must re-mint AND persist, or every start gets a fresh URL.
+    const path = join(dir, "session.json");
+    writeFileSync(path, JSON.stringify({ secret: "old", sessionId: "old", createdAt: 1 }));
+    chmodSync(path, 0o644); // an old file could be world/group-readable; the overwrite must lock it down
+    const first = loadOrCreateSession();
+    expect(first.daemonKey.length).toBeGreaterThan(0);
+    // The overwrite must re-apply 0600 (writeFileSync's mode doesn't take effect when truncating).
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    // Persisted: a second call reads it back rather than minting a different secret.
+    const second = loadOrCreateSession();
+    expect(second.secret).toBe(first.secret);
+    expect(second.daemonKey).toBe(first.daemonKey);
+    expect(JSON.parse(readFileSync(path, "utf8")).daemonKey).toBe(first.daemonKey);
   });
 });
 

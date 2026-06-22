@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -209,12 +209,22 @@ export function writeSetupNeededRuntime(setup: ConfigSetupNeeded): void {
  * Replaces the per-activation randomBytes(16) that gave each pane a different URL.
  *
  *   $CLAUDE_PLUGIN_DATA/session.json  (mode 0600, like config.json)
- *   { "secret": "<base64url 128-bit>", "sessionId": "<sha256(secret)[:12]>", "createdAt": <ms> }
+ *   { "secret": "...", "daemonKey": "...", "sessionId": "...", "createdAt": <ms> }
+ *
+ * `daemonKey` is a SECOND, independent secret that authenticates the daemon ROLE to the bridge. It is
+ * never put in any URL/QR and is not derivable from `secret`, so a leaked phone URL (which carries only
+ * `secret`, in the fragment) cannot impersonate a daemon to re-open a pairing window or terminate the
+ * session. The bridge pins it to the session on the first daemon connect (trust-on-first-use).
  */
-export type MachineSession = { secret: string; sessionId: string };
+export type MachineSession = { secret: string; sessionId: string; daemonKey: string };
 
-const SESSION_SECRET_BYTES = 16; // 128 bits — uncrackable by online guessing; keeps the QR small.
-const SESSION_ID_CHARS = 12; // short, non-secret label derived from the secret's hash.
+const SESSION_SECRET_BYTES = 16; // 128 bits — the E2E key seed; rides in the URL fragment.
+const DAEMON_KEY_BYTES = 32; // daemon-role auth secret (never leaves the machine except to the bridge).
+// The session handle = sha256(secret) truncated. It's the routing key AND the visible id in the URL
+// path, so it's kept short to keep the QR small; 8 base64url chars (48 bits) is far beyond any realistic
+// collision risk for this tool (it's non-secret and only ever routes to a gated DO, so it need only be
+// collision-resistant, not unguessable). The daemon and phone derive it identically.
+const SESSION_ID_CHARS = 8;
 
 function sessionFilePath(): string {
   return join(stateDir(), "session.json");
@@ -222,6 +232,7 @@ function sessionFilePath(): string {
 
 const SessionFileSchema = z.object({
   secret: z.string().min(1),
+  daemonKey: z.string().min(1),
   sessionId: z.string().min(1),
   createdAt: z.number()
 });
@@ -245,7 +256,27 @@ export function loadOrCreateSession(): MachineSession {
 
   mkdirSync(stateDir(), { recursive: true });
   const secret = randomBytes(SESSION_SECRET_BYTES).toString("base64url");
-  const session = { secret, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+  const daemonKey = randomBytes(DAEMON_KEY_BYTES).toString("base64url");
+  const session = { secret, daemonKey, sessionId: deriveSessionId(secret), createdAt: Date.now() };
+
+  // A present-but-unreadable file (e.g. a pre-`daemonKey` session.json from an older build, or a corrupt
+  // one) would block the exclusive `linkSync` below and leave us returning an UN-persisted session on
+  // every start (a different secret each time → the URL/QR keeps changing). Overwrite it instead — it
+  // holds no usable session. (The atomic link path below is only for the fresh-install concurrent-start
+  // race, where the file is genuinely absent.)
+  if (existsSync(path)) {
+    // Re-read first: a sibling pane may have written a VALID file between our read above and now (the
+    // fresh-install concurrent-start race) — if so, converge on it instead of clobbering it with a new
+    // secret. Only a genuinely unreadable (old/corrupt) file gets overwritten.
+    const racer = readSessionFile(path);
+    if (racer) return racer;
+    writeFileSync(path, JSON.stringify(session, null, 2), { mode: 0o600 });
+    // `mode` in writeFileSync is only applied when CREATING a file, not when truncating an existing one —
+    // so an old file with permissive perms would keep them. chmod explicitly: this file holds the secret.
+    chmodSync(path, 0o600);
+    return session;
+  }
+
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(session, null, 2), { mode: 0o600 });
   // linkSync is atomic AND exclusive (fails if the target exists), unlike rename which overwrites.
@@ -263,22 +294,27 @@ export function loadOrCreateSession(): MachineSession {
     }
   }
   const settled = readSessionFile(path) ?? session;
-  return { secret: settled.secret, sessionId: settled.sessionId };
+  return { secret: settled.secret, sessionId: settled.sessionId, daemonKey: settled.daemonKey };
 }
 
 function readSessionFile(path: string): MachineSession | undefined {
   try {
     const parsed = SessionFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-    return { secret: parsed.secret, sessionId: parsed.sessionId };
+    return { secret: parsed.secret, sessionId: parsed.sessionId, daemonKey: parsed.daemonKey };
   } catch {
     return undefined; // absent or malformed → caller mints.
   }
 }
 
-export function toWebSocketUrl(bridgeUrl: string, secret: string, role: BridgeClientRole, threadId?: string): string {
-  return toBridgeWebSocketUrl(bridgeUrl, secret, role, threadId);
+export function toWebSocketUrl(
+  bridgeUrl: string,
+  sessionId: string,
+  role: BridgeClientRole,
+  threadId?: string
+): string {
+  return toBridgeWebSocketUrl(bridgeUrl, sessionId, role, threadId);
 }
 
-export function toBrowserUrl(bridgeUrl: string, secret: string): string {
-  return toBridgeBrowserSessionUrl(bridgeUrl, secret);
+export function toBrowserUrl(bridgeUrl: string, sessionId: string, secret: string): string {
+  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, secret);
 }
