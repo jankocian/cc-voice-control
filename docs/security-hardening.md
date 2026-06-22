@@ -46,10 +46,12 @@ per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcri
   reconnects, and **not** for a spawned pane (it joins an already-paired session) — so routine
   multi-pane use never silently re-opens pairing.
 - The phone `POST`s `/claim/<routingId>` before connecting: within an open window it mints a random
-  256-bit token, stores the token's **hash** in the DO, and sets `vrt_<routingId[:16]>=<token>;
-  HttpOnly; SameSite=Strict; Path=/; Max-Age=30d` (`Secure` except on local http dev). Outside a window
-  with no valid cookie → `403`; the phone shows "run /voice-control:pair". An already-paired device is
-  re-allowed and its cookie lifetime refreshed (rolling expiry).
+  256-bit token, stores the token's **hash** (with a `createdAt`) in the DO, and sets
+  `vrt_<routingId[:16]>=<token>; HttpOnly; SameSite=Strict; Path=/; Max-Age=3d` (`Secure` except on local
+  http dev). Outside a window with no valid cookie → `403`; the phone shows "run /voice-control:pair". An
+  already-paired device is re-allowed and **both** its cookie `Max-Age` and the server-side token
+  `createdAt` are refreshed — a **rolling 3-day** expiry, so daily use never lapses but a device untouched
+  for 3 days must re-pair (and a stale stolen cookie can't be used beyond that).
 - **The link is single-use.** The first successful claim closes the window (the DO deletes the window
   key, atomically since it serializes requests), so a second device racing the same link — even within
   the 90s — gets `403`. The window still also expires on its own if never used. Pairing another device
@@ -62,9 +64,11 @@ per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcri
   (trust-on-first-use) and requires it thereafter. This is what stops a leaked-URL holder (who has
   `secret`/`routingId` but not `daemonKey`) from connecting as a daemon to re-open the pairing window,
   terminate the session, or forge roster entries.
-- `expireSession()` (revoke-on-exit, ~3 min after the last daemon leaves) wipes device tokens, the
-  pairing window, and the daemon-key pin along with the roster, so each fresh session re-pairs and
-  re-pins from the same `session.json`.
+- `expireSession()` (revoke-on-exit, ~3 min after the last daemon leaves) wipes the roster, the pairing
+  window, and the daemon-key pin — but **keeps paired device tokens** (subject to their rolling 3-day
+  TTL). So a phone reconnecting after an idle session (e.g. a morning refresh after the laptop slept)
+  isn't forced to re-pair, while a leaked URL still can't join (no window, and the browser still needs a
+  cookie it never had). The daemon re-pins from `session.json` on its next connect.
 
 ## How they compose
 

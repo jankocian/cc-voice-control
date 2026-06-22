@@ -12,7 +12,9 @@ import {
   CLAIM_WINDOW_MS,
   claimDecision,
   DAEMON_AUTH_KEY,
+  DEVICE_STORAGE_PREFIX,
   deviceCookieName,
+  deviceFresh,
   deviceStorageKey,
   hashToken,
   mintDeviceToken,
@@ -302,12 +304,13 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       // phone can show the right message. Both need a new /voice-control:pair.
       return jsonResponse({ reason: presented ? "stale" : "expired" }, 403);
     }
-    // Mint a fresh token, or re-use the already-valid one; either way (re)set the cookie so an in-use
-    // device's lifetime rolls forward (claim runs on every reconnect) and doesn't expire mid-use.
+    // Mint a fresh token, or re-use the already-valid one. Either way store it with a fresh `createdAt`
+    // and (re)set the cookie, so an in-use device's lifetime rolls forward (claim runs on every
+    // reconnect) on BOTH the server (DEVICE_TTL_MS) and the browser (Max-Age) and never expires mid-use.
     // Drop `Secure` only for local http dev (wrangler dev), where the browser would refuse to store it.
     const token = decision === "mint" ? mintDeviceToken() : (presented as string);
+    await this.ctx.storage.put(deviceStorageKey(await hashToken(token)), { createdAt: Date.now() });
     if (decision === "mint") {
-      await this.ctx.storage.put(deviceStorageKey(await hashToken(token)), { createdAt: Date.now() });
       // Single-use: the first device to pair closes the window, so a leaked URL can't be claimed by a
       // racing second device even within the 90s. The DO serializes requests, so this is atomic — a
       // simultaneous second claim finds the window already gone. (The window still also expires on its
@@ -324,9 +327,17 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     return presented ? this.deviceKnown(presented) : false;
   }
 
+  // A device is known if its token hash is stored AND was last used within the rolling TTL. A stale
+  // entry is pruned on sight (so device tokens don't accumulate forever after a phone stops coming back).
   private async deviceKnown(token: string): Promise<boolean> {
-    const entry = await this.ctx.storage.get(deviceStorageKey(await hashToken(token)));
-    return entry !== undefined;
+    const key = deviceStorageKey(await hashToken(token));
+    const entry = await this.ctx.storage.get<{ createdAt: number }>(key);
+    if (!entry) return false;
+    if (!deviceFresh(entry.createdAt, Date.now())) {
+      await this.ctx.storage.delete(key);
+      return false;
+    }
+    return true;
   }
 
   // Authenticate a daemon-role socket by its daemonKey header (session.json, never in any URL). Pinned
@@ -345,15 +356,18 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     return pinned === hash;
   }
 
-  // Tear the whole session down: close every socket (1008 terminal — the daemon treats it as "do not
-  // reconnect") and wipe storage (roster + device tokens + pairing window) so a leaked URL reaching a
-  // revoked session sees nothing and every device must re-pair.
+  // Tear the session down: close every socket (1008 terminal — the daemon treats it as "do not
+  // reconnect") and wipe the roster, pairing window, and daemon-key pin. PAIRED DEVICE TOKENS are kept
+  // (subject to their own rolling TTL) so a phone reconnecting after an idle session — e.g. a morning
+  // refresh after the laptop slept — isn't forced to re-pair. A leaked URL still can't get in: there's
+  // no pairing window and the browser still needs a cookie it never had.
   private async expireSession(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
     for (const socket of this.ctx.getWebSockets()) {
       socket.close(1008, "session ended");
     }
-    await this.ctx.storage.deleteAll();
+    const stale = [...(await this.ctx.storage.list()).keys()].filter((key) => !key.startsWith(DEVICE_STORAGE_PREFIX));
+    if (stale.length > 0) await this.ctx.storage.delete(stale);
   }
 }
 

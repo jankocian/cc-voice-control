@@ -13,11 +13,20 @@
 // brief, user-initiated window.
 export const CLAIM_WINDOW_MS = 90_000;
 
-// Device cookie lifetime. The DO's device set is the real source of truth (revoke-on-exit wipes it);
-// this is just how long the browser bothers to keep sending the cookie before a re-pair.
-export const DEVICE_COOKIE_MAX_AGE_S = 30 * 24 * 60 * 60; // 30 days
+// Device cookie / device-token lifetime. Both are ROLLING — refreshed on every reconnect (claim runs
+// before each connect) — so day-to-day use never expires. A device untouched for this long must re-pair.
+// Paired tokens survive an idle session (revoke-on-exit keeps `device:*`), so a morning refresh after the
+// laptop slept still works, bounded by this TTL. Short enough that a stale cookie can't be used for long.
+export const DEVICE_COOKIE_MAX_AGE_S = 3 * 24 * 60 * 60; // 3 days
+export const DEVICE_TTL_MS = DEVICE_COOKIE_MAX_AGE_S * 1000;
 
-const DEVICE_STORAGE_PREFIX = "device:";
+// A paired device token is valid only within DEVICE_TTL_MS of its last use (createdAt is bumped on each
+// successful claim). Pure so the rolling-expiry rule is unit-tested without a DO.
+export function deviceFresh(createdAt: number, now: number): boolean {
+  return now - createdAt < DEVICE_TTL_MS;
+}
+
+export const DEVICE_STORAGE_PREFIX = "device:";
 // Persisted timestamp (epoch ms) until which the pairing window is open. One per session DO.
 export const CLAIM_WINDOW_KEY = "claimOpenUntil";
 // Pinned hash of the daemon-role auth secret (daemonKey), set on the first daemon connect

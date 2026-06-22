@@ -3,7 +3,9 @@ import {
   buildSetCookie,
   claimDecision,
   DEVICE_COOKIE_MAX_AGE_S,
+  DEVICE_TTL_MS,
   deviceCookieName,
+  deviceFresh,
   deviceStorageKey,
   hashToken,
   mintDeviceToken,
@@ -35,6 +37,19 @@ describe("windowOpen", () => {
     expect(windowOpen(now + 1, now)).toBe(true);
     expect(windowOpen(now, now)).toBe(false);
     expect(windowOpen(now - 1, now)).toBe(false);
+  });
+});
+
+describe("deviceFresh — rolling device-token expiry", () => {
+  const now = 10 * DEVICE_TTL_MS;
+  it("is fresh within the TTL of its last use, stale at/after it", () => {
+    expect(deviceFresh(now, now)).toBe(true);
+    expect(deviceFresh(now - DEVICE_TTL_MS + 1, now)).toBe(true);
+    expect(deviceFresh(now - DEVICE_TTL_MS, now)).toBe(false);
+    expect(deviceFresh(now - DEVICE_TTL_MS - 1, now)).toBe(false);
+  });
+  it("TTL matches the cookie Max-Age (server and browser expire together)", () => {
+    expect(DEVICE_TTL_MS).toBe(DEVICE_COOKIE_MAX_AGE_S * 1000);
   });
 });
 
