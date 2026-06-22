@@ -46,6 +46,14 @@ function formatClock(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+// Play-on-land: the newest incoming reply to autoplay when landing on a thread that had unread. `messages`
+// is newest-first (see buildThread), so the first non-interim Claude turn with a requestId is the one. A
+// step ("interim") narration or a user turn never plays. Returns its requestId, or null if none.
+export function newestPlayableReply(messages: readonly Message[]): string | null {
+  const reply = messages.find((m) => m.kind === "claude" && !m.interim && Boolean(m.requestId));
+  return reply?.requestId ?? null;
+}
+
 /**
  * The daemon's `history` snapshot is the complete, deduped thread (it re-projects Claude's transcript on
  * every event), so the phone just orders it newest-first and caps it — no merge, no seq. We dedupe by

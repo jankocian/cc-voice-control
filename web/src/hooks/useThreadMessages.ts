@@ -23,6 +23,11 @@ type Deps = {
   activeThreadIdRef: RefObject<ThreadId | null>;
   // A daemon's spawn_pending arms the follow; the matching thread_joined (handled in App) switches to it.
   armSpawnFollow: (spawnId: string) => void;
+  // A FRESH reply (not a replay) landed on a BACKGROUND thread → App may auto-follow it (auto-follow setting).
+  onBackgroundReply: (threadId: ThreadId) => void;
+  // The outcome of the active thread's in-flight mic turn: confirmed (the spoken turn landed) or failed (a
+  // daemon `error` while transcribing) → App drives the "Resend" toast.
+  onSendOutcome: (ok: boolean) => void;
 };
 
 // Owns the per-thread conversation state — messages + the latest session_status runtime, plus the
@@ -34,7 +39,9 @@ export function useThreadMessages({
   showFlash,
   activeThreadId,
   activeThreadIdRef,
-  armSpawnFollow
+  armSpawnFollow,
+  onBackgroundReply,
+  onSendOutcome
 }: Deps) {
   // Destructure the STABLE pieces of `threads` (the wrapper object is recreated each render, but its
   // list + callbacks are stable), so the callbacks/effects below don't churn every render.
@@ -52,6 +59,13 @@ export function useThreadMessages({
   const seenNewestRef = useRef<Map<ThreadId, number>>(new Map());
 
   const { dropAudio, attachAudio, markPlayable, noteAudioStatus } = playback;
+
+  // Mirror the App callbacks in refs so the stable content handler can call them without becoming a
+  // dependency (App recreates them as its state changes).
+  const onBackgroundReplyRef = useRef(onBackgroundReply);
+  onBackgroundReplyRef.current = onBackgroundReply;
+  const onSendOutcomeRef = useRef(onSendOutcome);
+  onSendOutcomeRef.current = onSendOutcome;
 
   const handleContentEvent = useCallback(
     (threadId: ThreadId, event: BridgeContentEvent) => {
@@ -79,6 +93,7 @@ export function useThreadMessages({
             const newest = event.turns.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
             if (newest.role === "user") {
               setTranscribingThreadId(null);
+              onSendOutcomeRef.current(true); // the spoken turn landed → clear any pending "Resend"
               showFlash("Sent to Claude Code ✓");
             }
           }
@@ -100,16 +115,16 @@ export function useThreadMessages({
           }
           return;
         }
-        case "tts_audio":
+        case "tts_audio": {
           // Only auto-play a fresh reply for the thread the user is looking at; a reply on a background
           // thread waits for a tap. A replay is already gated to tap-to-play inside attachAudio.
-          attachAudio(
-            event.requestId,
-            event.audioBase64,
-            event.mimeType,
-            event.replay === true || threadId !== activeThreadIdRef.current
-          );
+          const background = threadId !== activeThreadIdRef.current;
+          attachAudio(event.requestId, event.audioBase64, event.mimeType, event.replay === true || background);
+          // A genuinely-fresh reply on a background thread → let App auto-follow it (auto-follow setting);
+          // a replay (a fetched history clip) is the user's own action, never a follow trigger.
+          if (background && event.replay !== true) onBackgroundReplyRef.current(threadId);
           return;
+        }
         case "tts_status":
           // Loading / failed indicator for a reply's audio (cleared when its tts_audio lands).
           noteAudioStatus(event.requestId, event.state);
@@ -120,7 +135,12 @@ export function useThreadMessages({
           armSpawnFollow(event.spawnId);
           return;
         case "error":
-          if (threadId === activeThreadIdRef.current) setTranscribingThreadId(null);
+          if (threadId === activeThreadIdRef.current) {
+            const wasTranscribing = transcribingRef.current === threadId;
+            setTranscribingThreadId(null);
+            // A failed in-flight mic turn (no audio requestId) → offer a "Resend" instead of just a flash.
+            if (wasTranscribing && !event.requestId) onSendOutcomeRef.current(false);
+          }
           // The only error carrying a requestId is a `get_audio` miss (its reply audio was evicted) —
           // drop the row so it stops rendering a dead play button.
           if (event.requestId) dropAudio(event.requestId);

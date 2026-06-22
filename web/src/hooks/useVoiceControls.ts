@@ -1,4 +1,5 @@
 import { type RefObject, useCallback, useEffect, useRef } from "react";
+import { toast } from "../components/Toaster";
 import type { ThreadId } from "../lib/protocol";
 import type { useBridge } from "./useBridge";
 import { type RecordedClip, type RecorderError, useRecorder } from "./useRecorder";
@@ -41,28 +42,64 @@ export function useVoiceControls({
   showFlash
 }: Deps) {
   const nextModeRef = useRef<"queue" | "interrupt">("queue");
+  // The last clip we attempted to send (clip + mode + the thread it was for), retained so a failed send
+  // can be re-tried from a toast. A "resend" calls sendAudio again via a ref (sendAudio is defined below).
+  const lastSendRef = useRef<{ clip: RecordedClip; mode: "queue" | "interrupt" } | null>(null);
+  const resendToastRef = useRef<string | null>(null);
+  const sendAudioRef = useRef<(clip: RecordedClip, mode: "queue" | "interrupt") => void>(() => {});
+
+  // A retryable error toast with a "Resend" action — one at a time (replace any prior). Re-sends the last
+  // retained clip down the same path (a fresh submit_audio to the then-active thread).
+  const raiseResendToast = useCallback(() => {
+    if (resendToastRef.current) toast.close(resendToastRef.current);
+    resendToastRef.current = toast.add({
+      title: "Couldn’t send your voice",
+      type: "error",
+      timeout: 0,
+      actionProps: {
+        children: "Resend",
+        onClick: () => {
+          const last = lastSendRef.current;
+          if (last) sendAudioRef.current(last.clip, last.mode);
+        }
+      }
+    });
+  }, []);
+  // Dismiss a stale resend toast (a new recording / a confirmed send supersedes a prior failure).
+  const clearResendToast = useCallback(() => {
+    if (resendToastRef.current) toast.close(resendToastRef.current);
+    resendToastRef.current = null;
+  }, []);
 
   const sendAudio = useCallback(
     (clip: RecordedClip, mode: "queue" | "interrupt") => {
       const threadId = activeThreadIdRef.current;
+      if (!threadId) {
+        showFlash("Lost the connection before sending");
+        return;
+      }
+      // Retain the attempt so a failed send (here or a later daemon `error`) can be re-tried.
+      lastSendRef.current = { clip, mode };
       if (
-        !threadId ||
         !sendDaemon(threadId, { type: "submit_audio", audioBase64: clip.audioBase64, mimeType: clip.mimeType, mode })
       ) {
         showFlash("Lost the connection before sending");
+        raiseResendToast();
         return;
       }
       setTranscribingThreadId(threadId);
     },
-    [sendDaemon, showFlash, activeThreadIdRef, setTranscribingThreadId]
+    [sendDaemon, showFlash, activeThreadIdRef, setTranscribingThreadId, raiseResendToast]
   );
+  sendAudioRef.current = sendAudio;
 
   const onClip = useCallback(
     (clip: RecordedClip) => {
+      clearResendToast(); // a new recording supersedes any stale failed send
       sendAudio(clip, nextModeRef.current);
       nextModeRef.current = "queue";
     },
-    [sendAudio]
+    [sendAudio, clearResendToast]
   );
 
   const onRecorderError = useCallback((error: RecorderError) => showFlash(RECORDER_ERROR_TEXT[error]), [showFlash]);
@@ -110,6 +147,10 @@ export function useVoiceControls({
   return {
     recording,
     visualizerActive,
+    // A failed in-flight send (a daemon `error` for the active thread) → raise the retry toast; clear it
+    // once the turn is confirmed. App routes the thread-messages reducer's send outcome to these.
+    raiseResendToast,
+    clearResendToast,
     onMic: useCallback(() => startRecording("queue"), [startRecording]),
     onSteer: useCallback(() => startRecording("queue"), [startRecording]),
     onInterrupt: useCallback(() => startRecording("interrupt"), [startRecording]),

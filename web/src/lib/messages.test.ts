@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildThread, messageFromHistory } from "./messages";
+import { buildThread, messageFromHistory, newestPlayableReply } from "./messages";
 import type { HistoryTurn } from "./protocol";
 
 // A projected history turn: native uuid (requestId) + native timestamp.
@@ -69,5 +69,42 @@ describe("messageFromHistory", () => {
     const reply = messageFromHistory(turn("a", 1003, "claude", "done"));
     expect(step.interim).toBe(true);
     expect(reply.interim).toBe(false);
+  });
+});
+
+describe("newestPlayableReply — play-on-land target", () => {
+  const step = (uuid: string) =>
+    messageFromHistory({
+      requestId: uuid,
+      timestamp: 1000,
+      role: "claude",
+      text: "step",
+      hasAudio: false,
+      interim: true
+    });
+
+  it("returns the FIRST (newest-first) non-interim Claude reply's requestId", () => {
+    // Newest-first order: a fresh reply on top, then a step, then an older reply.
+    const messages = [
+      messageFromHistory(turn("newest", 1003, "claude", "done")),
+      step("s"),
+      messageFromHistory(turn("older", 1001, "claude", "prev"))
+    ];
+    expect(newestPlayableReply(messages)).toBe("newest");
+  });
+
+  it("skips interim steps and the user's own turns", () => {
+    const messages = [
+      step("s1"),
+      messageFromHistory(turn("u", 1002, "user", "ask")),
+      messageFromHistory(turn("reply", 1001, "claude", "answer"))
+    ];
+    expect(newestPlayableReply(messages)).toBe("reply");
+  });
+
+  it("returns null when there is no playable reply (empty / only steps / only user turns)", () => {
+    expect(newestPlayableReply([])).toBeNull();
+    expect(newestPlayableReply([step("s")])).toBeNull();
+    expect(newestPlayableReply([messageFromHistory(turn("u", 1000, "user", "ask"))])).toBeNull();
   });
 });

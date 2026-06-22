@@ -15,6 +15,7 @@ import { useThreadMessages } from "./hooks/useThreadMessages";
 import { useThreads } from "./hooks/useThreads";
 import { useVoiceControls } from "./hooks/useVoiceControls";
 import { useWakeLock } from "./hooks/useWakeLock";
+import { newestPlayableReply } from "./lib/messages";
 import type { RosterEvent, SpeakMode, ThreadId } from "./lib/protocol";
 import { readThreadHint, type SessionCredentials } from "./lib/session";
 import { deriveStatus, gradeThread } from "./lib/status";
@@ -81,9 +82,34 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
   const playback = usePlayback({ getRecording, onRequestAudio });
   const { stopPlayback } = playback;
 
+  // Auto-follow: a fresh background reply arms a one-shot follow to that thread; the effect below performs
+  // it once nothing's playing / we're not recording/sending (so it never interrupts or steals the mic).
+  // `autoFollowRef` (set below) gates it — only arm when the setting is on. Refs let the callback stay stable.
+  const [pendingFollow, setPendingFollow] = useState<ThreadId | null>(null);
+  const autoFollowRef = useRef(false);
+  const onBackgroundReply = useCallback((threadId: ThreadId) => {
+    if (autoFollowRef.current) setPendingFollow(threadId);
+  }, []);
+  // The active thread's in-flight mic turn settled — drive the "Resend" toast (handlers come from
+  // useVoiceControls, wired via a ref since it's created below).
+  const resendToastRef = useRef<{ raise: () => void; clear: () => void }>({ raise: () => {}, clear: () => {} });
+  const onSendOutcome = useCallback((ok: boolean) => {
+    if (ok) resendToastRef.current.clear();
+    else resendToastRef.current.raise();
+  }, []);
+
   // Per-thread conversation state + the bridge content reducer.
   const { handleContentEvent, active, activeRuntime, pagerThreads, transcribing, setTranscribingThreadId } =
-    useThreadMessages({ threads, playback, showFlash, activeThreadId, activeThreadIdRef, armSpawnFollow });
+    useThreadMessages({
+      threads,
+      playback,
+      showFlash,
+      activeThreadId,
+      activeThreadIdRef,
+      armSpawnFollow,
+      onBackgroundReply,
+      onSendOutcome
+    });
 
   // Apply every roster event, and follow a spawn into its EXACT new thread the moment it joins (matched
   // by the one-shot spawnId on its thread_joined — never a ghost or unrelated reconnect).
@@ -140,15 +166,52 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     if (activeThreadId && activeConnected) sendDaemon(activeThreadId, { type: "set_speak_mode", mode: speakMode });
   }, [speakMode, activeThreadId, activeConnected, sendDaemon]);
 
+  // Auto-follow (off / on), persisted per phone. When on, a fresh reply on a background thread auto-switches
+  // to it (and plays on land) — but only once nothing's playing and the user isn't recording/sending (the
+  // effect below defers until then). Read via a ref in the (stable) background-reply callback.
+  const [autoFollow, setAutoFollow] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("vc-auto-follow") === "true";
+    } catch {
+      return false;
+    }
+  });
+  autoFollowRef.current = autoFollow;
+  const changeAutoFollow = useCallback((on: boolean) => {
+    setAutoFollow(on);
+    try {
+      localStorage.setItem("vc-auto-follow", String(on));
+    } catch {
+      /* private mode — in-memory only */
+    }
+  }, []);
+
   // Theme (system / dark / light), persisted in localStorage + applied to <html>; nested in the settings menu.
   const { theme, setTheme } = useTheme();
 
+  // Play-on-land needs the freshest pager pages / unread / playEntry inside switchThread without churning
+  // its deps every render (which would re-arm the deep-link + spawn-follow refs).
+  const pagerThreadsRef = useRef(pagerThreads);
+  pagerThreadsRef.current = pagerThreads;
+  const unreadRef = useRef(threads.unread);
+  unreadRef.current = threads.unread;
+  const { playEntry } = playback;
+  const playEntryRef = useRef(playEntry);
+  playEntryRef.current = playEntry;
+
   // Focus a thread (pill / dropdown / swipe settle). Stop the previous thread's audio first so it
-  // doesn't keep playing under the new view — the shared player is a singleton across threads.
+  // doesn't keep playing under the new view — the shared player is a singleton across threads. Play-on-land:
+  // if we're switching to a thread that has a PENDING unread reply, autoplay its newest reply on arrival —
+  // captured BEFORE setActive clears the badge. (On first load unread is 0, so a refresh never autoplays.)
   const switchThread = useCallback(
     (threadId: ThreadId) => {
       stopPlayback();
+      const hadUnread = (unreadRef.current.get(threadId) ?? 0) > 0;
       threads.setActive(threadId);
+      if (!hadUnread) return;
+      const messages = pagerThreadsRef.current.find((p) => p.threadId === threadId)?.messages ?? [];
+      const requestId = newestPlayableReply(messages);
+      if (requestId) playEntryRef.current(requestId);
     },
     [stopPlayback, threads]
   );
@@ -214,6 +277,19 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
     stopPlayback,
     showFlash
   });
+  // Let the thread-messages reducer drive the "Resend" toast (a failed/confirmed in-flight mic turn).
+  resendToastRef.current = { raise: voice.raiseResendToast, clear: voice.clearResendToast };
+
+  // Auto-follow: perform the armed follow once nothing's playing AND we're not recording/sending — so it
+  // waits politely for the current reply to finish and never steals the mic mid-turn. switchThread plays
+  // the followed thread's pending reply on land. Stays armed (deferred) until the blocking clears.
+  useEffect(() => {
+    if (pendingFollow && !playback.speaking && !voice.recording && !transcribing) {
+      const target = pendingFollow;
+      setPendingFollow(null);
+      if (target !== activeThreadId) switchThread(target);
+    }
+  }, [pendingFollow, playback.speaking, voice.recording, transcribing, activeThreadId, switchThread]);
 
   // Bless the audio element on the first user gesture so replies autoplay reliably.
   const { unlock } = playback;
@@ -319,6 +395,8 @@ export function App({ credentials }: { credentials: SessionCredentials }) {
         <SettingsMenu
           speakMode={speakMode}
           onSpeakModeChange={changeSpeakMode}
+          autoFollow={autoFollow}
+          onAutoFollowChange={changeAutoFollow}
           theme={theme}
           onThemeChange={setTheme}
         />
