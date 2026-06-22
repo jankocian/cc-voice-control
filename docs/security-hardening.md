@@ -18,11 +18,15 @@ replays or reorders ciphertext (the worker is trusted for availability/routing, 
 
 ## What the worker can and cannot see
 
-The session secret (128-bit) lives in `session.json` on the machine and rides to the phone in the URL
-**fragment** (`/s#<secret>`). Browsers never send the fragment to a server, so the worker never sees the
-secret. The worker routes by `routingId = sha256(secret)` (hex), a one-way derivative that reveals
-nothing about the secret. The worker sees: routing ids, channel, threadId, message types, timestamps,
-sizes, online/offline — **never** prompts, replies, transcripts, repo/branch/cwd labels, or audio.
+The phone URL is `/s/<sessionId>#<secret>`. The 128-bit `secret` lives in `session.json` on the machine
+and rides to the phone in the URL **fragment**, which browsers never send to a server — so the worker
+never sees it. The worker routes by `sessionId = sha256(secret)` truncated to 8 base64url chars: a
+short, non-secret, one-way derivative — it's the visible handle in the path, distinguishes one machine's
+session from another's, and on its own leads nowhere (reaching the DO is gated; without the secret there
+is no key and no cookie). 48 bits is ample against accidental collision (it only ever routes to a gated
+DO, so it needs to be collision-resistant, not unguessable). The worker sees: session ids, channel,
+threadId, message types, timestamps, sizes, online/offline — **never** prompts, replies, transcripts,
+repo/branch/cwd labels, or audio.
 
 ## (1) End-to-end encryption — `src/shared/e2e.ts`
 
@@ -41,13 +45,20 @@ sizes, online/offline — **never** prompts, replies, transcripts, repo/branch/c
 The URL is a short-lived *pairing code*, not a standing credential; the standing browser credential is a
 per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcript.
 
-- The daemon opens a **pairing window** (`CLAIM_WINDOW_MS` = 90s) by a control message to its DO, on the
-  first connect of a user-run `/voice-control:start` and on `/voice-control:pair`. **Not** on plain
-  reconnects, and **not** for a spawned pane (it joins an already-paired session) — so routine
-  multi-pane use never silently re-opens pairing.
-- The phone `POST`s `/claim/<routingId>` before connecting: within an open window it mints a random
+- **The bridge decides when a window opens, not the daemon.** When a daemon connects, the DO checks
+  whether any device is paired; if none, it opens a **pairing window** (`CLAIM_WINDOW_MS` = 90s)
+  synchronously, right then — so an unpaired session (a first `/voice-control:start`) gets a window, but
+  a session that already has a paired device opens **none** (a restart, an extra pane, or a morning
+  reconnect just works). `/voice-control:pair` is the only daemon-initiated open: an explicit "add
+  another device" even when one is paired. Because the window is set the instant the daemon connects —
+  before the phone can claim — there's no race and no "expired" flicker. The DO tells the daemon whether
+  a window is open (a `session`-channel signal) so `/start` and `/status` show the right message.
+- `/voice-control:start` **always shows the link/QR**: it's how any device returns to the session. An
+  already-paired device opens it and reconnects via its cookie; a new device pairs only while a window
+  is open. The skill's wording adapts on the daemon's `pairing` flag.
+- The phone `POST`s `/claim/<sessionId>` before connecting: within an open window it mints a random
   256-bit token, stores the token's **hash** (with a `createdAt`) in the DO, and sets
-  `vrt_<routingId[:16]>=<token>; HttpOnly; SameSite=Strict; Path=/; Max-Age=3d` (`Secure` except on local
+  `vrt_<sessionId>=<token>; HttpOnly; SameSite=Strict; Path=/; Max-Age=3d` (`Secure` except on local
   http dev). Outside a window with no valid cookie → `403`; the phone shows "run /voice-control:pair". An
   already-paired device is re-allowed and **both** its cookie `Max-Age` and the server-side token
   `createdAt` are refreshed — a **rolling 3-day** expiry, so daily use never lapses but a device untouched
@@ -62,7 +73,7 @@ per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcri
 - **The daemon role is authenticated separately**, by `daemonKey` — a second secret in `session.json`,
   never in any URL, sent as a connect header. The DO pins it on the first daemon connect
   (trust-on-first-use) and requires it thereafter. This is what stops a leaked-URL holder (who has
-  `secret`/`routingId` but not `daemonKey`) from connecting as a daemon to re-open the pairing window,
+  `secret`/`sessionId` but not `daemonKey`) from connecting as a daemon to re-open the pairing window,
   terminate the session, or forge roster entries.
 - `expireSession()` (revoke-on-exit, ~3 min after the last daemon leaves) wipes the roster, the pairing
   window, and the daemon-key pin — but **keeps paired device tokens** (subject to their rolling 3-day
@@ -78,7 +89,7 @@ per-device `HttpOnly` cookie that lives nowhere in the URL, history, or transcri
 | A screenshot of the URL/QR (incl. `#secret`), window closed or already used | `/claim` → 403; can't open a window (no `daemonKey`) → no cookie → locked out |
 | The live URL while a window is open, racing the real device | single-use: whoever's first closes the window; the loser gets 403 |
 | A compromised worker | Sees only ciphertext + routing metadata → can't read content |
-| `routingId` but not the cookie / `daemonKey` | Browser upgrade → 401; daemon upgrade → 401 |
+| `sessionId` but not the cookie / `daemonKey` | Browser upgrade → 401; daemon upgrade → 401 |
 
 ## Known limitations
 

@@ -47,9 +47,9 @@ export type BridgeRuntime = {
 };
 
 export type UseBridgeOptions = {
-  // The session routing id (sha256(secret)); used to build the /ws/<routingId>?role=browser bridge
+  // The session handle (from the URL path); used to build the /ws/<sessionId>?role=browser bridge
   // socket URL and to claim the device cookie before connecting.
-  routingId: string;
+  sessionId: string;
   // The end-to-end key (derived from the secret). Every content event is sealed/opened with it; the
   // worker never has it, so it relays only ciphertext.
   key: CryptoKey;
@@ -107,7 +107,7 @@ async function openRosterEvent(key: CryptoKey, event: WireRosterEvent): Promise<
 }
 
 export function useBridge(options: UseBridgeOptions): Bridge {
-  const { routingId, key, onEvent, onRoster, onExpired } = options;
+  const { sessionId, key, onEvent, onRoster, onExpired } = options;
 
   const [connected, setConnected] = useState(false);
 
@@ -236,7 +236,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
     // → retry on the usual cadence; only an explicit 403 means the pairing window is gone.
     function connect(): void {
       if (stopped) return;
-      void claimSession(routingId).then((result) => {
+      void claimSession(sessionId).then((result) => {
         if (stopped) return;
         if (result === "expired" || result === "stale") {
           // Could be the start-up race (window opening) rather than a truly closed window — retry a few
@@ -256,7 +256,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
 
     function openSocket(): void {
       if (stopped) return;
-      const socket = new WebSocket(buildWebSocketUrl(routingId));
+      const socket = new WebSocket(buildWebSocketUrl(sessionId));
       socketRef.current = socket;
 
       socket.addEventListener("message", (messageEvent) => {
@@ -311,7 +311,7 @@ export function useBridge(options: UseBridgeOptions): Bridge {
         }
       }
     };
-  }, [routingId, enqueueDaemonSend]);
+  }, [sessionId, enqueueDaemonSend]);
 
   return { connected, bridgeReady, sendDaemon };
 }

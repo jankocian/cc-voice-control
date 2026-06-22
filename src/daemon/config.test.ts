@@ -2,36 +2,25 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  deriveRoutingId,
-  loadOrCreateSession,
-  resolveConfig,
-  threadRuntimePath,
-  toBrowserUrl,
-  toWebSocketUrl
-} from "./config.js";
+import { loadOrCreateSession, resolveConfig, threadRuntimePath, toBrowserUrl, toWebSocketUrl } from "./config.js";
 
 describe("voice remote URL helpers", () => {
-  it("puts the secret in the fragment of the browser URL (never the path the worker sees)", () => {
-    expect(toBrowserUrl("https://voice.example.com/base", "secret")).toBe("https://voice.example.com/s#secret");
+  it("puts the sessionId in the path and the secret in the fragment", () => {
+    expect(toBrowserUrl("https://voice.example.com/base", "ab12cd34", "secret")).toBe(
+      "https://voice.example.com/s/ab12cd34#secret"
+    );
   });
 
-  it("creates daemon websocket URLs routed by routingId from https bridge URLs", () => {
-    expect(toWebSocketUrl("https://voice.example.com", "rid", "daemon")).toBe(
-      "wss://voice.example.com/ws/rid?role=daemon"
+  it("creates daemon websocket URLs routed by sessionId from https bridge URLs", () => {
+    expect(toWebSocketUrl("https://voice.example.com", "ab12cd34", "daemon")).toBe(
+      "wss://voice.example.com/ws/ab12cd34?role=daemon"
     );
   });
 
   it("creates local websocket URLs from http bridge URLs", () => {
-    expect(toWebSocketUrl("http://localhost:8787", "rid", "browser")).toBe("ws://localhost:8787/ws/rid?role=browser");
-  });
-});
-
-describe("deriveRoutingId", () => {
-  it("is sha256(secret) as lowercase hex — must match the browser's WebCrypto derivation", () => {
-    // sha256("secret") — pinned so a divergence from the web client's derivation is caught here.
-    expect(deriveRoutingId("secret")).toBe("2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b");
-    expect(deriveRoutingId("secret")).toMatch(/^[0-9a-f]{64}$/);
+    expect(toWebSocketUrl("http://localhost:8787", "ab12cd34", "browser")).toBe(
+      "ws://localhost:8787/ws/ab12cd34?role=browser"
+    );
   });
 });
 

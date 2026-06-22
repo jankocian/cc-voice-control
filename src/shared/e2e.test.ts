@@ -43,9 +43,7 @@ describe("e2e seal/open round-trip", () => {
 });
 
 describe("shared crypto encoders", () => {
-  it("sha256Hex matches the daemon's routingId derivation (pinned — both ends must agree)", async () => {
-    // Same vector pinned in src/daemon/config.test.ts for the Node createHash path: the phone (WebCrypto)
-    // and the daemon (Node) MUST produce identical routingIds or they'd reach different Durable Objects.
+  it("sha256Hex is correct SHA-256 → lowercase hex (pinned vector)", async () => {
     expect(await sha256Hex("secret")).toBe("2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b");
     expect(await sha256Hex("secret")).toMatch(/^[0-9a-f]{64}$/);
   });

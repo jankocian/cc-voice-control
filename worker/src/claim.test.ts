@@ -55,8 +55,8 @@ describe("deviceFresh — rolling device-token expiry", () => {
 
 describe("deviceCookieName", () => {
   it("scopes the cookie per session so two sessions in one browser don't clobber each other", () => {
-    expect(deviceCookieName("abcdef0123456789abcdef")).toBe("vrt_abcdef0123456789");
-    expect(deviceCookieName("abcdef0123456789")).not.toBe(deviceCookieName("fedcba9876543210"));
+    expect(deviceCookieName("ab12cd34")).toBe("vrt_ab12cd34");
+    expect(deviceCookieName("ab12cd34")).not.toBe(deviceCookieName("ef56ab78"));
   });
 });
 

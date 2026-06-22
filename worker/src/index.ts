@@ -1,5 +1,5 @@
 import {
-  isBridgeBrowserSessionPath,
+  parseBridgeBrowserSessionPath,
   parseBridgeClaimPath,
   parseBridgeWebSocketPath
 } from "../../src/shared/bridge-contract";
@@ -20,29 +20,30 @@ export default {
       return new Response(null, { status: 204 });
     }
 
-    // The phone page is a static SPA shell; the session secret rides in the URL fragment, which the
-    // browser never sends, so there is nothing secret to read here — serving the shell is enough.
-    if (request.method === "GET" && isBridgeBrowserSessionPath(url.pathname)) {
+    // The phone page (/s/<sessionId>) is a static SPA shell; the session secret rides in the URL
+    // fragment, which the browser never sends, so there is nothing secret to read here — serving the
+    // shell is enough (the shell is identical for every session).
+    if (request.method === "GET" && parseBridgeBrowserSessionPath(url.pathname)) {
       return renderSessionPage(env);
     }
 
-    // The WebSocket upgrade (GET /ws/<routingId>) and the device-pairing claim (POST /claim/<routingId>)
-    // both address a session by its routingId; forward each to that session's Durable Object.
-    const routingId =
+    // The WebSocket upgrade (GET /ws/<sessionId>) and the device-pairing claim (POST /claim/<sessionId>)
+    // both address a session by its sessionId; forward each to that session's Durable Object.
+    const sessionId =
       (request.method === "GET" ? parseBridgeWebSocketPath(url.pathname) : undefined) ??
       (request.method === "POST" ? parseBridgeClaimPath(url.pathname) : undefined);
-    if (routingId) {
+    if (sessionId) {
       // Rate-limit per IP BEFORE touching a DO, so spraying /ws|/claim/<random> can't burn DO
-      // instantiations. Best-effort abuse-bounding only — the device cookie (browser) and the secret
-      // (content encryption) are the real gates.
+      // instantiations. Best-effort abuse-bounding only — the device cookie (browser) and the daemonKey
+      // (daemon) are the real gates.
       const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
       if (!(await rateLimitAllows(env.WS_CONNECT, ip))) {
         return new Response("Too Many Requests", { status: 429 });
       }
 
-      // Route by the routingId (= sha256(secret), supplied by the client). The DO name is a one-way
-      // derivative of the secret, so a guessed path lands on a different, empty DO — never the victim's.
-      const id = env.VOICE_SESSIONS.idFromName(routingId);
+      // Route by the sessionId (= sha256(secret) truncated, a one-way derivative): a guessed/colliding
+      // id lands on a different, gated DO — reaching one proves nothing on its own.
+      const id = env.VOICE_SESSIONS.idFromName(sessionId);
       return env.VOICE_SESSIONS.get(id).fetch(request);
     }
 

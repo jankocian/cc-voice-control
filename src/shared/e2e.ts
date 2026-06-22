@@ -75,9 +75,8 @@ export async function openJson<T>(key: CryptoKey, blob: EncBlob, aad: string): P
   return JSON.parse(await open(key, blob, aad)) as T;
 }
 
-// SHA-256 → lowercase hex, via WebCrypto. Shared by the phone (routingId) and the worker (device-token
-// hashing) so they can't drift. The daemon derives routingId with Node's sync createHash — same output,
-// pinned by a test — because it can't await in a sync constructor path.
+// SHA-256 → lowercase hex, via WebCrypto. Used by the worker to hash device tokens before storing them
+// (so the DO never persists a usable cookie). Lives here as the shared crypto home.
 export async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes(input));
   return hex(new Uint8Array(digest));

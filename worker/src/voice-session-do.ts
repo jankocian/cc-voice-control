@@ -51,16 +51,16 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // Device-pairing claim (POST /claim/<routingId>): mint/refresh this phone's device cookie if a
+    // Device-pairing claim (POST /claim/<sessionId>): mint/refresh this phone's device cookie if a
     // pairing window is open. Handled before the WebSocket path since it is a plain HTTP request.
-    const claimRoutingId = parseBridgeClaimPath(url.pathname);
-    if (claimRoutingId) return this.handleClaim(request, claimRoutingId);
+    const claimSessionId = parseBridgeClaimPath(url.pathname);
+    if (claimSessionId) return this.handleClaim(request, claimSessionId);
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
     }
 
-    const routingId = parseBridgeWebSocketPath(url.pathname);
+    const sessionId = parseBridgeWebSocketPath(url.pathname);
     const { role, threadId: daemonThreadId } = readBridgeAuthQuery(url.searchParams);
 
     // Browsers must connect from the bridge's own origin; the daemon (Node `ws`) sends no Origin
@@ -70,17 +70,17 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       return new Response("Forbidden origin", { status: 403 });
     }
 
-    if (!role || !routingId) {
+    if (!role || !sessionId) {
       return new Response("Invalid role", { status: 400 });
     }
 
-    // Reaching this DO only proves knowledge of routingId (= sha256(secret)), which a leaked phone URL
+    // Reaching this DO only proves knowledge of the sessionId (= sha256(secret) truncated), which a leaked phone URL
     // also yields — so each role is gated separately:
     //  - a browser must present a paired device cookie (minted via /claim during a pairing window), so a
     //    leaked URL opened after the window, with no cookie, is rejected here;
     //  - a daemon must present the machine-local daemonKey (never in any URL), so a leaked-URL holder
     //    can't impersonate a daemon to re-open a pairing window or terminate the session.
-    if (role === "browser" && !(await this.hasPairedDevice(request, routingId))) {
+    if (role === "browser" && !(await this.hasPairedDevice(request, sessionId))) {
       return new Response("Unpaired device", { status: 401 });
     }
     if (role === "daemon" && !(await this.authenticateDaemon(request))) {
@@ -102,8 +102,21 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server);
 
-    // A daemon connecting (re)claims the session: cancel any pending revoke-on-exit alarm.
-    if (role === "daemon") await this.ctx.storage.deleteAlarm();
+    // A daemon connecting (re)claims the session: cancel any pending revoke-on-exit alarm, then decide
+    // pairing. THE BRIDGE owns this (not the daemon): if no device is paired yet, open a pairing window
+    // now — synchronously, before the phone can claim, so there's no race/flicker. A session that
+    // already has a paired device opens NO window (a restart, an extra pane, a morning reconnect just
+    // works). Either way tell the daemon whether a window is open, so /voice-control:start shows the
+    // right message.
+    if (role === "daemon") {
+      await this.ctx.storage.deleteAlarm();
+      const paired = await this.anyDevicePaired();
+      if (paired) {
+        this.signalDaemon(server, false);
+      } else {
+        await this.openClaimWindow(); // signals all daemons (incl. this one) that a window is open
+      }
+    }
 
     // A fresh phone needs the full roster to render/grade every thread, even threads whose daemon is
     // currently offline (their stored lastSeenAt drives grading).
@@ -130,10 +143,10 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
         await this.removeThread(attachment.threadId, ws);
         return;
       }
-      // Open a device-pairing window (daemon's first connect / /voice-control:pair). Persisted so a
-      // phone's POST /claim within CLAIM_WINDOW_MS can mint a device cookie; it expires on its own.
+      // Explicit /voice-control:pair — open a pairing window to add another device even though one is
+      // already paired (an unpaired session already got its window automatically on connect).
       if (envelope.channel === "control" && envelope.event?.type === "open_claim_window") {
-        await this.ctx.storage.put(CLAIM_WINDOW_KEY, Date.now() + CLAIM_WINDOW_MS);
+        await this.openClaimWindow();
         return;
       }
       // Register/refresh this thread's label + state in the roster, then broadcast the delta.
@@ -285,14 +298,14 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
   // ---- device pairing --------------------------------------------------------
 
-  // POST /claim/<routingId>: the phone calls this before opening its socket. Mints an httpOnly device
+  // POST /claim/<sessionId>: the phone calls this before opening its socket. Mints an httpOnly device
   // cookie if a pairing window is open (or refreshes an already-paired device); otherwise 403 so the
   // phone shows "link expired — run /voice-control:pair". The token's HASH is stored, never the token.
-  private async handleClaim(request: Request, routingId: string): Promise<Response> {
+  private async handleClaim(request: Request, sessionId: string): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    const cookieName = deviceCookieName(routingId);
+    const cookieName = deviceCookieName(sessionId);
     const presented = readCookie(request.headers.get("Cookie"), cookieName);
     const hasValidCookie = presented ? await this.deviceKnown(presented) : false;
     const open = windowOpen(await this.ctx.storage.get<number>(CLAIM_WINDOW_KEY), Date.now());
@@ -314,17 +327,47 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
       // Single-use: the first device to pair closes the window, so a leaked URL can't be claimed by a
       // racing second device even within the 90s. The DO serializes requests, so this is atomic — a
       // simultaneous second claim finds the window already gone. (The window still also expires on its
-      // own after CLAIM_WINDOW_MS if never used.) Re-pairing another device needs a fresh /pair.
+      // own after CLAIM_WINDOW_MS if never used.) Re-pairing another device needs a fresh /pair. Tell the
+      // daemons the session is now paired so /status reflects it.
       await this.ctx.storage.delete(CLAIM_WINDOW_KEY);
+      this.signalDaemons(false);
     }
     const secure = new URL(request.url).protocol === "https:";
     return jsonResponse({ ok: true }, 200, { "set-cookie": buildSetCookie(cookieName, token, secure) });
   }
 
   // Does the request carry a cookie whose token is in this session's device set?
-  private async hasPairedDevice(request: Request, routingId: string): Promise<boolean> {
-    const presented = readCookie(request.headers.get("Cookie"), deviceCookieName(routingId));
+  private async hasPairedDevice(request: Request, sessionId: string): Promise<boolean> {
+    const presented = readCookie(request.headers.get("Cookie"), deviceCookieName(sessionId));
     return presented ? this.deviceKnown(presented) : false;
+  }
+
+  // Is any device currently paired (a fresh device token exists)? Decides whether a connecting daemon's
+  // session needs a pairing window opened.
+  private async anyDevicePaired(): Promise<boolean> {
+    const now = Date.now();
+    const entries = await this.ctx.storage.list<{ createdAt: number }>({ prefix: DEVICE_STORAGE_PREFIX });
+    for (const entry of entries.values()) {
+      if (deviceFresh(entry.createdAt, now)) return true;
+    }
+    return false;
+  }
+
+  // Open a pairing window and tell the daemons it's open (so the start/status skills say "scan to pair").
+  private async openClaimWindow(): Promise<void> {
+    await this.ctx.storage.put(CLAIM_WINDOW_KEY, Date.now() + CLAIM_WINDOW_MS);
+    this.signalDaemons(true);
+  }
+
+  // Tell every attached daemon whether a pairing window is currently open.
+  private signalDaemons(open: boolean): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      if (roleOf(socket) === "daemon") this.signalDaemon(socket, open);
+    }
+  }
+
+  private signalDaemon(socket: WebSocket, open: boolean): void {
+    send(socket, { channel: "session", event: { type: "pairing", open } });
   }
 
   // A device is known if its token hash is stored AND was last used within the rolling TTL. A stale
@@ -342,8 +385,8 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
 
   // Authenticate a daemon-role socket by its daemonKey header (session.json, never in any URL). Pinned
   // on the first daemon connect (trust-on-first-use) and required to match thereafter — so a leaked URL
-  // (which yields only routingId, not daemonKey) cannot connect as a daemon. The pin is wiped with the
-  // rest of the session by expireSession, so each fresh session re-pins from the same session.json key.
+  // (which yields only the sessionId, not daemonKey) cannot connect as a daemon. The pin is wiped with
+  // the rest of the session by expireSession, so each fresh session re-pins from the same session.json key.
   private async authenticateDaemon(request: Request): Promise<boolean> {
     const presented = request.headers.get(BRIDGE_DAEMON_KEY_HEADER);
     if (!presented) return false;

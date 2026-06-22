@@ -85,9 +85,14 @@ export type DaemonToBrowserEvent =
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.
 //  - `terminate`: end this thread (the DO expires the session on the last one).
-//  - `open_claim_window`: open a short device-pairing window so a phone can claim a device cookie
-//    (sent on the daemon's first connect and on /voice-control:pair). See worker/src/claim.ts.
+//  - `open_claim_window`: explicitly open a device-pairing window (sent on /voice-control:pair). The DO
+//    ALSO opens one on its own when an unpaired daemon connects; this is the "add another device" path.
 export type BridgeControlEvent = { type: "terminate" } | { type: "open_claim_window" };
+
+// DO → daemon: session-level signal sent right after the daemon connects. Currently just whether a
+// device-pairing window is open (the DO auto-opens one when no device is paired yet), so the
+// /voice-control:start skill can show "scan to pair" vs "already connected".
+export type SessionSignal = { type: "pairing"; open: boolean };
 
 export type BridgeClientRole = "daemon" | "browser";
 
@@ -163,6 +168,8 @@ export type BridgeEnvelope =
   | { channel: "browser"; threadId: ThreadId; enc: EncBlob }
   // daemon → DO (terminate this thread / open a pairing window). No content; the DO acts on it.
   | { channel: "control"; event: BridgeControlEvent }
+  // DO → daemon: session-level signal (e.g. whether a pairing window is open). No content.
+  | { channel: "session"; event: SessionSignal }
   // daemon → DO registry (register/refresh this thread's sealed label + plaintext state).
   | { channel: "registry"; event: WireRegistryEvent }
   // DO → browser(s): roster snapshot + join/leave deltas (sealed labels).

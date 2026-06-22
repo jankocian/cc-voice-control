@@ -31,7 +31,13 @@ then shows a scannable QR code + the phone URL. State lives in the plugin's own 
    ```sh
    D="${CLAUDE_PLUGIN_DATA}"
    R="$D/runtime/${CMUX_SURFACE_ID:-default}.json"
-   for i in $(seq 1 20); do { [ -f "$R" ] || [ -f "$D/runtime.json" ]; } && break; sleep 0.5; done
+   # Wait for this pane's runtime file AND for the bridge to report the pairing state (`"pairing"`
+   # settles from null to true/false once the daemon connects), or for the no-API-key notice.
+   for i in $(seq 1 30); do
+     { [ -f "$R" ] && grep -qE '"pairing": (true|false)' "$R"; } && break
+     [ -f "$D/runtime.json" ] && break
+     sleep 0.5
+   done
    if [ -f "$R" ]; then cat "$D/qr.txt" 2>/dev/null; echo; cat "$R";
    elif [ -f "$D/runtime.json" ]; then cat "$D/runtime.json";   # may be a needsSetup notice
    else echo "NOT_RUNNING"; fi
@@ -52,17 +58,21 @@ then shows a scannable QR code + the phone URL. State lives in the plugin's own 
    The `message` field in `runtime.json` already contains suitable text — you may surface it
    as-is and/or reformat it nicely. Then stop.
 
-4. **If you see the QR block and a `sessionUrl`**, present **both** to the user:
+4. **If you see the QR block and a `sessionUrl`**, present **both** to the user (always show the
+   link — it's how any device gets back to this session):
    - **Reproduce the QR code character-for-character inside a fenced code block** (` ``` `) so it
      renders monospaced and stays scannable — do not summarize, crop, re-wrap, or alter any
-     character. This is the primary way in; the user scans it with their phone camera.
-   - Show the `sessionUrl` directly beneath it as a tap/copy fallback (desktop, or if the scan fails).
-   - Tell them to scan or open it and tap to speak — their words arrive here as normal user messages
-     and replies are spoken back.
-   - Mention that the link is **single-use and time-limited**: it pairs the **first** device to open it
-     within about 90 seconds, then it's dead — so scan promptly, and a leaked link/QR can't be used to
-     join later. Once a device connects it stays connected. To add another device afterwards, run
-     `/voice-control:pair` for a fresh single-use link.
+     character. Show the `sessionUrl` directly beneath it as a tap/copy fallback.
+   - Then branch on the `"pairing"` field in the runtime JSON:
+     - **`"pairing": true`** — no device is paired yet, so a **pairing window is open**: tell them to
+       **scan/open it on their phone within about 90 seconds** to connect it, then tap to speak. Their
+       words arrive here as normal messages and replies are spoken back. Note that the link is
+       **single-use** (the first device to claim it pairs; a leaked link can't be used to join later).
+     - **`"pairing": false`** — a device is already paired: tell them their **paired devices reconnect
+       automatically** (just open the link; an overnight sleep needs nothing). To connect a **new**
+       device, run **`/voice-control:pair`** for a fresh ~90-second window.
+     - If `"pairing"` is `null`/absent (the bridge state couldn't be confirmed), just show the link and
+       say paired devices reconnect, and to add a device run `/voice-control:pair`.
    - Tell them the voice remote is now a **visible background task**: it shows up in `/tasks`, and to
      end it they can run `/voice-control:stop` or stop that task from `/tasks`.
 

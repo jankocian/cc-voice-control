@@ -218,9 +218,13 @@ export function writeSetupNeededRuntime(setup: ConfigSetupNeeded): void {
  */
 export type MachineSession = { secret: string; sessionId: string; daemonKey: string };
 
-const SESSION_SECRET_BYTES = 16; // 128 bits — uncrackable by online guessing; keeps the QR small.
+const SESSION_SECRET_BYTES = 16; // 128 bits — the E2E key seed; rides in the URL fragment.
 const DAEMON_KEY_BYTES = 32; // daemon-role auth secret (never leaves the machine except to the bridge).
-const SESSION_ID_CHARS = 12; // short, non-secret label derived from the secret's hash.
+// The session handle = sha256(secret) truncated. It's the routing key AND the visible id in the URL
+// path, so it's kept short to keep the QR small; 8 base64url chars (48 bits) is far beyond any realistic
+// collision risk for this tool (it's non-secret and only ever routes to a gated DO, so it need only be
+// collision-resistant, not unguessable). The daemon and phone derive it identically.
+const SESSION_ID_CHARS = 8;
 
 function sessionFilePath(): string {
   return join(stateDir(), "session.json");
@@ -283,24 +287,15 @@ function readSessionFile(path: string): MachineSession | undefined {
   }
 }
 
-// The session's routing id = sha256(secret) (hex). One-way derivative of the secret: it routes the
-// session (the worker maps it to a Durable Object) but reveals nothing about the secret, so it is the
-// only session identifier ever sent to the worker. The browser derives the same value from the secret
-// it reads out of the URL fragment (see web/src/lib/session.ts), so both ends reach the same DO without
-// the worker ever seeing the secret. Must match the browser's derivation exactly (sha256 → lowercase hex).
-export function deriveRoutingId(secret: string): string {
-  return createHash("sha256").update(secret).digest("hex");
-}
-
 export function toWebSocketUrl(
   bridgeUrl: string,
-  routingId: string,
+  sessionId: string,
   role: BridgeClientRole,
   threadId?: string
 ): string {
-  return toBridgeWebSocketUrl(bridgeUrl, routingId, role, threadId);
+  return toBridgeWebSocketUrl(bridgeUrl, sessionId, role, threadId);
 }
 
-export function toBrowserUrl(bridgeUrl: string, secret: string): string {
-  return toBridgeBrowserSessionUrl(bridgeUrl, secret);
+export function toBrowserUrl(bridgeUrl: string, sessionId: string, secret: string): string {
+  return toBridgeBrowserSessionUrl(bridgeUrl, sessionId, secret);
 }

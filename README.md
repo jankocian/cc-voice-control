@@ -80,15 +80,19 @@ This plugin is small on purpose so you can audit it. The trust boundaries:
   replies, transcripts, audio) and the thread label cross the bridge **end-to-end encrypted**:
   the phone and the daemon each derive an AES-GCM key from the session secret (HKDF), and the
   worker only ever relays ciphertext plus routing metadata (which thread, message type, timing).
-  The secret never reaches the worker — it rides in the URL **fragment** (`/s#<secret>`), which
-  browsers don't send to a server, and the worker routes by `routingId = sha256(secret)`. So even
-  a compromised bridge can't read prompts, replies, repo/branch labels, or audio. See
-  `src/shared/e2e.ts` and `worker/src/voice-session-do.ts`.
-- **A leaked link can't be used to join later.** Connecting a device needs a short, user-opened
-  **pairing window** (`/voice-control:start`, or `/voice-control:pair` for an extra device). The link
-  is **single-use** — the first device to open it within the window pairs and mints a per-device
-  `HttpOnly` cookie, then the link is dead; so a stolen screenshot / URL / chat history grants no
-  access, and a racing second device loses to the first. The daemon role is authenticated by a separate
+  The URL is `/s/<sessionId>#<secret>`: the **secret** rides in the **fragment**, which browsers
+  don't send to a server, so the worker never sees it; only the short, non-secret `sessionId`
+  (which routes the session) reaches it. So even a compromised bridge can't read prompts, replies,
+  repo/branch labels, or audio. See `src/shared/e2e.ts` and `worker/src/voice-session-do.ts`.
+- **A leaked link can't be used to join later.** A pairing window opens only when you actually need
+  one — the bridge opens it when an **unpaired** session's daemon connects (i.e. first
+  `/voice-control:start`), or you open one explicitly with `/voice-control:pair` to add a device.
+  Never on a restart, an extra pane, or a morning reconnect. Within the window the first device to
+  open the link pairs (**single-use**) and mints a per-device `HttpOnly` cookie; after that the link
+  is dead, so a stolen screenshot / URL / chat history grants no access. Already-paired devices just
+  reconnect via the cookie (it rolls a 3-day TTL on use, so a closed-laptop overnight is fine). The
+  daemon role is authenticated by a separate `daemonKey` (in `session.json`, never in any URL), so a
+  leaked link can't impersonate a daemon to force a window open. See `worker/src/claim.ts`. The daemon role is authenticated by a separate
   `daemonKey` (in `session.json`, never in any URL), so a leaked link can't impersonate a daemon to
   re-open the window. Revoke-on-exit still wipes the session shortly after the last pane disconnects.
   See `worker/src/claim.ts`.

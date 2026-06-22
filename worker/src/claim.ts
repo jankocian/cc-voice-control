@@ -36,10 +36,9 @@ export const CLAIM_WINDOW_KEY = "claimOpenUntil";
 export const DAEMON_AUTH_KEY = "daemonAuth";
 
 // Per-session cookie name so two sessions opened in one browser (two machines) don't clobber each
-// other's device token. 16 hex chars (64 bits) of the non-secret routingId makes an accidental
-// same-prefix collision negligible.
-export function deviceCookieName(routingId: string): string {
-  return `vrt_${routingId.slice(0, 16)}`;
+// other's device token. The sessionId is the per-session, non-secret handle, so it scopes the cookie.
+export function deviceCookieName(sessionId: string): string {
+  return `vrt_${sessionId}`;
 }
 
 export function deviceStorageKey(tokenHashHex: string): string {
@@ -77,7 +76,7 @@ export function readCookie(cookieHeader: string | null, name: string): string | 
 
 export function buildSetCookie(name: string, value: string, secure: boolean): string {
   // SameSite=Strict: every use (the /claim POST and the WS upgrade) is same-origin, so Strict is safe
-  // and strongest. Path=/ so it rides both /claim/<routingId> and /ws/<routingId>. Secure is dropped
+  // and strongest. Path=/ so it rides both /claim/<sessionId> and /ws/<sessionId>. Secure is dropped
   // only for local http dev (wrangler dev), where the browser would otherwise refuse to store it.
   const attrs = [`${name}=${value}`, "HttpOnly", "SameSite=Strict", "Path=/", `Max-Age=${DEVICE_COOKIE_MAX_AGE_S}`];
   if (secure) attrs.push("Secure");

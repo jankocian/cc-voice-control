@@ -95,7 +95,7 @@ export function App({ session }: { session: Session }) {
   );
 
   const bridge = useBridge({
-    routingId: session.routingId,
+    sessionId: session.sessionId,
     key: session.key,
     onEvent: handleContentEvent,
     onRoster,
