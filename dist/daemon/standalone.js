@@ -19691,7 +19691,7 @@ class VoiceDaemon {
   pending = [];
   spoken = new Set;
   floor = 0;
-  speakSteps = false;
+  speakMode = "final";
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
   label;
@@ -19874,8 +19874,9 @@ class VoiceDaemon {
       case "get_audio":
         await this.serveAudio(event.requestId);
         return;
-      case "set_speak_steps":
-        this.speakSteps = event.on === true;
+      case "set_speak_mode":
+        if (event.mode === "off" || event.mode === "final" || event.mode === "all")
+          this.speakMode = event.mode;
         return;
       case "spawn_thread": {
         const result = await this.spawnThread(event.cwd);
@@ -20022,7 +20023,7 @@ class VoiceDaemon {
     return { type: "history", turns: rows };
   }
   speakNewSteps(turns) {
-    if (!this.speakSteps)
+    if (this.speakMode !== "all")
       return;
     const voice = this.pending.find((p) => p.opened && p.userTs !== undefined);
     if (!voice)
@@ -20071,7 +20072,8 @@ class VoiceDaemon {
         continue;
       this.pending.splice(i, 1);
       this.remember(this.spoken, reply.uuid, MAX_AUDIO_ENTRIES * 4);
-      this.speak(reply.uuid, reply.text);
+      if (this.speakMode !== "off")
+        this.speak(reply.uuid, reply.text);
     }
   }
   findReply(turns, entry) {
