@@ -19039,7 +19039,7 @@ function toBrowserUrl(bridgeUrl, secret) {
 
 // src/daemon/voice-daemon.ts
 import { randomUUID } from "node:crypto";
-import { mkdirSync as mkdirSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, rmSync, watch, writeFileSync as writeFileSync2 } from "node:fs";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19514,17 +19514,24 @@ function pairReplies(turns) {
   }
   return pairs;
 }
+function resolveVoiceReply(turns, userUuid) {
+  if (!userUuid)
+    return;
+  return pairReplies(turns).find((p) => p.prompt?.uuid === userUuid)?.reply;
+}
 
 // src/daemon/transcript-reader.ts
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 var TAIL_BYTES = 512 * 1024;
-function readTailRecords(path) {
+function readRecords(path, floorOffset) {
   let fd;
   try {
     fd = openSync(path, "r");
-    const size = fstatSync(fd).size;
-    const start = Math.max(0, size - TAIL_BYTES);
-    const buf = Buffer.alloc(size - start);
+    const eof = fstatSync(fd).size;
+    const tailStart = Math.max(0, eof - TAIL_BYTES);
+    const floorStart = floorOffset === undefined ? undefined : Math.max(0, floorOffset - 1);
+    const start = floorStart === undefined ? tailStart : Math.min(tailStart, floorStart);
+    const buf = Buffer.alloc(eof - start);
     const bytesRead = readSync(fd, buf, 0, buf.length, start);
     const lines = buf.toString("utf8", 0, bytesRead).split(`
 `);
@@ -19538,9 +19545,9 @@ function readTailRecords(path) {
         records.push(JSON.parse(line));
       } catch {}
     }
-    return records;
+    return { records, eof };
   } catch {
-    return [];
+    return { records: [], eof: 0 };
   } finally {
     if (fd !== undefined)
       try {
@@ -19548,8 +19555,9 @@ function readTailRecords(path) {
       } catch {}
   }
 }
-function projectTranscript(path, maxTurns) {
-  return projectTurns(readTailRecords(path), maxTurns);
+function projectTranscript(path, maxTurns, floorOffset) {
+  const { records, eof } = readRecords(path, floorOffset);
+  return { turns: projectTurns(records, maxTurns), eof };
 }
 
 // src/daemon/turn-coordinator.ts
@@ -19654,16 +19662,16 @@ class TurnCoordinator {
 }
 
 // src/daemon/voice-daemon.ts
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var RECONNECT_DELAY_MS = 1500;
 var BRIDGE_PING_INTERVAL_MS = 25000;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var MAX_SPEECH_CHARS = 40000;
 var MAX_PROJECTED_TURNS = 40;
 var MAX_AUDIO_ENTRIES = 20;
+var SPOKEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
 var MAX_PENDING_VOICE = 16;
-var SETTLE_TIMEOUT_MS = 12000;
-var SETTLE_POLL_MS = 150;
+var REPLY_FLUSH_CAP_MS = 120000;
+var FLUSH_POLL_MS = 1000;
 var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 function createDaemonInit(config2) {
@@ -19688,6 +19696,7 @@ class VoiceDaemon {
   turns;
   audio = new Map;
   lastTranscriptPath;
+  lastEof;
   pending = [];
   spoken = new Set;
   floor = 0;
@@ -19868,8 +19877,11 @@ class VoiceDaemon {
         return;
       case "sync":
         this.emitStatus();
-        if (this.lastTranscriptPath)
-          this.projectAndEmit();
+        if (this.lastTranscriptPath) {
+          const turns = this.projectedNow();
+          this.sendToBrowser(this.historyFrom(turns));
+          this.speakReadyVoiceReplies(turns);
+        }
         return;
       case "get_audio":
         await this.serveAudio(event.requestId);
@@ -19980,16 +19992,27 @@ class VoiceDaemon {
   projectedNow() {
     if (!this.lastTranscriptPath)
       return [];
-    const turns = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor);
-    return dropSessionAnnouncement(turns, this.init.browserUrl);
+    const { turns, eof } = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS, this.voiceReadFloor());
+    this.lastEof = eof;
+    return dropSessionAnnouncement(turns.filter((t) => t.timestamp >= this.floor), this.init.browserUrl);
+  }
+  voiceReadFloor() {
+    let floor;
+    for (const p of this.pending) {
+      if (p.opened && p.openOffset !== undefined)
+        floor = floor === undefined ? p.openOffset : Math.min(floor, p.openOffset);
+    }
+    return floor;
   }
   bindVoicePrompt(prompt) {
     const text = prompt.trim();
     if (!text)
       return;
     const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
-    if (entry)
+    if (entry) {
       entry.opened = true;
+      entry.openOffset = this.lastEof;
+    }
   }
   bindPending(turns) {
     const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
@@ -20031,7 +20054,7 @@ class VoiceDaemon {
     for (const t of turns) {
       if (!t.interim || this.spoken.has(t.uuid) || t.timestamp < (voice.userTs ?? 0))
         continue;
-      this.remember(this.spoken, t.uuid, MAX_AUDIO_ENTRIES * 4);
+      this.remember(this.spoken, t.uuid, SPOKEN_UUID_CAP);
       this.speak(t.uuid, t.text);
     }
   }
@@ -20052,17 +20075,45 @@ class VoiceDaemon {
   async handleTurnClose() {
     if (!this.lastTranscriptPath)
       return;
-    let turns = this.projectedNow();
+    this.sendToBrowser(this.historyFrom(this.projectedNow()));
+    await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
+    const turns = this.projectedNow();
     this.sendToBrowser(this.historyFrom(turns));
-    const deadline = Date.now() + SETTLE_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      this.bindPending(turns);
-      if (this.pending.every((p) => !p.opened || this.findReply(turns, p)))
-        break;
-      await sleep(SETTLE_POLL_MS);
-      turns = this.projectedNow();
-    }
-    this.sendToBrowser(this.historyFrom(turns));
+    this.speakReadyVoiceReplies(turns);
+  }
+  repliesSettled() {
+    const turns = this.projectedNow();
+    this.bindPending(turns);
+    return this.pending.every((p) => !p.opened || this.findReply(turns, p) !== undefined);
+  }
+  waitForTranscript(ready, capMs) {
+    return new Promise((resolve) => {
+      const path = this.lastTranscriptPath;
+      if (!path || this.stopped || ready())
+        return resolve();
+      let watcher;
+      let poll;
+      let cap;
+      const finish = () => {
+        watcher?.close();
+        if (poll)
+          clearInterval(poll);
+        if (cap)
+          clearTimeout(cap);
+        resolve();
+      };
+      const check2 = () => {
+        if (this.stopped || ready())
+          finish();
+      };
+      try {
+        watcher = watch(path, check2);
+      } catch {}
+      poll = setInterval(check2, FLUSH_POLL_MS);
+      cap = setTimeout(finish, capMs);
+    });
+  }
+  speakReadyVoiceReplies(turns) {
     for (let i = this.pending.length - 1;i >= 0; i--) {
       const entry = this.pending[i];
       if (!entry.opened)
@@ -20071,20 +20122,13 @@ class VoiceDaemon {
       if (!reply || this.spoken.has(reply.uuid))
         continue;
       this.pending.splice(i, 1);
-      this.remember(this.spoken, reply.uuid, MAX_AUDIO_ENTRIES * 4);
+      this.remember(this.spoken, reply.uuid, SPOKEN_UUID_CAP);
       if (this.speakMode !== "off")
         this.speak(reply.uuid, reply.text);
     }
   }
   findReply(turns, entry) {
-    if (!entry.userUuid)
-      return;
-    const paired = pairReplies(turns).find((p) => p.prompt?.uuid === entry.userUuid)?.reply;
-    if (paired)
-      return paired;
-    if (entry.userTs === undefined)
-      return;
-    return turns.find((t) => t.role === "claude" && t.timestamp > (entry.userTs ?? 0) && !this.spoken.has(t.uuid));
+    return resolveVoiceReply(turns, entry.userUuid);
   }
   storeAudio(uuid3, audio) {
     this.audio.set(uuid3, audio);
