@@ -4,9 +4,11 @@ import { setAudioSessionType } from "../lib/audioSession";
 
 const SPEEDS = [1, 1.25, 1.5, 1.75, 2];
 const RATE_KEY = "voiceRemote.playbackRate";
+// Default when the user hasn't picked a speed — most replies read better slightly faster.
+const DEFAULT_RATE = 1.25;
 
 function clampRate(rate: number): number {
-  return SPEEDS.indexOf(rate) >= 0 ? rate : 1;
+  return SPEEDS.indexOf(rate) >= 0 ? rate : DEFAULT_RATE;
 }
 
 // A zero-length silent WAV. Played once inside a user gesture, it "unlocks" the
