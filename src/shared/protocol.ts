@@ -84,14 +84,14 @@ export type DaemonToBrowserEvent =
   // duplicate, or reorder. Text only; audio is fetched per row on demand.
   | { type: "history"; turns: HistoryTurn[] }
   // Real, event-driven delivery status for one of the user's OWN prompts, so the phone shows the message
-  // the instant Claude Code receives it — not only when the reply (or a step) lands — and grades it
-  // WhatsApp-style. `text` is the prompt's words: the phone has none for a typed turn, and only the daemon
-  // transcribed a voice turn, so the daemon must send them. The phone renders an OPTIMISTIC "you" row from
-  // this, reconciled away by TEXT once the authoritative native row appears in `history` (which renders
-  // "logged" = two checks). States: "queued" = transcribed/queued for the pane (clock, no check),
-  // "accepted" = the agent received it via UserPromptSubmit (one check). ponytail: text-keyed reconcile —
-  // at most one or a few prompts are ever in flight, so a duplicate-phrase collision only drops a
-  // placeholder a beat early, never a real row.
+  // the instant Claude Code receives it — not only when the reply (or a step) lands. `text` is the prompt's
+  // words: the phone has none for a typed turn, and only the daemon transcribed a voice turn, so the daemon
+  // must send them. The phone renders an OPTIMISTIC "you" row from this (WhatsApp-style: one grey check =
+  // sent), reconciled away by TEXT once the authoritative native row appears in `history` (which renders
+  // "logged" = two coral checks, i.e. picked up into Claude's conversation). Both states show one check;
+  // they differ only for the daemon's spinner/resend bookkeeping: "queued" = transcribed/queued for the
+  // pane, "accepted" = the agent received it (UserPromptSubmit). ponytail: text-keyed reconcile — at most a
+  // few prompts are ever in flight, so a duplicate-phrase collision only drops a placeholder a beat early.
   | { type: "prompt_status"; text: string; state: "queued" | "accepted" }
   // This daemon just spawned a new thread (phone "+" OR the /voice-control:spawn skill). `spawnId`
   // is a one-shot correlation key carried end-to-end (spawn command env → child daemon → its first
