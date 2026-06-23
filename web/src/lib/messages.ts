@@ -7,8 +7,9 @@ import type { HistoryTurn } from "./protocol";
 export type MessageKind = "you" | "claude";
 
 // Delivery state of one of YOUR messages, WhatsApp-style. Optimistic rows (shown before the transcript
-// catches up) are "queued" (clock) or "accepted" (one check); a native row projected from Claude's
-// transcript is "logged" (two checks — it's in Claude's history). Only "you" rows carry it.
+// catches up) are "queued" or "accepted" — both render as ONE grey check (sent to Claude Code). A native
+// row projected from Claude's transcript is "logged" — TWO coral checks (picked up into the conversation).
+// Only "you" rows carry it. queued vs accepted exist for the daemon's bookkeeping, not a distinct check.
 export type Delivery = "queued" | "accepted" | "logged";
 
 export type Message = {

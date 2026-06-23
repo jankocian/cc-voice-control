@@ -91,19 +91,16 @@ const MAX_AUDIO_ENTRIES = 20;
 const SPOKEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
 // Cap untracked-but-queued voice prompts (bounds memory if injections never open turns).
 const MAX_PENDING_VOICE = 16;
-// After a turn closes we wait for the voice reply to FLUSH to the transcript, reacting to the actual file
-// write (fs.watch) rather than guessing a timeout — see waitForTranscript. The Stop hook can fire well
-// before the answer TEXT lands: an extended-thinking turn writes the thinking block as its own `end_turn`
-// record first, then streams the answer seconds-to-minutes later (≈19s behind for a ~4k-char answer in
-// the wild; a long answer streams longer). These caps are only the safety backstop for the abnormal case
-// where the answer never comes (e.g. an interrupted turn) — the watch resolves the normal case at once.
-const REPLY_FLUSH_CAP_MS = 120_000;
-// Same backstop for waiting on the USER record to flush after a turn opens (UserPromptSubmit can fire
-// before Claude Code writes it). Resolves the instant the record lands; this only bounds the abnormal case
-// where it never does (e.g. an interrupted/aborted submit).
-const USER_TURN_FLUSH_CAP_MS = REPLY_FLUSH_CAP_MS;
-// fs.watch can coalesce/miss events on some filesystems, so a slow poll backs it up. Promptness comes from
-// the watch; this only bounds how long a missed event can stall us.
+// The phone mirrors the transcript via a LIVE TAIL (see watchTranscript): a single fs.watch re-syncs on
+// every write, debounced so a burst coalesces into one re-projection. This is the whole fix for "the hook
+// fired before Claude flushed the record" — we react to the file write, not to hook timing, so a user
+// prompt, a step before a tool call, or an answer that streams in seconds-to-minutes after the Stop hook
+// (extended thinking: the thinking block flushes as its own `end_turn` record first) all reach the phone
+// the instant they land, never one event behind. ~150ms reads as instant while collapsing tool-output floods.
+const SYNC_DEBOUNCE_MS = 150;
+// fs.watch can coalesce/miss events on some filesystems, so a slow poll backs it up WHILE a turn is active
+// (an idle daemon must not churn the disk re-reading an unchanging file). The watch carries promptness;
+// this only bounds how long a missed event could stall a turn that's still in flight.
 const FLUSH_POLL_MS = 1_000;
 
 // Plugin-load root, three dirs up from this module either way (dist/daemon or src/daemon). Only used
@@ -206,6 +203,16 @@ export class VoiceDaemon {
   private readonly pending: PendingVoice[] = [];
   private readonly spoken = new Set<string>();
   private floor = 0;
+
+  // The live tail on the active transcript (see watchTranscript): the SINGLE mechanism that keeps the phone
+  // current. `transcriptWatcher`/`watchedPath` are the fs.watch + which file it's on; `syncDebounce`
+  // coalesces a burst of writes; `syncPoll` is the while-active backup; `lastHistorySig` lets the tail skip
+  // re-sending an unchanged thread (tool output that adds no conversational turn must not re-flood the wire).
+  private transcriptWatcher?: FSWatcher;
+  private watchedPath?: string;
+  private syncDebounce?: ReturnType<typeof setTimeout>;
+  private syncPoll?: ReturnType<typeof setInterval>;
+  private lastHistorySig = "";
   // The phone's autoplay preference for VOICE turns: "off" speaks nothing, "final" speaks just the final
   // reply (default — the prior behaviour), "all" also speaks each interim step. Tap-to-play works in every
   // mode. Set via set_speak_mode.
@@ -355,29 +362,31 @@ export class VoiceDaemon {
               if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
                 this.inheritedPermissionMode = permissionMode;
               }
-              if (transcriptPath) this.lastTranscriptPath = transcriptPath;
+              this.setTranscript(transcriptPath); // point the live tail at this turn's transcript
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
               this.bindVoicePrompt(realPrompt); // mark the turn ours + record its read floor (openOffset)
+              this.ensurePoll(); // back the watch up while this turn is in flight
               // Claude Code RECEIVED the prompt (this is its UserPromptSubmit) → tell the phone NOW so the
               // message shows instantly with a single check, rather than only when the reply lands. Works for
               // a typed turn too (the daemon otherwise never knew its text). The authoritative native row
-              // (uuid + the "logged" two-check) follows from the transcript via handleTurnOpen.
+              // (its uuid → audio + the "logged" two-check) follows from the transcript via the live tail.
               this.emitPromptAccepted(realPrompt);
-              void this.handleTurnOpen(realPrompt);
+              this.syncFromTranscript(true);
             } else if (route === "/turn-progress") {
-              // PreToolUse: Claude wrote a step (narration) before this tool call → re-project so it shows
-              // live, and (if opted in) speak it on a voice turn.
+              // PreToolUse: Claude is about to run a tool, so it just wrote a step (narration). Re-sync from
+              // the transcript; the live tail also catches the step if it flushes a beat after this hook.
               const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
-              if (transcriptPath) this.lastTranscriptPath = transcriptPath;
-              const turns = this.projectedNow();
-              this.sendToBrowser(this.historyFrom(turns));
-              this.speakNewSteps(turns);
+              this.setTranscript(transcriptPath);
+              this.syncFromTranscript(true);
             } else {
+              // Stop: the turn ended. Release the idle-gate (so a queued voice prompt can inject) and re-sync.
+              // The reply text may still be streaming in (extended thinking) — the live tail shows/speaks it
+              // the instant it flushes, so there is nothing to wait for here.
               const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
-              if (transcriptPath) this.lastTranscriptPath = transcriptPath;
+              this.setTranscript(transcriptPath);
               this.turns.turnClosed();
-              void this.handleTurnClose(); // re-project (waiting for the flush) + speak a voice reply
+              this.syncFromTranscript(true);
             }
           } catch {
             // ignore malformed hook payloads
@@ -452,7 +461,7 @@ export class VoiceDaemon {
     // turn can't be spoken or wedge the idle-gate) — reset() also re-emits idle status.
     this.turns.reset();
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
-    this.projectAndEmit();
+    this.syncFromTranscript(true);
   }
 
   // Handle a /pair POST (the /voice-control:pair skill): open a device-pairing window so an additional
@@ -567,23 +576,17 @@ export class VoiceDaemon {
         await cmuxInterrupt(this.init.surface);
         this.pending.length = 0;
         this.turns.interrupt();
-        this.projectAndEmit();
+        this.syncFromTranscript(true);
         return;
       case "sync":
         // The phone (re)connected and wants the current state. Replaces a heartbeat (the daemon otherwise
-        // emits status only on change, which a fresh phone misses), then re-projects the thread so a
-        // refresh / 2nd browser restores it. Only emit history once we know the transcript path: a `history`
-        // snapshot is authoritative (the phone replaces with it), so emitting an empty one before the first
-        // hook of a freshly-(re)started daemon would wipe the phone's thread. Text only — audio on demand,
-        // EXCEPT a voice reply we never got to speak (its answer landed after the turn-close settle window,
-        // or the phone was backgrounded when it did): speak it now so a reconnect/refresh isn't left with a
-        // silent final answer. Idempotent (`spoken`), so a reconnect never re-speaks an already-spoken one.
-        this.emitStatus();
-        if (this.lastTranscriptPath) {
-          const turns = this.projectedNow();
-          this.sendToBrowser(this.historyFrom(turns));
-          this.speakReadyVoiceReplies(turns);
-        }
+        // emits status only on change, which a fresh phone misses) and re-sends the thread so a refresh /
+        // 2nd browser restores it. Only sync once we know the transcript path: a `history` snapshot is
+        // authoritative (the phone replaces with it), so emitting an empty one before the first hook of a
+        // freshly-(re)started daemon would wipe the phone's thread. syncFromTranscript also re-speaks a voice
+        // reply we never got to (its answer landed while the phone was away) — idempotent via `spoken`.
+        if (this.lastTranscriptPath) this.syncFromTranscript(true);
+        else this.emitStatus();
         return;
       case "get_audio":
         // Tap-to-play on a row whose audio isn't cached: serve it, synthesizing on demand for a step (we
@@ -685,7 +688,7 @@ export class VoiceDaemon {
     if (mode === "interrupt") this.turns.interruptWith(text);
     else this.turns.enqueueVoice(text);
     this.sendToBrowser({ type: "prompt_status", text, state: "queued" });
-    this.projectAndEmit();
+    this.syncFromTranscript(true);
   }
 
   // ---- injection (driven by the TurnCoordinator) ----------------------------
@@ -715,19 +718,95 @@ export class VoiceDaemon {
       type: "error",
       message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
     });
-    this.projectAndEmit();
+    this.syncFromTranscript(true);
     return false;
   }
 
-  // ---- transcript projection (the conversation source of truth) --------------
+  // ---- the live transcript tail (single source of phone state) ---------------
 
-  // Project the transcript into the phone thread and send it, then refresh the derived working lamp from
-  // the same ground truth. Called on every turn event + on sync, so the phone's view AND its lamp always
-  // converge together. Pure read; never throws into the caller.
-  private projectAndEmit(): void {
-    const turns = this.projectedNow();
-    this.sendToBrowser(this.historyFrom(turns));
-    this.emitStatus(turns); // reuse the same projection — no second file read
+  // Point the live tail at the transcript a hook handed us. The fs.watch then re-syncs the phone on every
+  // write, so a record that flushes AFTER its hook (a user prompt, a step, a late-streamed reply) still
+  // reaches the phone the instant it lands — the fix for "shows up one event late". No-op if unchanged.
+  private setTranscript(path?: string): void {
+    if (!path) return;
+    this.lastTranscriptPath = path;
+    if (path === this.watchedPath) return;
+    this.watchedPath = path;
+    this.transcriptWatcher?.close();
+    try {
+      this.transcriptWatcher = watch(path, () => this.scheduleSync());
+    } catch {
+      this.transcriptWatcher = undefined; // fs.watch unsupported here → the while-active poll carries it
+    }
+  }
+
+  // Coalesce a burst of fs.watch events into one read-only re-sync (a single write fires several events).
+  private scheduleSync(): void {
+    if (this.stopped || this.syncDebounce) return;
+    this.syncDebounce = setTimeout(() => {
+      this.syncDebounce = undefined;
+      // Read-only (captureFloor=false): the tail must never advance the floor past a just-written prompt
+      // (that's the hook path's job, anchored before the prompt — see bindVoicePrompt). Guarded send.
+      this.reflect(this.projectedNow(false), false);
+    }, SYNC_DEBOUNCE_MS);
+  }
+
+  // While a turn could still be writing, back fs.watch up with a slow poll (some filesystems coalesce/miss
+  // events). It self-stops when the turn goes idle so an idle daemon never re-reads an unchanging file.
+  private ensurePoll(): void {
+    if (this.syncPoll) return;
+    this.syncPoll = setInterval(() => {
+      if (this.stopped || !this.isTurnActive()) {
+        if (this.syncPoll) clearInterval(this.syncPoll);
+        this.syncPoll = undefined;
+        return;
+      }
+      this.scheduleSync();
+    }, FLUSH_POLL_MS);
+  }
+
+  // A turn is still "active" (worth polling) while Claude is mid-turn OR a voice reply we owe hasn't been
+  // spoken yet (its answer may still be streaming in after the Stop hook).
+  private isTurnActive(): boolean {
+    return this.turns.isBusy || this.pending.some((p) => p.opened);
+  }
+
+  // Hook/sync-driven re-sync: authoritative, so it ALWAYS sends (force) and may advance the read floor.
+  // The ONE call the hooks make; the tail uses reflect() directly with force=false.
+  private syncFromTranscript(captureFloor: boolean): void {
+    if (!this.lastTranscriptPath) return;
+    this.reflect(this.projectedNow(captureFloor), true);
+  }
+
+  // Turn a projection into phone state: bind pending voice prompts (reply resolution), send the thread,
+  // refresh the working lamp, and speak anything that just landed. `force` always sends the thread; without
+  // it we skip an unchanged thread (the tail fires on every write, incl. tool output that adds no
+  // conversational turn — re-sending the whole thread each time would flood the wire). Idempotent: the
+  // `spoken` guard means re-running never double-speaks, and native uuids mean it never double-shows.
+  private reflect(turns: ProjectedTurn[], force: boolean): void {
+    this.bindPending(turns);
+    const sig = turns
+      .map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}`)
+      .join("|");
+    if (force || sig !== this.lastHistorySig) {
+      this.lastHistorySig = sig;
+      this.sendToBrowser({
+        type: "history",
+        turns: turns.map((t) => ({
+          requestId: t.uuid,
+          timestamp: t.timestamp,
+          role: t.role,
+          text: t.text,
+          hasAudio: this.audio.has(t.uuid),
+          interim: t.interim
+        }))
+      });
+    }
+    // Only refresh the lamp when it actually flips (or on a forced hook/sync) — the tail fires on every
+    // write, and re-emitting an unchanged "working" status each time would spam the bridge for nothing.
+    if (force || this.isWorking(turns) !== this.lastWorking) this.emitStatus(turns);
+    this.speakNewSteps(turns); // speak a just-landed step (speakMode "all", voice turn only)
+    this.speakReadyVoiceReplies(turns); // speak a just-landed final reply (idempotent via `spoken`)
   }
 
   // Project the transcript for display/reply resolution. `captureFloor` advances `lastEof` — the byte
@@ -839,27 +918,8 @@ export class VoiceDaemon {
     }
   }
 
-  // Build the `history` snapshot — a PURE PROJECTION of the transcript's active branch, nothing else. The
-  // phone reconciles its optimistic prompt_status rows against this (dropping an echo once its real native
-  // row appears), so the daemon never emits a daemon-side row that could orphan. We still bind pending voice
-  // prompts here, but only for reply resolution (see bindPending) — they are never rendered.
-  private historyFrom(turns: ProjectedTurn[]): Extract<DaemonToBrowserEvent, { type: "history" }> {
-    this.bindPending(turns);
-    return {
-      type: "history",
-      turns: turns.map((t) => ({
-        requestId: t.uuid,
-        timestamp: t.timestamp,
-        role: t.role,
-        text: t.text,
-        hasAudio: this.audio.has(t.uuid),
-        interim: t.interim
-      }))
-    };
-  }
-
   // "read every step" is on AND a VOICE turn is in progress → speak its newly-appeared steps as they land
-  // (final replies still speak via handleTurnClose). Gated to the in-flight voice turn (steps after its
+  // (final replies speak via speakReadyVoiceReplies). Gated to the in-flight voice turn (steps after its
   // prompt) so turning the toggle on doesn't read out a backlog, and a terminal-typed turn is never read.
   private speakNewSteps(turns: ProjectedTurn[]): void {
     if (this.speakMode !== "all") return;
@@ -909,83 +969,6 @@ export class VoiceDaemon {
     const text = prompt.trim();
     if (!text || text.startsWith("/")) return;
     this.sendToBrowser({ type: "prompt_status", text, state: "accepted" });
-  }
-
-  // On a turn opening: show the native row as soon as it's in the transcript. UserPromptSubmit can fire
-  // BEFORE Claude Code writes the user record to the JSONL, so the immediate projection often lacks it —
-  // and nothing re-read the file until the next hook (a tool call or the reply), which is the "my message
-  // only appears with your answer" bug. So we project once (fast path, if already flushed) then WATCH the
-  // file and re-emit the moment the record lands, reacting to the actual write (fs.watch) — never a fixed
-  // timeout. The optimistic accepted row already shows the words; this swaps in the authoritative native
-  // row (its uuid carries audio + flips the phone to the "logged" two-check). Skips a slash/empty prompt
-  // (never projected, so its record would never satisfy the predicate).
-  private async handleTurnOpen(prompt: string): Promise<void> {
-    this.projectAndEmit();
-    const target = prompt.trim();
-    if (!target || target.startsWith("/")) return;
-    // The native turn CONTAINS the prompt (exact for a typed/voice turn; "A.B" contains a glued "A").
-    await this.waitForTranscript(
-      () => this.projectedNow(false).some((t) => t.role === "user" && t.text.includes(target)),
-      USER_TURN_FLUSH_CAP_MS
-    );
-    this.projectAndEmit();
-  }
-
-  // After a turn closes: wait until every voice turn we're tracking has its FINAL reply flushed, then
-  // re-project and speak each unspoken voice reply. We wait on POSITIVE evidence (the answer record is in
-  // the transcript) reacting to the actual file write — never a fixed timeout — because the Stop hook can
-  // fire long before the answer TEXT lands (an extended-thinking turn flushes the thinking block as its own
-  // `end_turn` record first, then streams the answer seconds-to-minutes later). Replies are matched to our
-  // prompts by native uuid (the prompt is always in the read window — see voiceReadFloor), so a duplicate
-  // phrase / terminal-typed turn can't be mis-spoken; `spoken` makes it idempotent + self-healing.
-  private async handleTurnClose(): Promise<void> {
-    if (!this.lastTranscriptPath) return;
-    this.sendToBrowser(this.historyFrom(this.projectedNow())); // show the turn promptly, before the reply
-    await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
-    const turns = this.projectedNow();
-    this.sendToBrowser(this.historyFrom(turns));
-    this.emitStatus(turns); // the reply has flushed → the lamp flips to idle from the transcript
-    this.speakReadyVoiceReplies(turns);
-  }
-
-  // True once every opened voice prompt we're tracking has its final reply present in the transcript. Binds
-  // pending entries as it goes, so the wait both binds the prompt's uuid and detects its answer.
-  private repliesSettled(): boolean {
-    const turns = this.projectedNow();
-    this.bindPending(turns);
-    return this.pending.every((p) => !p.opened || this.findReply(turns, p) !== undefined);
-  }
-
-  // Resolve when `ready()` is true, driven by the transcript's actual writes (fs.watch) so we react the
-  // instant a record flushes — no fixed-timeout guessing, and an answer that streams in long after the Stop
-  // hook is still caught. A slow poll backs up fs.watch (it can coalesce/miss events on some filesystems);
-  // `capMs` is the backstop for the abnormal case where the awaited record never arrives. Resolves at once
-  // when already ready (the common case: the answer was flushed before the Stop hook fired) or once the
-  // daemon is stopping, so a pending wait can never keep a torn-down daemon's event loop alive.
-  private waitForTranscript(ready: () => boolean, capMs: number): Promise<void> {
-    return new Promise((resolve) => {
-      const path = this.lastTranscriptPath;
-      if (!path || this.stopped || ready()) return resolve();
-      let watcher: FSWatcher | undefined;
-      let poll: ReturnType<typeof setInterval> | undefined;
-      let cap: ReturnType<typeof setTimeout> | undefined;
-      const finish = () => {
-        watcher?.close();
-        if (poll) clearInterval(poll);
-        if (cap) clearTimeout(cap);
-        resolve();
-      };
-      const check = () => {
-        if (this.stopped || ready()) finish();
-      };
-      try {
-        watcher = watch(path, check);
-      } catch {
-        // fs.watch unsupported here → the poll alone carries it
-      }
-      poll = setInterval(check, FLUSH_POLL_MS);
-      cap = setTimeout(finish, capMs);
-    });
   }
 
   // Speak the FINAL reply of every opened voice prompt whose answer has now flushed, retiring its pending
@@ -1156,6 +1139,9 @@ export class VoiceDaemon {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.pairingTimer) clearTimeout(this.pairingTimer);
+    if (this.syncDebounce) clearTimeout(this.syncDebounce);
+    if (this.syncPoll) clearInterval(this.syncPoll);
+    this.transcriptWatcher?.close();
     this.stopHeartbeat?.();
     // Tell the bridge to drop the session so a leaked URL can't reconnect. Best-effort:
     // if the socket is already gone the session is inert anyway (no daemon to relay to).
