@@ -39,7 +39,7 @@ export function StepRow({
       </span>
       {/* min-w-0 lets the flex child shrink so long unbreakable strings wrap instead of overflow */}
       <p
-        className={`min-w-0 [overflow-wrap:anywhere] py-0.5 text-[13px] italic leading-relaxed ${failed ? "text-danger/70" : ""}`}
+        className={`min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] py-0.5 text-[13px] italic leading-relaxed ${failed ? "text-danger/70" : ""}`}
       >
         {renderMarkdown(body)}
       </p>

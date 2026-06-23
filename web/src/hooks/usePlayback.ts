@@ -282,6 +282,7 @@ export function usePlayback({
         // No cached bytes yet (a history row). Fetch on demand; attachAudio plays it from
         // the start since a freshly-loaded clip begins at 0.
         pendingPlayIdRef.current = requestId;
+        setPendingPlayId(requestId);
         onRequestAudioRef.current?.(requestId);
         return;
       }
