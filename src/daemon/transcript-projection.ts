@@ -129,18 +129,32 @@ export function selectActiveBranch(records: TranscriptRecord[]): TranscriptRecor
 
   // The parents of the on-path records — so a superseded sibling is recognised even when that shared parent
   // has itself scrolled out of the read window (the orphan + its glued sibling stay in the tail while their
-  // common parent does not).
+  // common parent does not). A null/absent parent (a ROOT record) is keyed by a sentinel, so an off-path
+  // SECOND root is dropped too — else two root-level turns survive and break the reply re-bind's reliance on
+  // the active branch having a unique on-path turn per parent. This grouping runs ONLY when the records
+  // actually form a tree (some real parent link exists); a flat set with no links (synthetic fixtures) is a
+  // no-op, so a record without parent info is never mistaken for a root sibling.
+  const hasTree = records.some((r) => r.parentUuid != null);
+  const ROOT_PARENT = ""; // sentinel for a null/absent parent; native uuids are never empty
+  const parentKey = (r: TranscriptRecord): string | undefined => (hasTree ? r.parentUuid || ROOT_PARENT : undefined);
   const onPathParents = new Set<string>();
-  for (const r of records) if (r.uuid && onPath.has(r.uuid) && r.parentUuid) onPathParents.add(r.parentUuid);
+  for (const r of records) {
+    if (!r.uuid || !onPath.has(r.uuid)) continue;
+    const k = parentKey(r);
+    if (k !== undefined) onPathParents.add(k);
+  }
 
   // Mark dead branches: a non-sidechain record off the path that shares a parent with the active path (a
-  // superseded sibling), is a child of the active path, or descends from an already-dropped node. File
-  // order ⇒ parents are classified before children, so the `dropped` cascade catches dead subtrees.
+  // superseded sibling, ROOT level included), is a child of the active path, or descends from an
+  // already-dropped node. File order ⇒ parents are classified before children, so the cascade catches dead
+  // subtrees.
   const dropped = new Set<string>();
   for (const r of records) {
     if (!r.uuid || r.isSidechain || onPath.has(r.uuid)) continue;
     const parent = r.parentUuid;
-    if (parent && (onPath.has(parent) || onPathParents.has(parent) || dropped.has(parent))) dropped.add(r.uuid);
+    const k = parentKey(r);
+    if ((k !== undefined && onPathParents.has(k)) || (parent && onPath.has(parent)) || (parent && dropped.has(parent)))
+      dropped.add(r.uuid);
   }
   return dropped.size === 0 ? records : records.filter((r) => !r.uuid || !dropped.has(r.uuid));
 }

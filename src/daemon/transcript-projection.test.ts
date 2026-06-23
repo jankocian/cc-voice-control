@@ -152,8 +152,8 @@ describe("selectActiveBranch — drop dead branches so the phone matches the des
     // user rows under the same parent — an orphan "A" (no answer) and the consumed, glued "A.B" — and
     // Claude answered only A.B. A flat replay shows 3 messages; the desktop shows 1. We must show 1.
     const records: TranscriptRecord[] = [
-      user("uprev", "2026-06-22T23:00:00.000Z", "previous q", { promptSource: "typed" }),
-      asst("P", "2026-06-22T23:01:00.000Z", text("previous answer")), // the shared parent
+      user("uprev", "2026-06-22T23:00:00.000Z", "previous q", { promptSource: "typed", parentUuid: "root0" }),
+      asst("P", "2026-06-22T23:01:00.000Z", text("previous answer"), "end_turn", { parentUuid: "uprev" }), // shared parent of A/AB
       user("A", "2026-06-22T23:03:57.000Z", "Я вот смышто это к ничему.", { promptSource: "typed", parentUuid: "P" }),
       user("AB", "2026-06-22T23:04:15.000Z", "Я вот смышто это к ничему.Mluvím česky, ty vole.", {
         promptSource: "typed",
@@ -200,6 +200,17 @@ describe("selectActiveBranch — drop dead branches so the phone matches the des
       asst("a1", "2026-06-21T15:00:02.000Z", text("hello"), "end_turn", { parentUuid: "u1" })
     ];
     expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["u1", "a1"]); // orphan gone
+  });
+
+  it("drops an off-path SECOND ROOT (null parent) so the active branch has a unique root-level turn", () => {
+    // Two root-level (no parent) user records: an orphan and the survivor that took the path. The orphan
+    // must drop — else two root-level turns survive and the reply re-bind's sibling-uniqueness breaks.
+    const records: TranscriptRecord[] = [
+      user("Aroot", "2026-06-22T23:00:00.000Z", "yes", { promptSource: "typed" }), // root orphan, no parent
+      user("Sroot", "2026-06-22T23:00:05.000Z", "yes please go", { promptSource: "typed" }), // root survivor
+      asst("R", "2026-06-22T23:00:10.000Z", text("done"), "end_turn", { parentUuid: "Sroot" })
+    ];
+    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["Sroot", "R"]); // orphan root gone
   });
 
   it("keeps an off-path record whose parent is unknown and unshared (conservative: can't prove it dead)", () => {
