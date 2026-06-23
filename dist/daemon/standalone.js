@@ -19556,22 +19556,84 @@ function claudeText(r) {
   const stop = r.message?.stop_reason;
   return { text, interim: !(stop === "end_turn" || stop === "max_tokens") };
 }
+function selectActiveBranch(records) {
+  const byUuid = new Map;
+  for (const r of records)
+    if (r.uuid)
+      byUuid.set(r.uuid, r);
+  let leaf;
+  for (let i = records.length - 1;i >= 0; i--) {
+    if (records[i].uuid && !records[i].isSidechain) {
+      leaf = records[i];
+      break;
+    }
+  }
+  if (!leaf)
+    return records;
+  const onPath = new Set;
+  let cur = leaf.uuid;
+  while (cur && byUuid.has(cur) && !onPath.has(cur)) {
+    onPath.add(cur);
+    cur = byUuid.get(cur)?.parentUuid;
+  }
+  const hasTree = records.some((r) => r.parentUuid != null);
+  const ROOT_PARENT = "";
+  const parentKey = (r) => hasTree ? r.parentUuid || ROOT_PARENT : undefined;
+  const onPathParents = new Set;
+  for (const r of records) {
+    if (!r.uuid || !onPath.has(r.uuid))
+      continue;
+    const k = parentKey(r);
+    if (k !== undefined)
+      onPathParents.add(k);
+  }
+  const dropped = new Set;
+  for (const r of records) {
+    if (!r.uuid || r.isSidechain || onPath.has(r.uuid))
+      continue;
+    const parent = r.parentUuid;
+    const k = parentKey(r);
+    if (k !== undefined && onPathParents.has(k) || parent && onPath.has(parent) || parent && dropped.has(parent))
+      dropped.add(r.uuid);
+  }
+  return dropped.size === 0 ? records : records.filter((r) => !r.uuid || !dropped.has(r.uuid));
+}
 function projectTurns(records, maxTurns = 40) {
   const turns = [];
-  for (const r of records) {
+  for (const r of selectActiveBranch(records)) {
     if (!r.uuid)
       continue;
     const ts = toEpoch(r.timestamp);
+    const parentUuid = r.parentUuid ?? undefined;
     if (isRealUserTurn(r)) {
-      turns.push({ uuid: r.uuid, timestamp: ts, role: "user", text: extractText(r.message?.content), interim: false });
+      turns.push({
+        uuid: r.uuid,
+        parentUuid,
+        timestamp: ts,
+        role: "user",
+        text: extractText(r.message?.content),
+        interim: false
+      });
     } else {
       const c = claudeText(r);
       if (c)
-        turns.push({ uuid: r.uuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
+        turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
     }
   }
   turns.sort((a, b) => a.timestamp - b.timestamp);
   return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
+}
+function isPaneWorking(turns) {
+  for (let i = turns.length - 1;i >= 0; i--) {
+    if (turns[i].role !== "user")
+      continue;
+    for (let j = i + 1;j < turns.length; j++) {
+      if (turns[j].role === "claude" && !turns[j].interim)
+        return false;
+    }
+    return true;
+  }
+  return false;
 }
 function dropSessionAnnouncement(turns, sessionUrl) {
   if (!sessionUrl)
@@ -19648,15 +19710,19 @@ class TurnCoordinator {
   inFlight;
   injectedAt;
   queue = [];
-  openTurns = [];
+  paneBusy = false;
+  busySince;
   injectSeq = 0;
   now;
   constructor(deps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
   }
-  isWorking() {
-    return this.openTurns.length > 0 || this.inFlight !== undefined;
+  get hasInFlight() {
+    return this.inFlight !== undefined;
+  }
+  get isBusy() {
+    return this.paneBusy;
   }
   get currentVoicePrompt() {
     return this.inFlight;
@@ -19672,11 +19738,13 @@ class TurnCoordinator {
       this.inFlight = undefined;
       this.injectedAt = undefined;
     }
-    this.openTurns.push({ prompt, openedAt: this.now() });
+    this.paneBusy = true;
+    this.busySince = this.now();
     this.deps.onStatusChange();
   }
   turnClosed() {
-    this.openTurns.shift();
+    this.paneBusy = false;
+    this.busySince = undefined;
     this.pump();
     this.deps.onStatusChange();
   }
@@ -19699,7 +19767,7 @@ class TurnCoordinator {
     this.reapStaleTurns();
     if (this.inFlight !== undefined)
       return;
-    if (this.openTurns.length > 0)
+    if (this.paneBusy)
       return;
     const next = this.queue.shift();
     if (next === undefined)
@@ -19721,19 +19789,21 @@ class TurnCoordinator {
   clearTurns() {
     this.inFlight = undefined;
     this.injectedAt = undefined;
-    this.openTurns.length = 0;
+    this.paneBusy = false;
+    this.busySince = undefined;
     this.injectSeq++;
   }
   reapStaleTurns() {
     const cutoff = this.now() - TURN_TTL_MS;
-    while (this.openTurns.length > 0 && this.openTurns[0].openedAt < cutoff) {
-      this.openTurns.shift();
+    if (this.paneBusy && this.busySince !== undefined && this.busySince < cutoff) {
+      this.paneBusy = false;
+      this.busySince = undefined;
       this.log("reaped a stale open turn");
     }
     if (this.inFlight !== undefined && this.injectedAt !== undefined && this.injectedAt < cutoff) {
-      this.log("reaped a stuck injection (no turn-open arrived)");
       this.inFlight = undefined;
       this.injectedAt = undefined;
+      this.log("reaped a stuck injection (no turn-open arrived)");
     }
   }
   log(message) {
@@ -19778,6 +19848,7 @@ class VoiceDaemon {
   pairingOpen = null;
   pairingTimer;
   turns;
+  lastWorking = false;
   audio = new Map;
   lastTranscriptPath;
   lastEof;
@@ -20098,7 +20169,7 @@ class VoiceDaemon {
   queueVoice(text, mode) {
     if (mode === "interrupt")
       this.pending.length = 0;
-    this.pending.push({ id: randomUUID(), text, ts: Date.now() });
+    this.pending.push({ text });
     while (this.pending.length > MAX_PENDING_VOICE)
       this.pending.shift();
     if (mode === "interrupt")
@@ -20130,13 +20201,16 @@ class VoiceDaemon {
     return false;
   }
   projectAndEmit() {
-    this.sendToBrowser(this.historyFrom(this.projectedNow()));
+    const turns = this.projectedNow();
+    this.sendToBrowser(this.historyFrom(turns));
+    this.emitStatus(turns);
   }
-  projectedNow() {
+  projectedNow(captureFloor = true) {
     if (!this.lastTranscriptPath)
       return [];
     const { turns, eof } = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS, this.voiceReadFloor());
-    this.lastEof = eof;
+    if (captureFloor)
+      this.lastEof = eof;
     return dropSessionAnnouncement(turns.filter((t) => t.timestamp >= this.floor), this.init.browserUrl);
   }
   voiceReadFloor() {
@@ -20154,39 +20228,62 @@ class VoiceDaemon {
     const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
     if (entry) {
       entry.opened = true;
-      entry.openOffset = this.lastEof;
+      entry.openOffset = this.lastEof ?? 0;
     }
   }
   bindPending(turns) {
+    const present = new Set(turns.map((t) => t.uuid));
+    for (const entry of this.pending) {
+      if (entry.userUuid && !present.has(entry.userUuid))
+        entry.userUuid = undefined;
+    }
     const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
+    const claim = (entry, t) => {
+      entry.userUuid = t.uuid;
+      entry.userTs = t.timestamp;
+      entry.userParentUuid = t.parentUuid;
+      claimed.add(t.uuid);
+    };
     for (const entry of this.pending) {
       if (!entry.opened || entry.userUuid)
         continue;
       for (let i = turns.length - 1;i >= 0; i--) {
         const t = turns[i];
-        if (t.role === "user" && t.text.trim() === entry.text.trim() && !claimed.has(t.uuid)) {
-          entry.userUuid = t.uuid;
-          entry.userTs = t.timestamp;
-          claimed.add(t.uuid);
+        if (t.role === "user" && !claimed.has(t.uuid) && t.text.trim() === entry.text.trim()) {
+          claim(entry, t);
           break;
         }
+      }
+    }
+    for (const entry of this.pending) {
+      if (!entry.opened || entry.userUuid)
+        continue;
+      const et = entry.text.trim();
+      const rebinding = entry.userTs !== undefined;
+      for (let i = turns.length - 1;i >= 0; i--) {
+        const t = turns[i];
+        if (t.role !== "user" || claimed.has(t.uuid) || !t.text.trim().includes(et))
+          continue;
+        if (rebinding && (t.parentUuid ?? null) !== (entry.userParentUuid ?? null))
+          continue;
+        claim(entry, t);
+        break;
       }
     }
   }
   historyFrom(turns) {
     this.bindPending(turns);
-    const rows = [
-      ...turns.map((t) => ({
+    return {
+      type: "history",
+      turns: turns.map((t) => ({
         requestId: t.uuid,
         timestamp: t.timestamp,
         role: t.role,
         text: t.text,
         hasAudio: this.audio.has(t.uuid),
         interim: t.interim
-      })),
-      ...this.pending.filter((p) => p.userUuid === undefined).map((p) => ({ requestId: p.id, timestamp: p.ts, role: "user", text: p.text, hasAudio: false }))
-    ];
-    return { type: "history", turns: rows };
+      }))
+    };
   }
   speakNewSteps(turns) {
     if (this.speakMode !== "all")
@@ -20227,6 +20324,7 @@ class VoiceDaemon {
     await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
     const turns = this.projectedNow();
     this.sendToBrowser(this.historyFrom(turns));
+    this.emitStatus(turns);
     this.speakReadyVoiceReplies(turns);
   }
   repliesSettled() {
@@ -20314,7 +20412,7 @@ class VoiceDaemon {
     return {
       threadId: this.init.threadId,
       label: this.sealedLabel,
-      state: this.turns.isWorking() ? "working" : "idle",
+      state: this.lastWorking ? "working" : "idle",
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
@@ -20341,11 +20439,16 @@ class VoiceDaemon {
     if (this.ws?.readyState === wrapper_default.OPEN)
       this.registerThread();
   }
-  emitStatus() {
+  isWorking(turns) {
+    return this.turns.hasInFlight || this.turns.isBusy && isPaneWorking(turns);
+  }
+  emitStatus(turns) {
+    const working = this.isWorking(turns ?? this.projectedNow(false));
+    this.lastWorking = working;
     const state = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,
-      state: this.turns.isWorking() ? "working" : "idle"
+      state: working ? "working" : "idle"
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.turns.currentVoicePrompt } });
     if (this.ws?.readyState === wrapper_default.OPEN)
