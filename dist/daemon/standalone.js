@@ -19583,7 +19583,7 @@ function extractQuestion(r) {
   const raw = tu.input?.questions;
   if (typeof id !== "string" || !Array.isArray(raw))
     return;
-  const questions = raw.map(normalizeQuestion).filter((q) => q !== undefined);
+  const questions = normalizeQuestions(raw);
   return questions.length > 0 ? { toolUseId: id, questions } : undefined;
 }
 function normalizeQuestion(raw) {
@@ -19606,6 +19606,14 @@ function normalizeQuestion(raw) {
     ...typeof q.multiSelect === "boolean" ? { multiSelect: q.multiSelect } : {},
     options
   };
+}
+function normalizeQuestions(raw) {
+  if (!Array.isArray(raw))
+    return [];
+  return raw.map(normalizeQuestion).filter((q) => q !== undefined);
+}
+function questionContentSig(questions) {
+  return questions.map((q) => `${q.question}::${q.options.map((o) => o.label).join(",")}`).join("||");
 }
 function answeredToolUseIds(records) {
   const ids = new Set;
@@ -19927,7 +19935,7 @@ var MAX_PROJECTED_TURNS = 40;
 var MAX_AUDIO_ENTRIES = 20;
 var SEEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
 var SYNC_DEBOUNCE_MS = 150;
-var FLUSH_POLL_MS = 1000;
+var WATCH_REARM_MS = 250;
 var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
 function createDaemonInit(config2) {
@@ -19963,9 +19971,10 @@ class VoiceDaemon {
   transcriptWatcher;
   watchedPath;
   syncDebounce;
-  syncPoll;
+  rearmTimer;
   lastHistorySig = "";
   answeringQuestion = false;
+  pendingQuestionOverlay;
   speakMode = "final";
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
@@ -20047,15 +20056,17 @@ class VoiceDaemon {
                 this.inheritedPermissionMode = permissionMode;
               }
               this.setTranscript(transcriptPath);
+              this.pendingQuestionOverlay = undefined;
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
-              this.ensurePoll();
               this.emitPromptAccepted(realPrompt);
               this.syncFromTranscript();
             } else if (route === "/turn-progress") {
-              const { transcriptPath } = JSON.parse(body || "{}");
+              const { transcriptPath, question } = JSON.parse(body || "{}");
               this.setTranscript(transcriptPath);
               this.turns.noteProgress();
+              if (question)
+                this.setPendingQuestion(question.toolUseId ?? "", question.questions);
               this.syncFromTranscript();
             } else if (route === "/notify") {
               const { kind } = JSON.parse(body || "{}");
@@ -20114,6 +20125,7 @@ class VoiceDaemon {
     this.floor = Date.now();
     this.audio.clear();
     this.seen.clear();
+    this.pendingQuestionOverlay = undefined;
     this.turns.reset();
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
     this.syncFromTranscript();
@@ -20202,6 +20214,7 @@ class VoiceDaemon {
       case "stop_task":
         await cmuxInterrupt(this.init.surface);
         this.turns.interrupt();
+        this.pendingQuestionOverlay = undefined;
         this.syncFromTranscript();
         return;
       case "sync":
@@ -20308,6 +20321,7 @@ class VoiceDaemon {
         });
         return;
       }
+      this.pendingQuestionOverlay = undefined;
     }
     if (mode === "interrupt")
       await cmuxInterrupt(this.init.surface);
@@ -20351,17 +20365,46 @@ class VoiceDaemon {
     if (!path)
       return;
     this.lastTranscriptPath = path;
-    this.ensurePoll();
-    if (path === this.watchedPath)
+    if (path === this.watchedPath && this.transcriptWatcher)
       return;
-    this.transcriptWatcher?.close();
-    try {
-      this.transcriptWatcher = watch(path, () => this.scheduleSync());
-      this.watchedPath = path;
-    } catch {
-      this.transcriptWatcher = undefined;
-      this.watchedPath = undefined;
+    this.armWatch();
+  }
+  armWatch() {
+    if (this.stopped)
+      return;
+    const path = this.lastTranscriptPath;
+    if (!path)
+      return;
+    if (this.rearmTimer) {
+      clearTimeout(this.rearmTimer);
+      this.rearmTimer = undefined;
     }
+    this.transcriptWatcher?.close();
+    this.transcriptWatcher = undefined;
+    this.watchedPath = undefined;
+    try {
+      const watcher = watch(path, (eventType) => {
+        if (this.lastTranscriptPath !== path)
+          return;
+        this.scheduleSync();
+        if (eventType === "rename")
+          this.rearmSoon();
+      });
+      watcher.on("error", () => this.rearmSoon());
+      this.transcriptWatcher = watcher;
+      this.watchedPath = path;
+      this.scheduleSync();
+    } catch {
+      this.rearmSoon();
+    }
+  }
+  rearmSoon() {
+    if (this.stopped || this.rearmTimer)
+      return;
+    this.rearmTimer = setTimeout(() => {
+      this.rearmTimer = undefined;
+      this.armWatch();
+    }, WATCH_REARM_MS);
   }
   scheduleSync() {
     if (this.stopped || this.syncDebounce)
@@ -20370,18 +20413,6 @@ class VoiceDaemon {
       this.syncDebounce = undefined;
       this.reflect(this.projectedNow(), false);
     }, SYNC_DEBOUNCE_MS);
-  }
-  ensurePoll() {
-    if (this.syncPoll || this.stopped || !this.lastTranscriptPath)
-      return;
-    this.syncPoll = setInterval(() => {
-      if (this.stopped) {
-        clearInterval(this.syncPoll);
-        this.syncPoll = undefined;
-        return;
-      }
-      this.scheduleSync();
-    }, FLUSH_POLL_MS);
   }
   syncFromTranscript() {
     if (!this.lastTranscriptPath)
@@ -20409,11 +20440,28 @@ class VoiceDaemon {
       this.emitStatus(turns);
     this.synthesizeReplies(turns);
   }
+  setPendingQuestion(toolUseId, rawQuestions) {
+    const questions = normalizeQuestions(rawQuestions);
+    if (questions.length === 0)
+      return;
+    const sig = questionContentSig(questions);
+    this.pendingQuestionOverlay = {
+      uuid: `pending-question:${sig}`,
+      timestamp: Date.now(),
+      role: "claude",
+      text: questionSpeech(questions),
+      interim: false,
+      question: { toolUseId: toolUseId || `pending:${sig}`, questions, answered: false }
+    };
+  }
   projectedNow() {
-    if (!this.lastTranscriptPath)
-      return [];
-    const { turns } = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS);
-    return dropSessionAnnouncement(turns.filter((t) => t.timestamp >= this.floor), this.init.browserUrl);
+    const base = this.lastTranscriptPath ? dropSessionAnnouncement(projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).turns.filter((t) => t.timestamp >= this.floor), this.init.browserUrl) : [];
+    const overlay = this.pendingQuestionOverlay;
+    if (!overlay?.question)
+      return base;
+    const sig = questionContentSig(overlay.question.questions);
+    const inTranscript = base.some((t) => t.question && questionContentSig(t.question.questions) === sig);
+    return inTranscript ? base : [...base, overlay];
   }
   synthesizeReplies(turns) {
     if (!this.seeded) {
@@ -20429,6 +20477,8 @@ class VoiceDaemon {
         continue;
       this.remember(this.seen, t.uuid, SEEN_UUID_CAP);
       if (t.interim && this.speakMode !== "all")
+        continue;
+      if (t.question?.answered)
         continue;
       fresh.push(t);
     }
@@ -20570,8 +20620,8 @@ class VoiceDaemon {
       clearTimeout(this.pairingTimer);
     if (this.syncDebounce)
       clearTimeout(this.syncDebounce);
-    if (this.syncPoll)
-      clearInterval(this.syncPoll);
+    if (this.rearmTimer)
+      clearTimeout(this.rearmTimer);
     this.transcriptWatcher?.close();
     this.stopHeartbeat?.();
     this.send({ channel: "control", event: { type: "terminate" } });
