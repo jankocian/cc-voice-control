@@ -259,7 +259,7 @@ export function StyleGuide() {
               side="user"
               body="Please add a retry mechanism for failed webhook deliveries."
               time="12:32 AM"
-              delivered
+              delivery="logged"
             />
             <MessageBubble
               side="agent"

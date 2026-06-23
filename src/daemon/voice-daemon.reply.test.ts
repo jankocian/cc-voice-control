@@ -336,4 +336,27 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
 
     daemon.stop();
   }, 20000);
+
+  it("emits prompt_status queued→accepted so the phone shows the message before the reply lands", async () => {
+    // Regression: a sent message must appear on the phone the instant Claude takes it, not only with the
+    // answer. queueVoice echoes "queued" (we just transcribed it); UserPromptSubmit echoes "accepted".
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon } = await driveUpToClose(transcript);
+
+    const statuses: { text?: string; state?: string }[] = [];
+    for (const env of daemonOut as { channel?: string; threadId?: string; enc?: EncBlob }[]) {
+      if (env.channel !== "browser" || !env.enc) continue;
+      const event = await openJson<{ type?: string; text?: string; state?: string }>(
+        key,
+        env.enc,
+        aad("browser", env.threadId ?? "SURF")
+      );
+      if (event.type === "prompt_status") statuses.push({ text: event.text, state: event.state });
+    }
+    expect(statuses).toContainEqual({ text: CANNED, state: "queued" }); // shown right after transcription
+    expect(statuses).toContainEqual({ text: CANNED, state: "accepted" }); // shown on UserPromptSubmit
+
+    daemon.stop();
+  }, 20000);
 });

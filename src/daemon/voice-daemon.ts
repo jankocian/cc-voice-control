@@ -47,8 +47,9 @@ import { TurnCoordinator } from "./turn-coordinator.js";
 type Audio = { audioBase64: string; mimeType: string };
 
 // A spoken prompt we injected, tracked ONLY until its reply is spoken — reply bookkeeping, never display.
-// The phone view is a pure projection of the transcript now (a just-spoken message shows via the phone's
-// own local stt_echo until the projection includes it), so this carries nothing for rendering. `opened` is
+// The phone view is a pure projection of the transcript (a just-spoken message shows via the phone's
+// optimistic prompt_status row until the projection includes it), so this carries nothing for rendering.
+// `opened` is
 // set on its UserPromptSubmit (confirming the turn is ours); `userUuid`/`userTs` bind it to its native user
 // record (identity for the reply match + the anchor for which steps belong to this turn); `openOffset` is
 // the transcript byte position just before the prompt, captured at turn-open so the whole turn — however
@@ -97,6 +98,10 @@ const MAX_PENDING_VOICE = 16;
 // the wild; a long answer streams longer). These caps are only the safety backstop for the abnormal case
 // where the answer never comes (e.g. an interrupted turn) — the watch resolves the normal case at once.
 const REPLY_FLUSH_CAP_MS = 120_000;
+// Same backstop for waiting on the USER record to flush after a turn opens (UserPromptSubmit can fire
+// before Claude Code writes it). Resolves the instant the record lands; this only bounds the abnormal case
+// where it never does (e.g. an interrupted/aborted submit).
+const USER_TURN_FLUSH_CAP_MS = REPLY_FLUSH_CAP_MS;
 // fs.watch can coalesce/miss events on some filesystems, so a slow poll backs it up. Promptness comes from
 // the watch; this only bounds how long a missed event can stall us.
 const FLUSH_POLL_MS = 1_000;
@@ -354,7 +359,12 @@ export class VoiceDaemon {
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
               this.bindVoicePrompt(realPrompt); // mark the turn ours + record its read floor (openOffset)
-              this.projectAndEmit(); // the new user turn is in the transcript now → show it, keyed natively
+              // Claude Code RECEIVED the prompt (this is its UserPromptSubmit) → tell the phone NOW so the
+              // message shows instantly with a single check, rather than only when the reply lands. Works for
+              // a typed turn too (the daemon otherwise never knew its text). The authoritative native row
+              // (uuid + the "logged" two-check) follows from the transcript via handleTurnOpen.
+              this.emitPromptAccepted(realPrompt);
+              void this.handleTurnOpen(realPrompt);
             } else if (route === "/turn-progress") {
               // PreToolUse: Claude wrote a step (narration) before this tool call → re-project so it shows
               // live, and (if opted in) speak it on a voice turn.
@@ -664,14 +674,17 @@ export class VoiceDaemon {
   }
 
   // Queue a spoken prompt: track it (so we know to speak its reply when it lands), then hand it to the
-  // injection queue. Tracking is reply bookkeeping only — the phone shows the words instantly via its own
-  // stt_echo (sent from handleAudio), and the conversation itself is projected from the transcript.
+  // injection queue. Tracking is reply bookkeeping only — the conversation itself is projected from the
+  // transcript. We've just transcribed the words, so echo them to the phone as a "queued" row (clock): the
+  // spoken message shows before it's even injected, and upgrades to one check on UserPromptSubmit
+  // (emitPromptAccepted) then the native two-check once it's in the transcript.
   private queueVoice(text: string, mode: InjectMode): void {
     if (mode === "interrupt") this.pending.length = 0; // Esc dropped the backlog → its reply tracking goes too
     this.pending.push({ text });
     while (this.pending.length > MAX_PENDING_VOICE) this.pending.shift();
     if (mode === "interrupt") this.turns.interruptWith(text);
     else this.turns.enqueueVoice(text);
+    this.sendToBrowser({ type: "prompt_status", text, state: "queued" });
     this.projectAndEmit();
   }
 
@@ -827,9 +840,9 @@ export class VoiceDaemon {
   }
 
   // Build the `history` snapshot — a PURE PROJECTION of the transcript's active branch, nothing else. The
-  // phone reconciles its instant stt_echo against this (dropping the echo once the real row appears), so the
-  // daemon never emits a daemon-side row that could orphan. We still bind pending voice prompts here, but
-  // only for reply resolution (see bindPending) — they are never rendered.
+  // phone reconciles its optimistic prompt_status rows against this (dropping an echo once its real native
+  // row appears), so the daemon never emits a daemon-side row that could orphan. We still bind pending voice
+  // prompts here, but only for reply resolution (see bindPending) — they are never rendered.
   private historyFrom(turns: ProjectedTurn[]): Extract<DaemonToBrowserEvent, { type: "history" }> {
     this.bindPending(turns);
     return {
@@ -887,6 +900,35 @@ export class VoiceDaemon {
         ? { type: "tts_audio", requestId: uuid, replay: true, ...audio }
         : { type: "error", requestId: uuid, message: "Audio for that reply is no longer available." }
     );
+  }
+
+  // Tell the phone the agent RECEIVED this prompt (one check). Sent the instant UserPromptSubmit fires, so
+  // a typed or spoken message shows immediately instead of waiting for the reply. Skips a slash command /
+  // empty prompt — those are never shown as conversation (parity with isRealUserTurn).
+  private emitPromptAccepted(prompt: string): void {
+    const text = prompt.trim();
+    if (!text || text.startsWith("/")) return;
+    this.sendToBrowser({ type: "prompt_status", text, state: "accepted" });
+  }
+
+  // On a turn opening: show the native row as soon as it's in the transcript. UserPromptSubmit can fire
+  // BEFORE Claude Code writes the user record to the JSONL, so the immediate projection often lacks it —
+  // and nothing re-read the file until the next hook (a tool call or the reply), which is the "my message
+  // only appears with your answer" bug. So we project once (fast path, if already flushed) then WATCH the
+  // file and re-emit the moment the record lands, reacting to the actual write (fs.watch) — never a fixed
+  // timeout. The optimistic accepted row already shows the words; this swaps in the authoritative native
+  // row (its uuid carries audio + flips the phone to the "logged" two-check). Skips a slash/empty prompt
+  // (never projected, so its record would never satisfy the predicate).
+  private async handleTurnOpen(prompt: string): Promise<void> {
+    this.projectAndEmit();
+    const target = prompt.trim();
+    if (!target || target.startsWith("/")) return;
+    // The native turn CONTAINS the prompt (exact for a typed/voice turn; "A.B" contains a glued "A").
+    await this.waitForTranscript(
+      () => this.projectedNow(false).some((t) => t.role === "user" && t.text.includes(target)),
+      USER_TURN_FLUSH_CAP_MS
+    );
+    this.projectAndEmit();
   }
 
   // After a turn closes: wait until every voice turn we're tracking has its FINAL reply flushed, then

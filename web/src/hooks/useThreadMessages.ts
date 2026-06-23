@@ -1,6 +1,12 @@
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PagerThread } from "../components/ThreadPager";
-import { type Message, messageFromHistory } from "../lib/messages";
+import {
+  buildThread,
+  type Message,
+  messageFromHistory,
+  unreconciledOptimistic,
+  upsertOptimistic
+} from "../lib/messages";
 import type { RosterThread, ThreadId } from "../lib/protocol";
 import {
   buildThreadAndPrune,
@@ -97,7 +103,11 @@ export function useThreadMessages({
               showFlash("Sent to Claude Code ✓");
             }
           }
-          updateThreadMessages(setMessagesByThread, threadId, (prev) => buildThreadAndPrune(restored, prev, dropAudio));
+          // Keep any optimistic prompt rows whose native row hasn't landed yet (still in flight), so the
+          // just-sent message doesn't blink out between the optimistic echo and its transcript row arriving.
+          updateThreadMessages(setMessagesByThread, threadId, (prev) =>
+            buildThreadAndPrune([...restored, ...unreconciledOptimistic(prev, restored)], prev, dropAudio)
+          );
           // Unread: baseline a thread the first time we see it (a reconnect/restore is not new activity),
           // then add only what's genuinely new since the last we counted. We track the newest timestamp of
           // ANY row (so the "since" boundary advances past your own just-sent turn + interim steps), but
@@ -112,6 +122,25 @@ export function useThreadMessages({
               0
             );
             noteActivity(threadId, freshReplies);
+          }
+          return;
+        }
+        case "prompt_status": {
+          // The daemon transcribed ("queued") or the agent received ("accepted") one of the user's prompts.
+          // Show it as an optimistic "you" row right away (clock → one check) — reconciled to the native
+          // "logged" row when `history` next includes it. This is the real-event feedback that replaces the
+          // old blind stt_echo, so a typed or spoken message is visible the instant Claude takes it.
+          updateThreadMessages(setMessagesByThread, threadId, (prev) =>
+            buildThread(upsertOptimistic(prev, event.text, event.state, Date.now()))
+          );
+          // "accepted" = Claude received it. For a PHONE voice turn (we were transcribing) end the spinner,
+          // clear any pending "Resend", and confirm; a terminal-typed message just shows its bubble. We keep
+          // the spinner through "queued" so a failed injection still raises "Resend" via the error path —
+          // which keys on the transcribing flag being set.
+          if (event.state === "accepted" && transcribingRef.current === threadId) {
+            setTranscribingThreadId(null);
+            onSendOutcomeRef.current(true);
+            if (threadId === activeThreadIdRef.current) showFlash("Sent to Claude Code ✓");
           }
           return;
         }

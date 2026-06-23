@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildThread, messageFromHistory, newestPlayableReply } from "./messages";
+import {
+  buildThread,
+  isOptimistic,
+  messageFromHistory,
+  newestPlayableReply,
+  unreconciledOptimistic,
+  upsertOptimistic
+} from "./messages";
 import type { HistoryTurn } from "./protocol";
 
 // A projected history turn: native uuid (requestId) + native timestamp.
@@ -57,6 +64,11 @@ describe("messageFromHistory", () => {
     expect(user.hasAudio).toBe(false);
   });
 
+  it("marks a user turn 'logged' (it's in Claude's transcript) and leaves claude rows undelivered", () => {
+    expect(messageFromHistory(turn("u", 1000, "user", "hi")).delivery).toBe("logged");
+    expect(messageFromHistory(turn("a", 1001, "claude", "hello")).delivery).toBeUndefined();
+  });
+
   it("carries the interim flag for steps (and defaults it false)", () => {
     const step = messageFromHistory({
       requestId: "s",
@@ -69,6 +81,44 @@ describe("messageFromHistory", () => {
     const reply = messageFromHistory(turn("a", 1003, "claude", "done"));
     expect(step.interim).toBe(true);
     expect(reply.interim).toBe(false);
+  });
+});
+
+describe("optimistic prompt rows (instant delivery feedback)", () => {
+  it("adds a queued 'you' row, then advances the SAME row to accepted (no duplicate bubble)", () => {
+    const queued = upsertOptimistic([], "fix the bug", "queued", 1000);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].kind).toBe("you");
+    expect(queued[0].delivery).toBe("queued");
+    expect(isOptimistic(queued[0])).toBe(true);
+
+    const accepted = upsertOptimistic(queued, "fix the bug", "accepted", 2000);
+    expect(accepted).toHaveLength(1); // same row, not a second one
+    expect(accepted[0].id).toBe(queued[0].id);
+    expect(accepted[0].delivery).toBe("accepted");
+  });
+
+  it("never downgrades delivery (a late 'queued' can't undo 'accepted')", () => {
+    const accepted = upsertOptimistic([], "hello", "accepted", 1000);
+    const after = upsertOptimistic(accepted, "hello", "queued", 2000);
+    expect(after[0].delivery).toBe("accepted");
+  });
+
+  it("reconciles away an optimistic row once its native transcript row lands (matched by text)", () => {
+    const optimistic = upsertOptimistic([], "deploy now", "accepted", 1000);
+    const native = [messageFromHistory(turn("u", 1500, "user", "deploy now"))];
+    expect(unreconciledOptimistic(optimistic, native)).toHaveLength(0);
+  });
+
+  it("reconciles a glued native turn that CONTAINS the optimistic text, keeps an unrelated one", () => {
+    const optimistic = [
+      ...upsertOptimistic([], "first", "accepted", 1000),
+      ...upsertOptimistic([], "still pending", "queued", 1001)
+    ];
+    // The composer merged "first" into a single native turn; "still pending" has no native row yet.
+    const native = [messageFromHistory(turn("g", 1500, "user", "first. second."))];
+    const kept = unreconciledOptimistic(optimistic, native);
+    expect(kept.map((m) => m.body)).toEqual(["still pending"]);
   });
 });
 
