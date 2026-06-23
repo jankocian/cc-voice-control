@@ -98,6 +98,11 @@ export type DaemonToBrowserEvent =
   // thread_register → the thread_joined delta), so the phone follows the EXACT new thread — never a
   // ghost or an unrelated reconnect.
   | { type: "spawn_pending"; spawnId: string }
+  // End-to-end receipt for a `submit_audio` (echoes its `requestId`), sent the instant the daemon gets it
+  // — BEFORE the slow transcription. The relay (DO) doesn't buffer or retry, so a brief network blip can
+  // silently drop the audio between phone and daemon; the phone retransmits the same requestId until this
+  // ack lands, and the daemon dedups by requestId so a retransmit can never duplicate the prompt.
+  | { type: "submit_ack"; requestId: string }
   | { type: "error"; requestId?: string; message: string };
 
 // Daemon → bridge control messages. The worker acts on these instead of relaying them.

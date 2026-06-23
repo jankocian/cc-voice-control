@@ -34,6 +34,8 @@ type Deps = {
   // The outcome of the active thread's in-flight mic turn: confirmed (the spoken turn landed) or failed (a
   // daemon `error` while transcribing) → App drives the "Resend" toast.
   onSendOutcome: (ok: boolean) => void;
+  // The daemon acked receipt of a submit_audio (by requestId) → the retransmit watchdog can stop.
+  onSendAcked: (requestId: string) => void;
 };
 
 // Owns the per-thread conversation state — messages + the latest session_status runtime, plus the
@@ -47,7 +49,8 @@ export function useThreadMessages({
   activeThreadIdRef,
   armSpawnFollow,
   onBackgroundReply,
-  onSendOutcome
+  onSendOutcome,
+  onSendAcked
 }: Deps) {
   // Destructure the STABLE pieces of `threads` (the wrapper object is recreated each render, but its
   // list + callbacks are stable), so the callbacks/effects below don't churn every render.
@@ -72,6 +75,8 @@ export function useThreadMessages({
   onBackgroundReplyRef.current = onBackgroundReply;
   const onSendOutcomeRef = useRef(onSendOutcome);
   onSendOutcomeRef.current = onSendOutcome;
+  const onSendAckedRef = useRef(onSendAcked);
+  onSendAckedRef.current = onSendAcked;
 
   const handleContentEvent = useCallback(
     (threadId: ThreadId, event: BridgeContentEvent) => {
@@ -147,6 +152,11 @@ export function useThreadMessages({
           }
           return;
         }
+        case "submit_ack":
+          // The daemon has the audio — stop the retransmit watchdog (matched by requestId). The turn still
+          // lands via prompt_status/history; this only ends the "did it even arrive?" retry loop.
+          onSendAckedRef.current(event.requestId);
+          return;
         case "tts_audio": {
           // Only auto-play a fresh reply for the thread the user is looking at; a reply on a background
           // thread waits for a tap. A replay is already gated to tap-to-play inside attachAudio.

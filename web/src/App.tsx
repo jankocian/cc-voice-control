@@ -138,13 +138,14 @@ export function App({ session }: { session: Session }) {
   const onBackgroundReply = useCallback((threadId: ThreadId) => {
     if (autoFollowRef.current) setPendingFollow(threadId);
   }, []);
-  // The active thread's in-flight mic turn settled — drive the "Resend" toast (handlers come from
-  // useVoiceControls, wired via a ref since it's created below).
-  const resendToastRef = useRef<{ raise: () => void; clear: () => void }>({ raise: () => {}, clear: () => {} });
-  const onSendOutcome = useCallback((ok: boolean) => {
-    if (ok) resendToastRef.current.clear();
-    else resendToastRef.current.raise();
-  }, []);
+  // The in-flight mic send's controller lives in useVoiceControls (created below); App routes the reducer's
+  // ack + settled signals into it via this ref, since the reducer is created before the controller it feeds.
+  const sendCtlRef = useRef<{ acked: (id: string) => void; settled: (ok: boolean) => void }>({
+    acked: () => {},
+    settled: () => {}
+  });
+  const onSendOutcome = useCallback((ok: boolean) => sendCtlRef.current.settled(ok), []);
+  const onSendAcked = useCallback((id: string) => sendCtlRef.current.acked(id), []);
 
   // Per-thread conversation state + the bridge content reducer.
   const { handleContentEvent, active, activeRuntime, pagerThreads, transcribing, setTranscribingThreadId } =
@@ -156,7 +157,8 @@ export function App({ session }: { session: Session }) {
       activeThreadIdRef,
       armSpawnFollow,
       onBackgroundReply,
-      onSendOutcome
+      onSendOutcome,
+      onSendAcked
     });
 
   // Apply every roster event, and follow a spawn into its EXACT new thread the moment it joins (matched
@@ -192,20 +194,9 @@ export function App({ session }: { session: Session }) {
   const activeConnected = active?.connected === true;
   const now = useNow(connected && !activeConnected);
 
-  // A dropped socket loses any in-flight send — re-enable the mic.
-  useEffect(() => {
-    if (!connected) setTranscribingThreadId(null);
-  }, [connected, setTranscribingThreadId]);
-
-  // If the active thread's daemon goes offline while we're waiting on its turn, the clip can't land — the
-  // bridge silently drops a command addressed to a gone daemon. Clear the "transcribing" spinner and say so
-  // (a toast, since the daemon can't send a sealed error to tell us — see the E2E channel).
-  useEffect(() => {
-    if (transcribing && active?.connected === false) {
-      setTranscribingThreadId(null);
-      toast.add({ title: "That session went offline — try again", type: "error" });
-    }
-  }, [transcribing, active?.connected, setTranscribingThreadId]);
+  // In-flight voice sends are no longer cleared on a drop here — the useVoiceControls retransmit watchdog
+  // owns that lifecycle: it re-sends the same requestId until the daemon acks (a brief blip recovers on its
+  // own), or gives up into a "Resend" toast. The reconnect nudge below re-sends the instant the daemon's back.
 
   // Autoplay mode (off / final / all), persisted per phone. Tell the active thread's daemon the current
   // mode — re-sent when it (re)connects or the active thread changes, since the daemon defaults to "final"
@@ -373,8 +364,19 @@ export function App({ session }: { session: Session }) {
     stopPlayback,
     showFlash
   });
-  // Let the thread-messages reducer drive the "Resend" toast (a failed/confirmed in-flight mic turn).
-  resendToastRef.current = { raise: voice.raiseResendToast, clear: voice.clearResendToast };
+  // Let the thread-messages reducer drive the in-flight send lifecycle (ack + settled) on the controller.
+  sendCtlRef.current = { acked: voice.onSendAcked, settled: voice.onSendSettled };
+
+  // Reconnect reconciliation: the instant the active thread's daemon comes back online, re-send any
+  // un-acked in-flight voice clip — a brief laptop network blip drops the in-flight submit_audio at the
+  // relay (the daemon never sees it), so re-sending on reconnect is what makes it land. Deduped by requestId.
+  const retryInflightRef = useRef<() => void>(() => {});
+  retryInflightRef.current = voice.retryInflightNow;
+  const prevActiveConnectedRef = useRef(activeConnected);
+  useEffect(() => {
+    if (activeConnected && !prevActiveConnectedRef.current) retryInflightRef.current();
+    prevActiveConnectedRef.current = activeConnected;
+  }, [activeConnected]);
   // Bridge the recorder + transcribing state into the (earlier-defined) auto-respond callback.
   transcribingRef.current = transcribing;
   startRecordingRef.current = voice.onMic;
