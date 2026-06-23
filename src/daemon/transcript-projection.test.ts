@@ -4,6 +4,7 @@ import {
   isPaneWorking,
   type ProjectedTurn,
   projectTurns,
+  questionSpeech,
   selectActiveBranch,
   type TranscriptRecord
 } from "./transcript-projection.js";
@@ -303,5 +304,88 @@ describe("dropSessionAnnouncement — hide the start-skill QR/URL reply", () => 
   it("is a no-op without a session URL", () => {
     const turns = [turn("a1", "claude", "anything")];
     expect(dropSessionAnnouncement(turns, "")).toEqual(turns);
+  });
+});
+
+describe("projectTurns — interactive AskUserQuestion", () => {
+  const askRec = (uuid: string, ts: string, toolUseId: string, questions: unknown): TranscriptRecord =>
+    asst(uuid, ts, [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }], "tool_use");
+  const answerRec = (uuid: string, ts: string, toolUseId: string): TranscriptRecord =>
+    user(uuid, ts, [{ type: "tool_result", tool_use_id: toolUseId, content: "answered" }], { promptSource: "typed" });
+  const Q = [
+    {
+      question: "Which audio strategy?",
+      header: "Audio",
+      multiSelect: false,
+      options: [{ label: "Mixing", description: "over music" }, { label: "Pause" }]
+    }
+  ];
+
+  it("projects an AskUserQuestion tool call into an unanswered question turn (card, not a bubble)", () => {
+    const turns = projectTurns([askRec("q1", "2026-06-21T15:00:00.000Z", "tu_1", Q)]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].role).toBe("claude");
+    expect(turns[0].interim).toBe(false);
+    expect(turns[0].question).toEqual({
+      toolUseId: "tu_1",
+      answered: false,
+      questions: [
+        {
+          question: "Which audio strategy?",
+          header: "Audio",
+          multiSelect: false,
+          options: [{ label: "Mixing", description: "over music" }, { label: "Pause" }]
+        }
+      ]
+    });
+    expect(turns[0].text).toContain("Which audio strategy?"); // spoken rendering present for TTS
+  });
+
+  it("marks the question answered once its tool_result lands", () => {
+    const turns = projectTurns([
+      askRec("q1", "2026-06-21T15:00:00.000Z", "tu_1", Q),
+      answerRec("r1", "2026-06-21T15:00:30.000Z", "tu_1")
+    ]);
+    expect(turns).toHaveLength(1); // the tool_result itself is not a conversational turn
+    expect(turns[0].question?.answered).toBe(true);
+  });
+
+  it("a question does NOT end the working state — the pane stays working until the real conclusion lands", () => {
+    const paused = projectTurns([
+      user("u1", "2026-06-21T15:00:00.000Z", "which one?", { promptSource: "typed" }),
+      askRec("q1", "2026-06-21T15:00:05.000Z", "tu_1", Q)
+    ]);
+    expect(isPaneWorking(paused)).toBe(true); // a question is not the answer → still working (poll keeps going)
+
+    const concluded = projectTurns([
+      user("u1", "2026-06-21T15:00:00.000Z", "which one?", { promptSource: "typed" }),
+      askRec("q1", "2026-06-21T15:00:05.000Z", "tu_1", Q),
+      answerRec("r1", "2026-06-21T15:00:30.000Z", "tu_1"),
+      asst("a1", "2026-06-21T15:01:00.000Z", text("Done — went with mixing."))
+    ]);
+    expect(isPaneWorking(concluded)).toBe(false); // the conclusion is the final reply → idle
+  });
+
+  it("contains a malformed question record instead of breaking the projection", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-21T15:00:00.000Z", "hi", { promptSource: "typed" }),
+      // tool_use present but input.questions missing → not a valid question; record carries no text either.
+      asst(
+        "bad",
+        "2026-06-21T15:00:05.000Z",
+        [{ type: "tool_use", id: "x", name: "AskUserQuestion", input: {} }],
+        "tool_use"
+      ),
+      asst("a1", "2026-06-21T15:00:10.000Z", text("Still here."))
+    ]);
+    expect(turns.map((t) => t.uuid)).toEqual(["u1", "a1"]); // broken record skipped, conversation intact
+    expect(turns.some((t) => t.question)).toBe(false);
+  });
+
+  it("questionSpeech letters the options and omits Claude Code's appended rows", () => {
+    const spoken = questionSpeech(Q);
+    expect(spoken).toContain("A: Mixing");
+    expect(spoken).toContain("B: Pause");
+    expect(spoken).not.toContain("Type something");
   });
 });

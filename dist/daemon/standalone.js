@@ -46,7 +46,7 @@ var __export = (target, all) => {
 };
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
-// node_modules/ws/lib/constants.js
+// ../cc-voice-control/node_modules/ws/lib/constants.js
 var require_constants = __commonJS((exports, module) => {
   var BINARY_TYPES = ["nodebuffer", "arraybuffer", "fragments"];
   var hasBlob = typeof Blob !== "undefined";
@@ -66,7 +66,7 @@ var require_constants = __commonJS((exports, module) => {
   };
 });
 
-// node_modules/ws/lib/buffer-util.js
+// ../cc-voice-control/node_modules/ws/lib/buffer-util.js
 var require_buffer_util = __commonJS((exports, module) => {
   var { EMPTY_BUFFER } = require_constants();
   var FastBuffer = Buffer[Symbol.species];
@@ -144,7 +144,7 @@ var require_buffer_util = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/ws/lib/limiter.js
+// ../cc-voice-control/node_modules/ws/lib/limiter.js
 var require_limiter = __commonJS((exports, module) => {
   var kDone = Symbol("kDone");
   var kRun = Symbol("kRun");
@@ -176,7 +176,7 @@ var require_limiter = __commonJS((exports, module) => {
   module.exports = Limiter;
 });
 
-// node_modules/ws/lib/permessage-deflate.js
+// ../cc-voice-control/node_modules/ws/lib/permessage-deflate.js
 var require_permessage_deflate = __commonJS((exports, module) => {
   var zlib = __require("zlib");
   var bufferUtil = require_buffer_util();
@@ -440,7 +440,7 @@ var require_permessage_deflate = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/ws/lib/validation.js
+// ../cc-voice-control/node_modules/ws/lib/validation.js
 var require_validation = __commonJS((exports, module) => {
   var { isUtf8 } = __require("buffer");
   var { hasBlob } = require_constants();
@@ -627,7 +627,7 @@ var require_validation = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/ws/lib/receiver.js
+// ../cc-voice-control/node_modules/ws/lib/receiver.js
 var require_receiver = __commonJS((exports, module) => {
   var { Writable } = __require("stream");
   var PerMessageDeflate = require_permessage_deflate();
@@ -1024,7 +1024,7 @@ var require_receiver = __commonJS((exports, module) => {
   module.exports = Receiver;
 });
 
-// node_modules/ws/lib/sender.js
+// ../cc-voice-control/node_modules/ws/lib/sender.js
 var require_sender = __commonJS((exports, module) => {
   var { Duplex } = __require("stream");
   var { randomFillSync } = __require("crypto");
@@ -1383,7 +1383,7 @@ var require_sender = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/ws/lib/event-target.js
+// ../cc-voice-control/node_modules/ws/lib/event-target.js
 var require_event_target = __commonJS((exports, module) => {
   var { kForOnEventAttribute, kListener } = require_constants();
   var kCode = Symbol("kCode");
@@ -1534,7 +1534,7 @@ var require_event_target = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/ws/lib/extension.js
+// ../cc-voice-control/node_modules/ws/lib/extension.js
 var require_extension = __commonJS((exports, module) => {
   var { tokenChars } = require_validation();
   function push(dest, name, elem) {
@@ -1699,7 +1699,7 @@ var require_extension = __commonJS((exports, module) => {
   module.exports = { format, parse: parse5 };
 });
 
-// node_modules/ws/lib/websocket.js
+// ../cc-voice-control/node_modules/ws/lib/websocket.js
 var require_websocket = __commonJS((exports, module) => {
   var EventEmitter = __require("events");
   var https = __require("https");
@@ -2471,7 +2471,7 @@ var require_websocket = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/ws/lib/stream.js
+// ../cc-voice-control/node_modules/ws/lib/stream.js
 var require_stream = __commonJS((exports, module) => {
   var WebSocket = require_websocket();
   var { Duplex } = __require("stream");
@@ -2574,7 +2574,7 @@ var require_stream = __commonJS((exports, module) => {
   module.exports = createWebSocketStream;
 });
 
-// node_modules/ws/lib/subprotocol.js
+// ../cc-voice-control/node_modules/ws/lib/subprotocol.js
 var require_subprotocol = __commonJS((exports, module) => {
   var { tokenChars } = require_validation();
   function parse5(header) {
@@ -2619,7 +2619,7 @@ var require_subprotocol = __commonJS((exports, module) => {
   module.exports = { parse: parse5 };
 });
 
-// node_modules/ws/lib/websocket-server.js
+// ../cc-voice-control/node_modules/ws/lib/websocket-server.js
 var require_websocket_server = __commonJS((exports, module) => {
   var EventEmitter = __require("events");
   var http = __require("http");
@@ -2929,7 +2929,7 @@ var require_websocket_server = __commonJS((exports, module) => {
   }
 });
 
-// node_modules/qrcode-generator/qrcode.js
+// ../cc-voice-control/node_modules/qrcode-generator/qrcode.js
 var require_qrcode = __commonJS((exports, module) => {
   var qrcode = function() {
     var qrcode2 = function(typeNumber, errorCorrectionLevel) {
@@ -4577,7 +4577,7 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// node_modules/zod/v4/classic/external.js
+// ../cc-voice-control/node_modules/zod/v4/classic/external.js
 var exports_external = {};
 __export(exports_external, {
   xor: () => xor,
@@ -4820,7 +4820,7 @@ __export(exports_external, {
   $brand: () => $brand
 });
 
-// node_modules/zod/v4/core/index.js
+// ../cc-voice-control/node_modules/zod/v4/core/index.js
 var exports_core2 = {};
 __export(exports_core2, {
   version: () => version,
@@ -5099,7 +5099,7 @@ __export(exports_core2, {
   $ZodAny: () => $ZodAny
 });
 
-// node_modules/zod/v4/core/core.js
+// ../cc-voice-control/node_modules/zod/v4/core/core.js
 var _a;
 var NEVER = /* @__PURE__ */ Object.freeze({
   status: "aborted"
@@ -5177,7 +5177,7 @@ function config(newConfig) {
     Object.assign(globalConfig, newConfig);
   return globalConfig;
 }
-// node_modules/zod/v4/core/util.js
+// ../cc-voice-control/node_modules/zod/v4/core/util.js
 var exports_util = {};
 __export(exports_util, {
   unwrapMessage: () => unwrapMessage,
@@ -5869,7 +5869,7 @@ class Class {
   constructor(..._args) {}
 }
 
-// node_modules/zod/v4/core/errors.js
+// ../cc-voice-control/node_modules/zod/v4/core/errors.js
 var initializer = (inst, def) => {
   inst.name = "$ZodError";
   Object.defineProperty(inst, "_zod", {
@@ -6009,7 +6009,7 @@ function prettifyError(error) {
 `);
 }
 
-// node_modules/zod/v4/core/parse.js
+// ../cc-voice-control/node_modules/zod/v4/core/parse.js
 var _parse = (_Err) => (schema, value, _ctx, _params) => {
   const ctx = _ctx ? { ..._ctx, async: false } : { async: false };
   const result = schema._zod.run({ value, issues: [] }, ctx);
@@ -6096,7 +6096,7 @@ var _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
   return _safeParseAsync(_Err)(schema, value, _ctx);
 };
 var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
-// node_modules/zod/v4/core/regexes.js
+// ../cc-voice-control/node_modules/zod/v4/core/regexes.js
 var exports_regexes = {};
 __export(exports_regexes, {
   xid: () => xid,
@@ -6255,7 +6255,7 @@ var sha512_hex = /^[0-9a-fA-F]{128}$/;
 var sha512_base64 = /* @__PURE__ */ fixedBase64(86, "==");
 var sha512_base64url = /* @__PURE__ */ fixedBase64url(86);
 
-// node_modules/zod/v4/core/checks.js
+// ../cc-voice-control/node_modules/zod/v4/core/checks.js
 var $ZodCheck = /* @__PURE__ */ $constructor("$ZodCheck", (inst, def) => {
   var _a2;
   inst._zod ?? (inst._zod = {});
@@ -6802,7 +6802,7 @@ var $ZodCheckOverwrite = /* @__PURE__ */ $constructor("$ZodCheckOverwrite", (ins
   };
 });
 
-// node_modules/zod/v4/core/doc.js
+// ../cc-voice-control/node_modules/zod/v4/core/doc.js
 class Doc {
   constructor(args = []) {
     this.content = [];
@@ -6840,14 +6840,14 @@ class Doc {
   }
 }
 
-// node_modules/zod/v4/core/versions.js
+// ../cc-voice-control/node_modules/zod/v4/core/versions.js
 var version = {
   major: 4,
   minor: 4,
   patch: 3
 };
 
-// node_modules/zod/v4/core/schemas.js
+// ../cc-voice-control/node_modules/zod/v4/core/schemas.js
 var $ZodType = /* @__PURE__ */ $constructor("$ZodType", (inst, def) => {
   var _a2;
   inst ?? (inst = {});
@@ -8931,7 +8931,7 @@ function handleRefineResult(result, payload, input, inst) {
     payload.issues.push(issue(_iss));
   }
 }
-// node_modules/zod/v4/locales/index.js
+// ../cc-voice-control/node_modules/zod/v4/locales/index.js
 var exports_locales = {};
 __export(exports_locales, {
   zhTW: () => zh_TW_default,
@@ -8988,7 +8988,7 @@ __export(exports_locales, {
   ar: () => ar_default
 });
 
-// node_modules/zod/v4/locales/ar.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ar.js
 var error = () => {
   const Sizable = {
     string: { unit: "حرف", verb: "أن يحوي" },
@@ -9094,7 +9094,7 @@ function ar_default() {
     localeError: error()
   };
 }
-// node_modules/zod/v4/locales/az.js
+// ../cc-voice-control/node_modules/zod/v4/locales/az.js
 var error2 = () => {
   const Sizable = {
     string: { unit: "simvol", verb: "olmalıdır" },
@@ -9199,7 +9199,7 @@ function az_default() {
     localeError: error2()
   };
 }
-// node_modules/zod/v4/locales/be.js
+// ../cc-voice-control/node_modules/zod/v4/locales/be.js
 function getBelarusianPlural(count, one, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -9355,7 +9355,7 @@ function be_default() {
     localeError: error3()
   };
 }
-// node_modules/zod/v4/locales/bg.js
+// ../cc-voice-control/node_modules/zod/v4/locales/bg.js
 var error4 = () => {
   const Sizable = {
     string: { unit: "символа", verb: "да съдържа" },
@@ -9475,7 +9475,7 @@ function bg_default() {
     localeError: error4()
   };
 }
-// node_modules/zod/v4/locales/ca.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ca.js
 var error5 = () => {
   const Sizable = {
     string: { unit: "caràcters", verb: "contenir" },
@@ -9582,7 +9582,7 @@ function ca_default() {
     localeError: error5()
   };
 }
-// node_modules/zod/v4/locales/cs.js
+// ../cc-voice-control/node_modules/zod/v4/locales/cs.js
 var error6 = () => {
   const Sizable = {
     string: { unit: "znaků", verb: "mít" },
@@ -9693,7 +9693,7 @@ function cs_default() {
     localeError: error6()
   };
 }
-// node_modules/zod/v4/locales/da.js
+// ../cc-voice-control/node_modules/zod/v4/locales/da.js
 var error7 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "havde" },
@@ -9808,7 +9808,7 @@ function da_default() {
     localeError: error7()
   };
 }
-// node_modules/zod/v4/locales/de.js
+// ../cc-voice-control/node_modules/zod/v4/locales/de.js
 var error8 = () => {
   const Sizable = {
     string: { unit: "Zeichen", verb: "zu haben" },
@@ -9916,7 +9916,7 @@ function de_default() {
     localeError: error8()
   };
 }
-// node_modules/zod/v4/locales/el.js
+// ../cc-voice-control/node_modules/zod/v4/locales/el.js
 var error9 = () => {
   const Sizable = {
     string: { unit: "χαρακτήρες", verb: "να έχει" },
@@ -10025,7 +10025,7 @@ function el_default() {
     localeError: error9()
   };
 }
-// node_modules/zod/v4/locales/en.js
+// ../cc-voice-control/node_modules/zod/v4/locales/en.js
 var error10 = () => {
   const Sizable = {
     string: { unit: "characters", verb: "to have" },
@@ -10135,7 +10135,7 @@ function en_default() {
     localeError: error10()
   };
 }
-// node_modules/zod/v4/locales/eo.js
+// ../cc-voice-control/node_modules/zod/v4/locales/eo.js
 var error11 = () => {
   const Sizable = {
     string: { unit: "karaktrojn", verb: "havi" },
@@ -10244,7 +10244,7 @@ function eo_default() {
     localeError: error11()
   };
 }
-// node_modules/zod/v4/locales/es.js
+// ../cc-voice-control/node_modules/zod/v4/locales/es.js
 var error12 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "tener" },
@@ -10376,7 +10376,7 @@ function es_default() {
     localeError: error12()
   };
 }
-// node_modules/zod/v4/locales/fa.js
+// ../cc-voice-control/node_modules/zod/v4/locales/fa.js
 var error13 = () => {
   const Sizable = {
     string: { unit: "کاراکتر", verb: "داشته باشد" },
@@ -10490,7 +10490,7 @@ function fa_default() {
     localeError: error13()
   };
 }
-// node_modules/zod/v4/locales/fi.js
+// ../cc-voice-control/node_modules/zod/v4/locales/fi.js
 var error14 = () => {
   const Sizable = {
     string: { unit: "merkkiä", subject: "merkkijonon" },
@@ -10602,7 +10602,7 @@ function fi_default() {
     localeError: error14()
   };
 }
-// node_modules/zod/v4/locales/fr.js
+// ../cc-voice-control/node_modules/zod/v4/locales/fr.js
 var error15 = () => {
   const Sizable = {
     string: { unit: "caractères", verb: "avoir" },
@@ -10727,7 +10727,7 @@ function fr_default() {
     localeError: error15()
   };
 }
-// node_modules/zod/v4/locales/fr-CA.js
+// ../cc-voice-control/node_modules/zod/v4/locales/fr-CA.js
 var error16 = () => {
   const Sizable = {
     string: { unit: "caractères", verb: "avoir" },
@@ -10834,7 +10834,7 @@ function fr_CA_default() {
     localeError: error16()
   };
 }
-// node_modules/zod/v4/locales/he.js
+// ../cc-voice-control/node_modules/zod/v4/locales/he.js
 var error17 = () => {
   const TypeNames = {
     string: { label: "מחרוזת", gender: "f" },
@@ -11027,7 +11027,7 @@ function he_default() {
     localeError: error17()
   };
 }
-// node_modules/zod/v4/locales/hr.js
+// ../cc-voice-control/node_modules/zod/v4/locales/hr.js
 var error18 = () => {
   const Sizable = {
     string: { unit: "znakova", verb: "imati" },
@@ -11149,7 +11149,7 @@ function hr_default() {
     localeError: error18()
   };
 }
-// node_modules/zod/v4/locales/hu.js
+// ../cc-voice-control/node_modules/zod/v4/locales/hu.js
 var error19 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "legyen" },
@@ -11257,7 +11257,7 @@ function hu_default() {
     localeError: error19()
   };
 }
-// node_modules/zod/v4/locales/hy.js
+// ../cc-voice-control/node_modules/zod/v4/locales/hy.js
 function getArmenianPlural(count, one, many) {
   return Math.abs(count) === 1 ? one : many;
 }
@@ -11404,7 +11404,7 @@ function hy_default() {
     localeError: error20()
   };
 }
-// node_modules/zod/v4/locales/id.js
+// ../cc-voice-control/node_modules/zod/v4/locales/id.js
 var error21 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "memiliki" },
@@ -11510,7 +11510,7 @@ function id_default() {
     localeError: error21()
   };
 }
-// node_modules/zod/v4/locales/is.js
+// ../cc-voice-control/node_modules/zod/v4/locales/is.js
 var error22 = () => {
   const Sizable = {
     string: { unit: "stafi", verb: "að hafa" },
@@ -11619,7 +11619,7 @@ function is_default() {
     localeError: error22()
   };
 }
-// node_modules/zod/v4/locales/it.js
+// ../cc-voice-control/node_modules/zod/v4/locales/it.js
 var error23 = () => {
   const Sizable = {
     string: { unit: "caratteri", verb: "avere" },
@@ -11727,7 +11727,7 @@ function it_default() {
     localeError: error23()
   };
 }
-// node_modules/zod/v4/locales/ja.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ja.js
 var error24 = () => {
   const Sizable = {
     string: { unit: "文字", verb: "である" },
@@ -11834,7 +11834,7 @@ function ja_default() {
     localeError: error24()
   };
 }
-// node_modules/zod/v4/locales/ka.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ka.js
 var error25 = () => {
   const Sizable = {
     string: { unit: "სიმბოლო", verb: "უნდა შეიცავდეს" },
@@ -11946,7 +11946,7 @@ function ka_default() {
     localeError: error25()
   };
 }
-// node_modules/zod/v4/locales/km.js
+// ../cc-voice-control/node_modules/zod/v4/locales/km.js
 var error26 = () => {
   const Sizable = {
     string: { unit: "តួអក្សរ", verb: "គួរមាន" },
@@ -12057,11 +12057,11 @@ function km_default() {
   };
 }
 
-// node_modules/zod/v4/locales/kh.js
+// ../cc-voice-control/node_modules/zod/v4/locales/kh.js
 function kh_default() {
   return km_default();
 }
-// node_modules/zod/v4/locales/ko.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ko.js
 var error27 = () => {
   const Sizable = {
     string: { unit: "문자", verb: "to have" },
@@ -12172,7 +12172,7 @@ function ko_default() {
     localeError: error27()
   };
 }
-// node_modules/zod/v4/locales/lt.js
+// ../cc-voice-control/node_modules/zod/v4/locales/lt.js
 var capitalizeFirstCharacter = (text) => {
   return text.charAt(0).toUpperCase() + text.slice(1);
 };
@@ -12375,7 +12375,7 @@ function lt_default() {
     localeError: error28()
   };
 }
-// node_modules/zod/v4/locales/mk.js
+// ../cc-voice-control/node_modules/zod/v4/locales/mk.js
 var error29 = () => {
   const Sizable = {
     string: { unit: "знаци", verb: "да имаат" },
@@ -12484,7 +12484,7 @@ function mk_default() {
     localeError: error29()
   };
 }
-// node_modules/zod/v4/locales/ms.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ms.js
 var error30 = () => {
   const Sizable = {
     string: { unit: "aksara", verb: "mempunyai" },
@@ -12591,7 +12591,7 @@ function ms_default() {
     localeError: error30()
   };
 }
-// node_modules/zod/v4/locales/nl.js
+// ../cc-voice-control/node_modules/zod/v4/locales/nl.js
 var error31 = () => {
   const Sizable = {
     string: { unit: "tekens", verb: "heeft" },
@@ -12701,7 +12701,7 @@ function nl_default() {
     localeError: error31()
   };
 }
-// node_modules/zod/v4/locales/no.js
+// ../cc-voice-control/node_modules/zod/v4/locales/no.js
 var error32 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "å ha" },
@@ -12809,7 +12809,7 @@ function no_default() {
     localeError: error32()
   };
 }
-// node_modules/zod/v4/locales/ota.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ota.js
 var error33 = () => {
   const Sizable = {
     string: { unit: "harf", verb: "olmalıdır" },
@@ -12918,7 +12918,7 @@ function ota_default() {
     localeError: error33()
   };
 }
-// node_modules/zod/v4/locales/ps.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ps.js
 var error34 = () => {
   const Sizable = {
     string: { unit: "توکي", verb: "ولري" },
@@ -13032,7 +13032,7 @@ function ps_default() {
     localeError: error34()
   };
 }
-// node_modules/zod/v4/locales/pl.js
+// ../cc-voice-control/node_modules/zod/v4/locales/pl.js
 var error35 = () => {
   const Sizable = {
     string: { unit: "znaków", verb: "mieć" },
@@ -13141,7 +13141,7 @@ function pl_default() {
     localeError: error35()
   };
 }
-// node_modules/zod/v4/locales/pt.js
+// ../cc-voice-control/node_modules/zod/v4/locales/pt.js
 var error36 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "ter" },
@@ -13249,7 +13249,7 @@ function pt_default() {
     localeError: error36()
   };
 }
-// node_modules/zod/v4/locales/ro.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ro.js
 var error37 = () => {
   const Sizable = {
     string: { unit: "caractere", verb: "să aibă" },
@@ -13368,7 +13368,7 @@ function ro_default() {
     localeError: error37()
   };
 }
-// node_modules/zod/v4/locales/ru.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ru.js
 function getRussianPlural(count, one, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -13524,7 +13524,7 @@ function ru_default() {
     localeError: error38()
   };
 }
-// node_modules/zod/v4/locales/sl.js
+// ../cc-voice-control/node_modules/zod/v4/locales/sl.js
 var error39 = () => {
   const Sizable = {
     string: { unit: "znakov", verb: "imeti" },
@@ -13633,7 +13633,7 @@ function sl_default() {
     localeError: error39()
   };
 }
-// node_modules/zod/v4/locales/sv.js
+// ../cc-voice-control/node_modules/zod/v4/locales/sv.js
 var error40 = () => {
   const Sizable = {
     string: { unit: "tecken", verb: "att ha" },
@@ -13743,7 +13743,7 @@ function sv_default() {
     localeError: error40()
   };
 }
-// node_modules/zod/v4/locales/ta.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ta.js
 var error41 = () => {
   const Sizable = {
     string: { unit: "எழுத்துக்கள்", verb: "கொண்டிருக்க வேண்டும்" },
@@ -13853,7 +13853,7 @@ function ta_default() {
     localeError: error41()
   };
 }
-// node_modules/zod/v4/locales/th.js
+// ../cc-voice-control/node_modules/zod/v4/locales/th.js
 var error42 = () => {
   const Sizable = {
     string: { unit: "ตัวอักษร", verb: "ควรมี" },
@@ -13963,7 +13963,7 @@ function th_default() {
     localeError: error42()
   };
 }
-// node_modules/zod/v4/locales/tr.js
+// ../cc-voice-control/node_modules/zod/v4/locales/tr.js
 var error43 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "olmalı" },
@@ -14068,7 +14068,7 @@ function tr_default() {
     localeError: error43()
   };
 }
-// node_modules/zod/v4/locales/uk.js
+// ../cc-voice-control/node_modules/zod/v4/locales/uk.js
 var error44 = () => {
   const Sizable = {
     string: { unit: "символів", verb: "матиме" },
@@ -14177,11 +14177,11 @@ function uk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ua.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ua.js
 function ua_default() {
   return uk_default();
 }
-// node_modules/zod/v4/locales/ur.js
+// ../cc-voice-control/node_modules/zod/v4/locales/ur.js
 var error45 = () => {
   const Sizable = {
     string: { unit: "حروف", verb: "ہونا" },
@@ -14291,7 +14291,7 @@ function ur_default() {
     localeError: error45()
   };
 }
-// node_modules/zod/v4/locales/uz.js
+// ../cc-voice-control/node_modules/zod/v4/locales/uz.js
 var error46 = () => {
   const Sizable = {
     string: { unit: "belgi", verb: "bo‘lishi kerak" },
@@ -14401,7 +14401,7 @@ function uz_default() {
     localeError: error46()
   };
 }
-// node_modules/zod/v4/locales/vi.js
+// ../cc-voice-control/node_modules/zod/v4/locales/vi.js
 var error47 = () => {
   const Sizable = {
     string: { unit: "ký tự", verb: "có" },
@@ -14509,7 +14509,7 @@ function vi_default() {
     localeError: error47()
   };
 }
-// node_modules/zod/v4/locales/zh-CN.js
+// ../cc-voice-control/node_modules/zod/v4/locales/zh-CN.js
 var error48 = () => {
   const Sizable = {
     string: { unit: "字符", verb: "包含" },
@@ -14618,7 +14618,7 @@ function zh_CN_default() {
     localeError: error48()
   };
 }
-// node_modules/zod/v4/locales/zh-TW.js
+// ../cc-voice-control/node_modules/zod/v4/locales/zh-TW.js
 var error49 = () => {
   const Sizable = {
     string: { unit: "字元", verb: "擁有" },
@@ -14725,7 +14725,7 @@ function zh_TW_default() {
     localeError: error49()
   };
 }
-// node_modules/zod/v4/locales/yo.js
+// ../cc-voice-control/node_modules/zod/v4/locales/yo.js
 var error50 = () => {
   const Sizable = {
     string: { unit: "àmi", verb: "ní" },
@@ -14832,7 +14832,7 @@ function yo_default() {
     localeError: error50()
   };
 }
-// node_modules/zod/v4/core/registries.js
+// ../cc-voice-control/node_modules/zod/v4/core/registries.js
 var _a2;
 var $output = Symbol("ZodOutput");
 var $input = Symbol("ZodInput");
@@ -14882,7 +14882,7 @@ function registry() {
 }
 (_a2 = globalThis).__zod_globalRegistry ?? (_a2.__zod_globalRegistry = registry());
 var globalRegistry = globalThis.__zod_globalRegistry;
-// node_modules/zod/v4/core/api.js
+// ../cc-voice-control/node_modules/zod/v4/core/api.js
 function _string(Class2, params) {
   return new Class2({
     type: "string",
@@ -15802,7 +15802,7 @@ function _stringFormat(Class2, format, fnOrRegex, _params = {}) {
   const inst = new Class2(def);
   return inst;
 }
-// node_modules/zod/v4/core/to-json-schema.js
+// ../cc-voice-control/node_modules/zod/v4/core/to-json-schema.js
 function initializeContext(params) {
   let target = params?.target ?? "draft-2020-12";
   if (target === "draft-4")
@@ -16154,7 +16154,7 @@ var createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) =
   extractDefs(ctx, schema);
   return finalize(ctx, schema);
 };
-// node_modules/zod/v4/core/json-schema-processors.js
+// ../cc-voice-control/node_modules/zod/v4/core/json-schema-processors.js
 var formatMap = {
   guid: "uuid",
   url: "uri",
@@ -16692,7 +16692,7 @@ function toJSONSchema(input, params) {
   extractDefs(ctx, input);
   return finalize(ctx, input);
 }
-// node_modules/zod/v4/core/json-schema-generator.js
+// ../cc-voice-control/node_modules/zod/v4/core/json-schema-generator.js
 class JSONSchemaGenerator {
   get metadataRegistry() {
     return this.ctx.metadataRegistry;
@@ -16751,9 +16751,9 @@ class JSONSchemaGenerator {
     return plainResult;
   }
 }
-// node_modules/zod/v4/core/json-schema.js
+// ../cc-voice-control/node_modules/zod/v4/core/json-schema.js
 var exports_json_schema = {};
-// node_modules/zod/v4/classic/schemas.js
+// ../cc-voice-control/node_modules/zod/v4/classic/schemas.js
 var exports_schemas2 = {};
 __export(exports_schemas2, {
   xor: () => xor,
@@ -16924,7 +16924,7 @@ __export(exports_schemas2, {
   ZodAny: () => ZodAny
 });
 
-// node_modules/zod/v4/classic/checks.js
+// ../cc-voice-control/node_modules/zod/v4/classic/checks.js
 var exports_checks2 = {};
 __export(exports_checks2, {
   uppercase: () => _uppercase,
@@ -16958,7 +16958,7 @@ __export(exports_checks2, {
   endsWith: () => _endsWith
 });
 
-// node_modules/zod/v4/classic/iso.js
+// ../cc-voice-control/node_modules/zod/v4/classic/iso.js
 var exports_iso = {};
 __export(exports_iso, {
   time: () => time2,
@@ -16999,7 +16999,7 @@ function duration2(params) {
   return _isoDuration(ZodISODuration, params);
 }
 
-// node_modules/zod/v4/classic/errors.js
+// ../cc-voice-control/node_modules/zod/v4/classic/errors.js
 var initializer2 = (inst, issues) => {
   $ZodError.init(inst, issues);
   inst.name = "ZodError";
@@ -17034,7 +17034,7 @@ var ZodRealError = /* @__PURE__ */ $constructor("ZodError", initializer2, {
   Parent: Error
 });
 
-// node_modules/zod/v4/classic/parse.js
+// ../cc-voice-control/node_modules/zod/v4/classic/parse.js
 var parse3 = /* @__PURE__ */ _parse(ZodRealError);
 var parseAsync2 = /* @__PURE__ */ _parseAsync(ZodRealError);
 var safeParse2 = /* @__PURE__ */ _safeParse(ZodRealError);
@@ -17048,7 +17048,7 @@ var safeDecode2 = /* @__PURE__ */ _safeDecode(ZodRealError);
 var safeEncodeAsync2 = /* @__PURE__ */ _safeEncodeAsync(ZodRealError);
 var safeDecodeAsync2 = /* @__PURE__ */ _safeDecodeAsync(ZodRealError);
 
-// node_modules/zod/v4/classic/schemas.js
+// ../cc-voice-control/node_modules/zod/v4/classic/schemas.js
 var _installedGroups = /* @__PURE__ */ new WeakMap;
 function _installLazyMethods(inst, group, methods) {
   const proto = Object.getPrototypeOf(inst);
@@ -18335,7 +18335,7 @@ function preprocess(fn, schema) {
     out: schema
   });
 }
-// node_modules/zod/v4/classic/compat.js
+// ../cc-voice-control/node_modules/zod/v4/classic/compat.js
 var ZodIssueCode = {
   invalid_type: "invalid_type",
   too_big: "too_big",
@@ -18359,7 +18359,7 @@ function getErrorMap() {
 }
 var ZodFirstPartyTypeKind;
 (function(ZodFirstPartyTypeKind2) {})(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
-// node_modules/zod/v4/classic/from-json-schema.js
+// ../cc-voice-control/node_modules/zod/v4/classic/from-json-schema.js
 var z = {
   ...exports_schemas2,
   ...exports_checks2,
@@ -18826,7 +18826,7 @@ function fromJSONSchema(schema, params) {
   };
   return convertSchema(normalized, ctx);
 }
-// node_modules/zod/v4/classic/coerce.js
+// ../cc-voice-control/node_modules/zod/v4/classic/coerce.js
 var exports_coerce = {};
 __export(exports_coerce, {
   string: () => string3,
@@ -18851,7 +18851,7 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../cc-voice-control/node_modules/zod/v4/classic/external.js
 config(en_default());
 // src/shared/bridge-contract.ts
 var BRIDGE_BROWSER_SESSION_PATH_PREFIX = "/s";
@@ -19057,7 +19057,7 @@ import { createServer } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// node_modules/ws/wrapper.mjs
+// ../cc-voice-control/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
 var import_extension = __toESM(require_extension(), 1);
 var import_permessage_deflate = __toESM(require_permessage_deflate(), 1);
@@ -19117,6 +19117,11 @@ function fromBase64(value) {
   for (let i = 0;i < binary.length; i++)
     out[i] = binary.charCodeAt(i);
   return out;
+}
+
+// src/shared/protocol.ts
+function isVoiceAnswerable(q) {
+  return q.questions.length === 1 && q.questions.every((x) => !x.multiSelect);
 }
 
 // src/shared/serialize.ts
@@ -19220,6 +19225,18 @@ async function cmuxSubmit(text, surface) {
 async function cmuxInterrupt(surface) {
   const r = await runCmux(["send-key", ...cmuxTarget(surface), "escape"]);
   return r.ok;
+}
+async function cmuxAnswerQuestion(text, surface) {
+  const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
+  if (!screen.ok)
+    return "error";
+  if (!/type something/i.test(screen.stdout))
+    return "no-picker";
+  if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok)
+    return "error";
+  if (!(await runCmux(["send", ...cmuxTarget(surface), "--", text])).ok)
+    return "error";
+  return (await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok ? "sent" : "error";
 }
 async function cmuxSurfaceTitle(surface) {
   if (!surface)
@@ -19556,6 +19573,65 @@ function claudeText(r) {
   const stop = r.message?.stop_reason;
   return { text, interim: !(stop === "end_turn" || stop === "max_tokens") };
 }
+function extractQuestion(r) {
+  if (roleOf(r) !== "assistant" || r.isSidechain || !Array.isArray(r.message?.content))
+    return;
+  const tu = r.message.content.find((b) => !!b && b.type === "tool_use" && b.name === "AskUserQuestion");
+  if (!tu)
+    return;
+  const id = tu.id;
+  const raw = tu.input?.questions;
+  if (typeof id !== "string" || !Array.isArray(raw))
+    return;
+  const questions = raw.map(normalizeQuestion).filter((q) => q !== undefined);
+  return questions.length > 0 ? { toolUseId: id, questions } : undefined;
+}
+function normalizeQuestion(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const q = raw;
+  if (typeof q.question !== "string")
+    return;
+  const options = Array.isArray(q.options) ? q.options.flatMap((o) => {
+    const opt = o;
+    if (!o || typeof o !== "object" || typeof opt.label !== "string")
+      return [];
+    return [
+      typeof opt.description === "string" ? { label: opt.label, description: opt.description } : { label: opt.label }
+    ];
+  }) : [];
+  return {
+    question: q.question,
+    ...typeof q.header === "string" ? { header: q.header } : {},
+    ...typeof q.multiSelect === "boolean" ? { multiSelect: q.multiSelect } : {},
+    options
+  };
+}
+function answeredToolUseIds(records) {
+  const ids = new Set;
+  for (const r of records) {
+    const c = r.message?.content;
+    if (!Array.isArray(c))
+      continue;
+    for (const b of c) {
+      if (b && b.type === "tool_result") {
+        const tid = b.tool_use_id;
+        if (typeof tid === "string")
+          ids.add(tid);
+      }
+    }
+  }
+  return ids;
+}
+function questionSpeech(questions) {
+  const one = (q) => {
+    const opts = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}`).join(". ");
+    return opts ? `${q.question} Options — ${opts}.` : q.question;
+  };
+  if (questions.length === 1)
+    return `Claude is asking: ${one(questions[0])}`;
+  return `Claude has ${questions.length} questions. ${questions.map((q, i) => `Question ${i + 1}: ${one(q)}`).join(" ")}`;
+}
 function selectActiveBranch(records) {
   const byUuid = new Map;
   for (const r of records)
@@ -19600,7 +19676,9 @@ function selectActiveBranch(records) {
 }
 function projectTurns(records, maxTurns = 40) {
   const turns = [];
-  for (const r of selectActiveBranch(records)) {
+  const branch = selectActiveBranch(records);
+  const answered = answeredToolUseIds(branch);
+  for (const r of branch) {
     if (!r.uuid)
       continue;
     const ts = toEpoch(r.timestamp);
@@ -19615,6 +19693,20 @@ function projectTurns(records, maxTurns = 40) {
         interim: false
       });
     } else {
+      const q = extractQuestion(r);
+      if (q) {
+        const lead = extractText(r.message?.content);
+        turns.push({
+          uuid: r.uuid,
+          parentUuid,
+          timestamp: ts,
+          role: "claude",
+          text: lead ? `${lead} ${questionSpeech(q.questions)}` : questionSpeech(q.questions),
+          interim: false,
+          question: { toolUseId: q.toolUseId, questions: q.questions, answered: answered.has(q.toolUseId) }
+        });
+        continue;
+      }
       const c = claudeText(r);
       if (c)
         turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
@@ -19628,7 +19720,7 @@ function isPaneWorking(turns) {
     if (turns[i].role !== "user")
       continue;
     for (let j = i + 1;j < turns.length; j++) {
-      if (turns[j].role === "claude" && !turns[j].interim)
+      if (turns[j].role === "claude" && !turns[j].interim && !turns[j].question)
         return false;
     }
     return true;
@@ -19839,6 +19931,7 @@ class VoiceDaemon {
   syncDebounce;
   syncPoll;
   lastHistorySig = "";
+  answeringQuestion = false;
   speakMode = "final";
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
@@ -20141,9 +20234,50 @@ class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
+    const pending = this.pendingQuestion(this.projectedNow());
+    if (pending?.question) {
+      const payload = pending.question;
+      if (!isVoiceAnswerable(payload)) {
+        this.sendToBrowser({
+          type: "error",
+          message: "This is a multi-part question — please answer it in the terminal."
+        });
+        return;
+      }
+      if (this.answeringQuestion) {
+        this.sendToBrowser({ type: "error", message: "Still sending your previous answer…" });
+        return;
+      }
+      this.answeringQuestion = true;
+      let result;
+      try {
+        result = await cmuxAnswerQuestion(transcript, this.init.surface);
+      } finally {
+        this.answeringQuestion = false;
+      }
+      if (result === "sent") {
+        this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
+        this.syncFromTranscript();
+        return;
+      }
+      if (result === "error") {
+        this.sendToBrowser({
+          type: "error",
+          message: "Couldn't send your answer — answer the question in the terminal."
+        });
+        return;
+      }
+    }
     if (mode === "interrupt")
       await cmuxInterrupt(this.init.surface);
     this.queueVoice(transcript, mode);
+  }
+  pendingQuestion(turns) {
+    for (let i = turns.length - 1;i >= 0; i--) {
+      if (turns[i].question)
+        return turns[i].question?.answered ? undefined : turns[i];
+    }
+    return;
   }
   queueVoice(text, mode) {
     if (mode === "interrupt")
@@ -20217,7 +20351,7 @@ class VoiceDaemon {
     this.reflect(this.projectedNow(), true);
   }
   reflect(turns, force) {
-    const sig = turns.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}`).join("|");
+    const sig = turns.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? t.question.answered ? "qa" : "q" : ""}`).join("|");
     if (force || sig !== this.lastHistorySig) {
       this.lastHistorySig = sig;
       this.sendToBrowser({
@@ -20228,7 +20362,8 @@ class VoiceDaemon {
           role: t.role,
           text: t.text,
           hasAudio: this.audio.has(t.uuid),
-          interim: t.interim
+          interim: t.interim,
+          ...t.question ? { question: t.question } : {}
         }))
       });
     }

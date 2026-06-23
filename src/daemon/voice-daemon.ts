@@ -18,9 +18,10 @@ import type {
   ThreadInfo,
   WireThreadInfo
 } from "../shared/protocol.js";
+import { isVoiceAnswerable } from "../shared/protocol.js";
 import { createSerializer } from "../shared/serialize.js";
 import { startBridgeHeartbeat } from "./bridge-heartbeat.js";
-import { cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
+import { cmuxAnswerQuestion, cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
 import {
   loadOrCreateSession,
   qrPath,
@@ -192,6 +193,10 @@ export class VoiceDaemon {
   private syncDebounce?: ReturnType<typeof setTimeout>;
   private syncPoll?: ReturnType<typeof setInterval>;
   private lastHistorySig = "";
+  // True while a spoken answer is being typed into an AskUserQuestion picker, so a second utterance arriving
+  // during the STT+send window can't re-type into the same picker (the answered state derives from the
+  // transcript, which may not have flushed when the first send completes).
+  private answeringQuestion = false;
   // The phone's autoplay preference for VOICE turns: "off" speaks nothing, "final" speaks just the final
   // reply (default — the prior behaviour), "all" also speaks each interim step. Tap-to-play works in every
   // mode. Set via set_speak_mode.
@@ -652,8 +657,64 @@ export class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
+    // If Claude is paused on an interactive question, the spoken answer IS the picker's custom answer — not a
+    // new prompt. Route it into the picker; the answer lands as a tool_result → the card flips to answered.
+    const pending = this.pendingQuestion(this.projectedNow());
+    if (pending?.question) {
+      const payload = pending.question;
+      // Only a SINGLE single-select question can be driven via the picker (one custom answer → Enter submits);
+      // multi-part / multi-select needs per-sub-question stepping we deliberately don't do — answer those in
+      // the terminal (fail loud, never half-answer).
+      if (!isVoiceAnswerable(payload)) {
+        this.sendToBrowser({
+          type: "error",
+          message: "This is a multi-part question — please answer it in the terminal."
+        });
+        return;
+      }
+      // Coalesce concurrent utterances: a second answer must not re-type into the picker while the first is
+      // still being sent (the answered state isn't flushed yet).
+      if (this.answeringQuestion) {
+        this.sendToBrowser({ type: "error", message: "Still sending your previous answer…" });
+        return;
+      }
+      this.answeringQuestion = true;
+      let result: "sent" | "no-picker" | "error";
+      try {
+        result = await cmuxAnswerQuestion(transcript, this.init.surface);
+      } finally {
+        this.answeringQuestion = false;
+      }
+      if (result === "sent") {
+        // The answer lands as a tool_result, not a user row or a UserPromptSubmit, so the phone's "sent ✓"
+        // path never fires — echo an accepted prompt_status with the answer text so the mic spinner clears
+        // (and the answer shows as a "you" row). Then re-project so the card flips to answered.
+        this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
+        this.syncFromTranscript();
+        return;
+      }
+      if (result === "error") {
+        this.sendToBrowser({
+          type: "error",
+          message: "Couldn't send your answer — answer the question in the terminal."
+        });
+        return;
+      }
+      // result === "no-picker": the transcript still showed an unanswered question but the picker is already
+      // gone (a stale/dismissed question). Don't drop the words — fall through and treat them as a normal prompt.
+    }
     if (mode === "interrupt") await cmuxInterrupt(this.init.surface); // Esc the running turn, run this next
     this.queueVoice(transcript, mode);
+  }
+
+  // The interactive question currently awaiting an answer (the picker is up): the LATEST question turn, iff
+  // it's still unanswered. Undefined otherwise — used to route a spoken answer into the picker rather than
+  // injecting it as a fresh prompt.
+  private pendingQuestion(turns: ProjectedTurn[]): ProjectedTurn | undefined {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].question) return turns[i].question?.answered ? undefined : turns[i];
+    }
+    return undefined;
   }
 
   // Queue a spoken prompt into the injection queue. The conversation itself is projected from the
@@ -757,7 +818,10 @@ export class VoiceDaemon {
   // and native uuids mean it never double-shows.
   private reflect(turns: ProjectedTurn[], force: boolean): void {
     const sig = turns
-      .map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}`)
+      .map(
+        (t) =>
+          `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? (t.question.answered ? "qa" : "q") : ""}`
+      )
       .join("|");
     if (force || sig !== this.lastHistorySig) {
       this.lastHistorySig = sig;
@@ -769,7 +833,8 @@ export class VoiceDaemon {
           role: t.role,
           text: t.text,
           hasAudio: this.audio.has(t.uuid),
-          interim: t.interim
+          interim: t.interim,
+          ...(t.question ? { question: t.question } : {})
         }))
       });
     }

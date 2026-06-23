@@ -27,6 +27,26 @@ export type InjectMode = "queue" | "interrupt";
 // What the daemon auto-plays on a voice turn: nothing, just the final reply, or every step too.
 export type SpeakMode = "off" | "final" | "all";
 
+// One option Claude offers for an interactive question (the AskUserQuestion tool). `label` is what's spoken
+// and shown (and what the tool records as the answer); `description` is the optional sub-label Claude adds.
+export type QuestionOption = { label: string; description?: string };
+
+// One question from Claude's interactive AskUserQuestion tool: the prompt, its options, and whether it
+// takes multiple selections. `header` is the short section tag Claude gives it (e.g. "Audio strategy").
+export type Question = { header?: string; question: string; multiSelect?: boolean; options: QuestionOption[] };
+
+// An interactive AskUserQuestion turn projected from the transcript. `toolUseId` ties it to the tool call
+// (and its eventual answer); `answered` flips once the user's selection lands. NOT a final reply: a question
+// never ends the working state (isPaneWorking skips it) so Claude's later conclusion is still spoken.
+export type QuestionPayload = { toolUseId: string; questions: Question[]; answered: boolean };
+
+// Can a single spoken transcript answer this question through the picker? Only a SINGLE single-select question
+// (one custom answer → Enter submits); multi-part or multi-select must be answered in the terminal. Shared by
+// the daemon (route to the picker vs fail loud) and the card (the hint shown), so the two can never drift.
+export function isVoiceAnswerable(q: QuestionPayload): boolean {
+  return q.questions.length === 1 && q.questions.every((x) => !x.multiSelect);
+}
+
 // One conversational turn projected from Claude Code's transcript (see transcript-projection.ts). The
 // transcript is the source of truth, so a turn IS a native record: `requestId` is its native `uuid`
 // (identity + dedup key) and `timestamp` is its native record time (order key) — both stable across
@@ -47,6 +67,11 @@ export type HistoryTurn = {
   // user turn or a FINAL reply. The phone shows steps dimmer and never auto-plays them unless the user
   // opted into "read every step" (set_speak_mode "all"). Absent/false for user turns and final replies.
   interim?: boolean;
+  // Present iff this turn is Claude's interactive AskUserQuestion prompt — rendered as a question card
+  // (the question + lettered options) instead of a text bubble, read aloud while unanswered, and answered by
+  // VOICE (the spoken transcript becomes the picker's custom answer; there is no tap-to-select, by design).
+  // `text` carries a flattened spoken/displayed rendering for TTS and any non-card fallback.
+  question?: QuestionPayload;
 };
 
 export type BrowserToDaemonEvent =

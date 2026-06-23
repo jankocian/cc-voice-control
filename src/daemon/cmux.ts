@@ -126,6 +126,26 @@ export async function cmuxInterrupt(surface?: string): Promise<boolean> {
 }
 
 /**
+ * Answer the interactive AskUserQuestion picker currently up in the pane with the user's spoken transcript as
+ * the free-text CUSTOM answer. The picker focuses its "type something" free-text field when you press UP from
+ * the default top selection (the list wraps, so UP lands on the custom-answer row), so the whole interaction
+ * is just: UP → type → Enter. Deliberately LAYOUT-BLIND — no glyph parsing or row counting — which makes it
+ * bulletproof regardless of how many options the question has or where the highlight sits. We first confirm
+ * the picker is actually up (its "type something" row is on screen) so a stale call can never type into a
+ * normal prompt. Returns: "sent" on success; "no-picker" when the picker ISN'T up (the transcript still shows
+ * an unanswered question but it's already been dismissed) — the caller then treats the words as a normal
+ * prompt, never losing them; "error" when the pane is unreachable or a keystroke fails.
+ */
+export async function cmuxAnswerQuestion(text: string, surface?: string): Promise<"sent" | "no-picker" | "error"> {
+  const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
+  if (!screen.ok) return "error"; // couldn't read the pane — can't tell, don't gamble
+  if (!/type something/i.test(screen.stdout)) return "no-picker"; // picker isn't up → caller falls through to a prompt
+  if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok) return "error"; // UP selects the custom-answer field
+  if (!(await runCmux(["send", ...cmuxTarget(surface), "--", text])).ok) return "error";
+  return (await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok ? "sent" : "error";
+}
+
+/**
  * The cmux per-surface TITLE for `surface` (the live Claude task description, e.g.
  * "Review to-dos and plan next implementation"), or undefined if unavailable. Probe §0.6-A
  * confirmed `tree --all --json --id-format both` exposes a per-surface `title`. We match the

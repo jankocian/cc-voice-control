@@ -16,6 +16,8 @@
 // types it in, so it is also `promptSource: "typed"`) — is `promptSource`. We key on it, never on text
 // shape, so a real image-prefixed message (`[Image #5] …`, still `typed`) is never mistaken for noise.
 
+import type { Question, QuestionOption, QuestionPayload } from "../shared/protocol.js";
+
 export type ProjectedRole = "user" | "claude";
 
 export type ProjectedTurn = {
@@ -28,6 +30,10 @@ export type ProjectedTurn = {
   // it's about to do, vs `false` for a user turn or a FINAL reply. Steps are shown dimmer and not spoken
   // unless the phone opts into "read every step". Always false for user turns.
   interim: boolean;
+  // Present iff this turn is an interactive AskUserQuestion (see extractQuestion). Shown as a card and read
+  // aloud like a reply, but it is NOT a final reply — isPaneWorking skips it, so the pane stays "working"
+  // until Claude's real conclusion lands (which is what resolves the turn).
+  question?: QuestionPayload;
 };
 
 // Only the transcript fields we read; records carry many more.
@@ -88,6 +94,78 @@ function claudeText(r: TranscriptRecord): { text: string; interim: boolean } | u
   if (!text) return undefined;
   const stop = r.message?.stop_reason;
   return { text, interim: !(stop === "end_turn" || stop === "max_tokens") };
+}
+
+// Claude's interactive AskUserQuestion call: an assistant record whose content carries a `tool_use` block
+// named "AskUserQuestion", its `input.questions` the prompt(s) + options. Returns the questions (the caller
+// fills `answered`), or undefined for anything else. Fully defensive — a malformed/torn input yields
+// undefined so a half-written record can never surface a broken card (and falls through to the normal text
+// path, never breaking the rest of the projection: an unknown shape is contained, not catastrophic).
+function extractQuestion(r: TranscriptRecord): { toolUseId: string; questions: Question[] } | undefined {
+  if (roleOf(r) !== "assistant" || r.isSidechain || !Array.isArray(r.message?.content)) return undefined;
+  const tu = r.message.content.find(
+    (b) => !!b && (b as { type?: unknown }).type === "tool_use" && (b as { name?: unknown }).name === "AskUserQuestion"
+  );
+  if (!tu) return undefined;
+  const id = (tu as { id?: unknown }).id;
+  const raw = (tu as { input?: { questions?: unknown } }).input?.questions;
+  if (typeof id !== "string" || !Array.isArray(raw)) return undefined;
+  const questions = raw.map(normalizeQuestion).filter((q): q is Question => q !== undefined);
+  return questions.length > 0 ? { toolUseId: id, questions } : undefined;
+}
+
+// Narrow one raw question object to our shape, dropping anything malformed. Options without a string label
+// are skipped; a question without a string `question` is dropped entirely.
+function normalizeQuestion(raw: unknown): Question | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const q = raw as { question?: unknown; header?: unknown; multiSelect?: unknown; options?: unknown };
+  if (typeof q.question !== "string") return undefined;
+  const options: QuestionOption[] = Array.isArray(q.options)
+    ? q.options.flatMap((o) => {
+        const opt = o as { label?: unknown; description?: unknown };
+        if (!o || typeof o !== "object" || typeof opt.label !== "string") return [];
+        return [
+          typeof opt.description === "string"
+            ? { label: opt.label, description: opt.description }
+            : { label: opt.label }
+        ];
+      })
+    : [];
+  return {
+    question: q.question,
+    ...(typeof q.header === "string" ? { header: q.header } : {}),
+    ...(typeof q.multiSelect === "boolean" ? { multiSelect: q.multiSelect } : {}),
+    options
+  };
+}
+
+// tool_use_ids that already have a tool_result anywhere in the records — i.e. questions the user answered.
+function answeredToolUseIds(records: TranscriptRecord[]): Set<string> {
+  const ids = new Set<string>();
+  for (const r of records) {
+    const c = r.message?.content;
+    if (!Array.isArray(c)) continue;
+    for (const b of c) {
+      if (b && (b as { type?: unknown }).type === "tool_result") {
+        const tid = (b as { tool_use_id?: unknown }).tool_use_id;
+        if (typeof tid === "string") ids.add(tid);
+      }
+    }
+  }
+  return ids;
+}
+
+// A spoken/displayed rendering of an interactive question, for TTS and the non-card text fallback. Options
+// are lettered (A, B, …) — we read them out; the user answers freely (their transcript becomes the custom
+// answer). Claude Code appends its own "Type something"/"Chat about this" rows at render time; those aren't
+// in the transcript, so we never read them.
+export function questionSpeech(questions: Question[]): string {
+  const one = (q: Question) => {
+    const opts = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}`).join(". ");
+    return opts ? `${q.question} Options — ${opts}.` : q.question;
+  };
+  if (questions.length === 1) return `Claude is asking: ${one(questions[0])}`;
+  return `Claude has ${questions.length} questions. ${questions.map((q, i) => `Question ${i + 1}: ${one(q)}`).join(" ")}`;
 }
 
 /**
@@ -167,7 +245,9 @@ export function selectActiveBranch(records: TranscriptRecord[]): TranscriptRecor
  */
 export function projectTurns(records: TranscriptRecord[], maxTurns = 40): ProjectedTurn[] {
   const turns: ProjectedTurn[] = [];
-  for (const r of selectActiveBranch(records)) {
+  const branch = selectActiveBranch(records);
+  const answered = answeredToolUseIds(branch);
+  for (const r of branch) {
     if (!r.uuid) continue;
     const ts = toEpoch(r.timestamp);
     const parentUuid = r.parentUuid ?? undefined;
@@ -181,6 +261,22 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
         interim: false
       });
     } else {
+      const q = extractQuestion(r);
+      if (q) {
+        // A preamble Claude writes in the SAME record as the AskUserQuestion (rare — usually it's its own
+        // turn) would otherwise be dropped; keep it as the spoken lead-in so the question's context is read.
+        const lead = extractText(r.message?.content);
+        turns.push({
+          uuid: r.uuid,
+          parentUuid,
+          timestamp: ts,
+          role: "claude",
+          text: lead ? `${lead} ${questionSpeech(q.questions)}` : questionSpeech(q.questions),
+          interim: false,
+          question: { toolUseId: q.toolUseId, questions: q.questions, answered: answered.has(q.toolUseId) }
+        });
+        continue;
+      }
       const c = claudeText(r);
       if (c) turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
     }
@@ -203,7 +299,9 @@ export function isPaneWorking(turns: ProjectedTurn[]): boolean {
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role !== "user") continue;
     for (let j = i + 1; j < turns.length; j++) {
-      if (turns[j].role === "claude" && !turns[j].interim) return false; // answered → idle
+      // A question is NOT the final reply: the pane is still working (awaiting the answer, then the
+      // conclusion), so skip it — else the working poll would stop and a late conclusion could be missed.
+      if (turns[j].role === "claude" && !turns[j].interim && !turns[j].question) return false; // answered → idle
     }
     return true; // newest user turn still awaiting its final reply → working
   }

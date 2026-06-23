@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
+import { cmuxAnswerQuestion, cmuxSubmit } from "./cmux.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { TAIL_BYTES } from "./transcript-reader.js";
 import { VoiceDaemon } from "./voice-daemon.js";
@@ -30,6 +31,7 @@ vi.mock("./openai.js", () => ({
 vi.mock("./cmux.js", () => ({
   cmuxSubmit: vi.fn(async () => true),
   cmuxInterrupt: vi.fn(async () => true),
+  cmuxAnswerQuestion: vi.fn(async () => "sent"),
   cmuxHealth: vi.fn(async () => ({ socketUp: true, surfaceAlive: true })),
   cmuxSurfaceTitle: vi.fn(async () => undefined), // labels.ts imports this from the same module
   spawnWorkspace: vi.fn(async () => "surface:1")
@@ -72,6 +74,35 @@ const fillerRec = (uuid: string, bytes: number) =>
     timestamp: "2026-06-22T13:52:00.000Z",
     message: { role: "user", content: [{ type: "tool_result", content: "x".repeat(bytes) }] }
   });
+// An interactive AskUserQuestion turn (assistant record whose content is the tool_use). `opts.multiSelect`
+// makes it a question that can't be voice-answered (must be answered in the terminal).
+const questionRec = (uuid: string, ts: string, opts: { multiSelect?: boolean } = {}) =>
+  rec({
+    type: "assistant",
+    uuid,
+    timestamp: ts,
+    message: {
+      role: "assistant",
+      stop_reason: "tool_use",
+      content: [
+        {
+          type: "tool_use",
+          id: "q1",
+          name: "AskUserQuestion",
+          input: {
+            questions: [
+              {
+                question: "Which?",
+                header: "H",
+                multiSelect: opts.multiSelect === true,
+                options: [{ label: "A" }, { label: "B" }]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  });
 
 function post(port: number, route: string, body: unknown): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -113,6 +144,9 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     dataDir = mkdtempSync(join(tmpdir(), "voice-reply-test-"));
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
     vi.mocked(synthesizeSpeech).mockClear();
+    // Reset transcribeAudio to its default so a prior test's queued mockResolvedValueOnce (e.g. the glued-
+    // prompt case) can't leak its transcript into the next test's submit_audio.
+    vi.mocked(transcribeAudio).mockReset().mockResolvedValue("unused");
     key = await deriveKey("sek");
 
     daemonOut = [];
@@ -208,6 +242,24 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       await sleep(50);
     }
     return undefined;
+  }
+
+  // Poll for a prompt_status envelope (text + state) — used to assert the mic-spinner-clearing "accepted" an
+  // answer sends, and the "queued" a fallen-through answer (picker gone) sends as a normal prompt.
+  async function waitForPromptStatus(text: string, state: string): Promise<boolean> {
+    for (let i = 0; i < 40; i++) {
+      for (const env of daemonOut as { channel?: string; threadId?: string; enc?: EncBlob }[]) {
+        if (env.channel !== "browser" || !env.enc) continue;
+        const event = await openJson<{ type?: string; text?: string; state?: string }>(
+          key,
+          env.enc,
+          aad("browser", env.threadId ?? "SURF")
+        );
+        if (event.type === "prompt_status" && event.text === text && event.state === state) return true;
+      }
+      await sleep(50);
+    }
+    return false;
   }
 
   it("waits for the FINAL answer (never speaks an interim step) when it flushes after the Stop hook", async () => {
@@ -356,6 +408,86 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     }
     expect(statuses).toContainEqual({ text: CANNED, state: "queued" }); // shown right after transcription
     expect(statuses).toContainEqual({ text: CANNED, state: "accepted" }); // shown on UserPromptSubmit
+
+    daemon.stop();
+  }, 20000);
+
+  it("reads an interactive question aloud and routes a spoken answer into the picker (not a new prompt)", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon, port } = await driveUpToClose(transcript);
+
+    // Claude asks an interactive question → it's synthesized at once (a question is read like a final reply).
+    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
+    await post(port, "/turn-progress", { transcriptPath: transcript });
+    const spoken = await waitForSpeak();
+    expect(spoken.some((t) => t.includes("Which?"))).toBe(true);
+
+    // The user speaks while the question is pending → the transcript goes into the picker's custom answer,
+    // NOT the inject queue (cmuxAnswerQuestion, never cmuxSubmit).
+    vi.mocked(cmuxAnswerQuestion).mockClear();
+    vi.mocked(cmuxSubmit).mockClear();
+    await sendToDaemon?.({
+      type: "submit_audio",
+      requestId: "r",
+      audioBase64: "QUFB",
+      mimeType: "audio/webm",
+      mode: "queue"
+    });
+    for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestion).mock.calls.length === 0; i++) await sleep(50);
+    expect(vi.mocked(cmuxAnswerQuestion)).toHaveBeenCalledWith("unused", "SURF"); // transcribeAudio mock → "unused"
+    expect(vi.mocked(cmuxSubmit)).not.toHaveBeenCalled();
+    // The answer lands as a tool_result (no user row), so the mic spinner is cleared by an accepted
+    // prompt_status carrying the answer text — else the mic stays locked.
+    expect(await waitForPromptStatus("unused", "accepted")).toBe(true);
+
+    daemon.stop();
+  }, 20000);
+
+  it("treats the answer as a normal prompt when the picker is already gone (no-picker → queue, never dropped)", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon, port } = await driveUpToClose(transcript);
+
+    // The transcript still shows an unanswered question, but the picker has already been dismissed.
+    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
+    await post(port, "/turn-progress", { transcriptPath: transcript });
+    await sleep(150);
+
+    vi.mocked(cmuxAnswerQuestion).mockResolvedValueOnce("no-picker");
+    await sendToDaemon?.({
+      type: "submit_audio",
+      requestId: "r",
+      audioBase64: "QUFB",
+      mimeType: "audio/webm",
+      mode: "queue"
+    });
+    // Falls through to a normal prompt (queueVoice emits a "queued" prompt_status) — the words aren't lost.
+    expect(await waitForPromptStatus("unused", "queued")).toBe(true);
+
+    daemon.stop();
+  }, 20000);
+
+  it("routes a multi-select question to the terminal instead of mis-answering it via the picker", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon, port } = await driveUpToClose(transcript);
+
+    // A multi-SELECT question: one free-text custom answer can't express multiple picks → answer in terminal.
+    appendFileSync(transcript, questionRec("MQ", "2026-06-22T13:54:00.000Z", { multiSelect: true }));
+    await post(port, "/turn-progress", { transcriptPath: transcript });
+    await sleep(200);
+
+    vi.mocked(cmuxAnswerQuestion).mockClear();
+    await sendToDaemon?.({
+      type: "submit_audio",
+      requestId: "r",
+      audioBase64: "QUFB",
+      mimeType: "audio/webm",
+      mode: "queue"
+    });
+    await sleep(400);
+    expect(vi.mocked(cmuxAnswerQuestion)).not.toHaveBeenCalled(); // never routed to the picker
 
     daemon.stop();
   }, 20000);

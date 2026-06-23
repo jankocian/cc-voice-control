@@ -1,6 +1,7 @@
 import { Loader2, RotateCcw } from "lucide-react";
 import { InlineAudioPlayer } from "@/components/InlineAudioPlayer";
 import { MessageBubble } from "@/components/MessageBubble";
+import { QuestionCard } from "@/components/QuestionCard";
 import { StepRow } from "@/components/StepRow";
 import type { Message } from "@/lib/messages";
 
@@ -70,6 +71,18 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
               body={message.body}
               time={message.time}
               delivery={message.delivery}
+            />
+          );
+        }
+
+        // An interactive question: render the card (question + lettered options); answer by voice.
+        if (message.question) {
+          return (
+            <QuestionCard
+              key={message.id}
+              question={message.question}
+              playing={playback.playingId === message.requestId}
+              onPlay={() => playback.onPlay(message.requestId)}
             />
           );
         }
