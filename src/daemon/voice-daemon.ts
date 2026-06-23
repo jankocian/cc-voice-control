@@ -756,7 +756,10 @@ export class VoiceDaemon {
     const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
     if (entry) {
       entry.opened = true;
-      entry.openOffset = this.lastEof;
+      // `lastEof` is the size as of our previous read — just before this prompt. On the VERY first turn
+      // after a cold start (no projection has run yet), it's undefined; fall back to 0 so the read still
+      // includes the prompt (reading from the start) rather than the tail, which a huge turn could outgrow.
+      entry.openOffset = this.lastEof ?? 0;
     }
   }
 
@@ -799,7 +802,12 @@ export class VoiceDaemon {
       }
     };
     bindBy((turnText, entryText) => turnText === entryText);
-    bindBy((turnText, entryText) => turnText.includes(entryText));
+    // Substring pass for the glued survivor only. Skip a turn whose text is EXACTLY some pending prompt —
+    // it belongs to that prompt's own entry (claimed in pass 1, or reserved for it), so a shorter prompt
+    // can't steal a longer one's turn. (The rebind runs the instant the survivor appears, before any later
+    // turn, and entries retire once their reply is spoken, so a later look-alike turn can't be stolen.)
+    const exactTexts = new Set(this.pending.map((p) => p.text.trim()));
+    bindBy((turnText, entryText) => turnText.includes(entryText) && !exactTexts.has(turnText));
   }
 
   // Build the `history` snapshot — a PURE PROJECTION of the transcript's active branch, nothing else. The

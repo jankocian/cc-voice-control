@@ -113,6 +113,9 @@ export class TurnCoordinator {
     this.reapStaleTurns(); // free the gate if a previous turn hung — else injection blocks forever
     if (this.inFlight !== undefined) return; // our own injection is still pending its open
     if (this.paneBusy) return; // Claude is mid-turn — wait for the pane to go idle
+    // Shift BEFORE injecting. This is also why a queued prompt can't become a "duplicate" of a merged/glued
+    // record: a prompt's text only reaches the pane (and thus any transcript record) by being injected here,
+    // which removes it from the queue first — so it can never be both still-queued AND part of a glued turn.
     const next = this.queue.shift();
     if (next === undefined) return;
     const seq = ++this.injectSeq;
@@ -139,7 +142,9 @@ export class TurnCoordinator {
 
   // Backstop for the INJECT GATE only: free a turn stuck open past TURN_TTL_MS (a missed Stop) or an
   // injection whose turn-open never arrived, so injection can't wedge forever. The working LAMP is
-  // transcript-derived and self-heals on its own; this never drives it.
+  // transcript-derived and self-heals on its own; this never drives it. Runs on every pump()/turnOpened()
+  // rather than a timer, so a stuck queue clears on the next coordinator activity (e.g. the next spoken
+  // prompt's enqueueVoice → pump) — adequate, since the queue only matters when there's a prompt to inject.
   private reapStaleTurns(): void {
     const cutoff = this.now() - TURN_TTL_MS;
     if (this.paneBusy && this.busySince !== undefined && this.busySince < cutoff) {
