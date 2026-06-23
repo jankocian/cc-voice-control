@@ -41,7 +41,7 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("hello");
     await h.tick();
     expect(h.injected).toEqual(["hello"]);
-    expect(h.coord.isWorking()).toBe(true); // in flight until its turn opens
+    expect(h.coord.hasInFlight).toBe(true); // in flight until its turn opens
     expect(h.coord.currentVoicePrompt).toBe("hello");
   });
 
@@ -50,24 +50,42 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("first");
     await h.tick();
     h.coord.turnOpened("first"); // our injection landed → in-flight retires, but the open turn gates
+    expect(h.coord.hasInFlight).toBe(false);
+    expect(h.coord.isBusy).toBe(true);
     h.coord.enqueueVoice("second");
     await h.tick();
     expect(h.injected).toEqual(["first"]); // still gated by the open turn
     h.coord.turnClosed();
     await h.tick();
     expect(h.injected).toEqual(["first", "second"]);
+    expect(h.coord.isBusy).toBe(false);
   });
 
   it("a turn typed in the terminal (not ours) also gates injection until it closes", async () => {
     const h = harness();
     h.coord.turnOpened("user typed this"); // not one of ours
-    expect(h.coord.isWorking()).toBe(true);
+    expect(h.coord.isBusy).toBe(true);
     h.coord.enqueueVoice("queued");
     await h.tick();
     expect(h.injected).toEqual([]); // gated
     h.coord.turnClosed();
     await h.tick();
     expect(h.injected).toEqual(["queued"]);
+  });
+
+  it("two UserPromptSubmit but one Stop STILL releases the gate (the merged/glued-prompt bug)", async () => {
+    // The incident: a glued prompt fired two opens but one close. A counter would be left at 1 and the gate
+    // (and the old lamp) would stick. As a LEVEL, a single Stop means idle no matter how many opens preceded.
+    const h = harness();
+    h.coord.turnOpened("Я вот смышто это к ничему.");
+    h.coord.turnOpened("Я вот смышто это к ничему.Mluvím česky, ty vole."); // merged sibling, second open
+    h.coord.enqueueVoice("next");
+    await h.tick();
+    expect(h.injected).toEqual([]); // gated while busy
+    h.coord.turnClosed(); // ONE Stop
+    await h.tick();
+    expect(h.injected).toEqual(["next"]); // gate released — not stuck
+    expect(h.coord.isBusy).toBe(false);
   });
 
   it("interrupt drops open turns and drains the queue", async () => {
@@ -77,9 +95,9 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     await h.tick();
     expect(h.injected).toEqual([]);
     h.coord.interrupt();
+    expect(h.coord.isBusy).toBe(false); // the lamp can idle immediately on Esc
     await h.tick();
     expect(h.injected).toEqual(["after"]);
-    expect(h.coord.isWorking()).toBe(true);
   });
 
   it("interruptWith jumps the queue", async () => {
@@ -96,7 +114,8 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("a");
     await h.tick();
     h.coord.reset();
-    expect(h.coord.isWorking()).toBe(false);
+    expect(h.coord.hasInFlight).toBe(false);
+    expect(h.coord.isBusy).toBe(false);
     expect(h.coord.currentVoicePrompt).toBeUndefined();
   });
 
@@ -110,7 +129,7 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     expect(h.injected).toEqual(["flaky", "next"]);
   });
 
-  it("reaps a stale OPEN turn past the TTL so the gate can release", async () => {
+  it("reaps a stale OPEN turn past the TTL so the gate can release (missed Stop backstop)", async () => {
     const h = harness();
     h.coord.turnOpened("hung");
     h.coord.enqueueVoice("waiting");
@@ -126,7 +145,7 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     const h = harness();
     h.coord.enqueueVoice("stuck");
     await h.tick();
-    expect(h.coord.isWorking()).toBe(true); // in-flight, no turn-open
+    expect(h.coord.hasInFlight).toBe(true); // in-flight, no turn-open
     h.advance(TTL + 1);
     h.coord.enqueueVoice("after");
     await h.tick();
@@ -143,6 +162,6 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("status"); // same text, new token
     await h.tick();
     expect(h.injected.filter((t) => t === "status")).toHaveLength(2);
-    expect(h.coord.isWorking()).toBe(true);
+    expect(h.coord.hasInFlight).toBe(true);
   });
 });

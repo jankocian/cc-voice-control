@@ -10,7 +10,6 @@ import type {
   BridgeEnvelope,
   BrowserToDaemonEvent,
   DaemonToBrowserEvent,
-  HistoryTurn,
   InjectMode,
   SessionSignal,
   SessionState,
@@ -36,24 +35,33 @@ import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
-import { dropSessionAnnouncement, type ProjectedTurn, resolveVoiceReply } from "./transcript-projection.js";
+import {
+  dropSessionAnnouncement,
+  isPaneWorking,
+  type ProjectedTurn,
+  resolveVoiceReply
+} from "./transcript-projection.js";
 import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
 type Audio = { audioBase64: string; mimeType: string };
 
-// A spoken prompt we injected, tracked until its reply is spoken. `id`/`ts` render the optimistic row shown
-// before the prompt lands in the transcript; `opened` is set on its UserPromptSubmit (confirming the turn is
-// ours); `userUuid`/`userTs` bind it to its native user record (identity for the reply match + the anchor
-// for which steps belong to this turn); `openOffset` is the transcript byte position just before the prompt,
-// captured at turn-open so the whole turn — however large — is always read back in full (see voiceReadFloor).
+// A spoken prompt we injected, tracked ONLY until its reply is spoken — reply bookkeeping, never display.
+// The phone view is a pure projection of the transcript now (a just-spoken message shows via the phone's
+// own local stt_echo until the projection includes it), so this carries nothing for rendering. `opened` is
+// set on its UserPromptSubmit (confirming the turn is ours); `userUuid`/`userTs` bind it to its native user
+// record (identity for the reply match + the anchor for which steps belong to this turn); `openOffset` is
+// the transcript byte position just before the prompt, captured at turn-open so the whole turn — however
+// large — is always read back in full (see voiceReadFloor).
 type PendingVoice = {
-  id: string;
   text: string;
-  ts: number;
   opened?: boolean;
   userUuid?: string;
   userTs?: number;
+  // The native parentUuid of the user record this entry bound to. Kept across a re-bind (when that record
+  // falls off the active branch) so the entry only re-binds to a SIBLING — the glued survivor shares the
+  // orphan's parent, while an unrelated later turn does not — never to a coincidental look-alike.
+  userParentUuid?: string;
   openOffset?: number;
 };
 
@@ -164,10 +172,14 @@ export class VoiceDaemon {
   private pairingOpen: boolean | null = null;
   private pairingTimer?: ReturnType<typeof setTimeout>;
 
-  // The voice injection queue + idle-gate (inject one spoken prompt at a time while Claude is idle) and
-  // working-state tracker. It does NOT touch conversation content — the transcript drives that. See
-  // turn-coordinator.ts.
+  // The voice injection queue + idle-gate (inject one spoken prompt at a time while Claude is idle). It
+  // does NOT own the working lamp — that's DERIVED from the transcript (see isWorking) so it self-heals and
+  // can never stick. See turn-coordinator.ts.
   private readonly turns: TurnCoordinator;
+
+  // Last derived working state, cached so buildThreadInfo (and any registerThread caller) reflects it
+  // without re-reading the transcript. Authoritatively recomputed in emitStatus.
+  private lastWorking = false;
 
   // The ONLY state we keep of our own; everything the phone shows is projected from Claude's transcript.
   //  - `audio`: synthesized reply audio keyed by native reply uuid, for tap-to-play + reconnect.
@@ -651,12 +663,12 @@ export class VoiceDaemon {
     this.queueVoice(transcript, mode);
   }
 
-  // Queue a spoken prompt: track it (so we speak its reply + show it as an optimistic row until it lands in
-  // the transcript — possibly minutes later if Claude is busy), then hand it to the injection queue. This
-  // is the only conversation content we originate; everything else is projected from the transcript.
+  // Queue a spoken prompt: track it (so we know to speak its reply when it lands), then hand it to the
+  // injection queue. Tracking is reply bookkeeping only — the phone shows the words instantly via its own
+  // stt_echo (sent from handleAudio), and the conversation itself is projected from the transcript.
   private queueVoice(text: string, mode: InjectMode): void {
-    if (mode === "interrupt") this.pending.length = 0; // Esc dropped the backlog → its optimistic rows go too
-    this.pending.push({ id: randomUUID(), text, ts: Date.now() });
+    if (mode === "interrupt") this.pending.length = 0; // Esc dropped the backlog → its reply tracking goes too
+    this.pending.push({ text });
     while (this.pending.length > MAX_PENDING_VOICE) this.pending.shift();
     if (mode === "interrupt") this.turns.interruptWith(text);
     else this.turns.enqueueVoice(text);
@@ -696,19 +708,25 @@ export class VoiceDaemon {
 
   // ---- transcript projection (the conversation source of truth) --------------
 
-  // Project the transcript into the phone thread and send it. Called on every turn event + on sync, so the
-  // phone always converges to ground truth. Pure read; never throws into the caller.
+  // Project the transcript into the phone thread and send it, then refresh the derived working lamp from
+  // the same ground truth. Called on every turn event + on sync, so the phone's view AND its lamp always
+  // converge together. Pure read; never throws into the caller.
   private projectAndEmit(): void {
-    this.sendToBrowser(this.historyFrom(this.projectedNow()));
+    const turns = this.projectedNow();
+    this.sendToBrowser(this.historyFrom(turns));
+    this.emitStatus(turns); // reuse the same projection — no second file read
   }
 
-  private projectedNow(): ProjectedTurn[] {
+  // Project the transcript for display/reply resolution. `captureFloor` advances `lastEof` — the byte
+  // anchor the NEXT turn-open captures as its read floor (see bindVoicePrompt). Only the canonical display
+  // path captures it; a pure read (the working-lamp derivation) must pass false, or a read landing between
+  // a prompt being written and bindVoicePrompt would push the floor PAST the prompt and lose the reply.
+  private projectedNow(captureFloor = true): ProjectedTurn[] {
     if (!this.lastTranscriptPath) return [];
     // Read from the start of the oldest open voice turn (so its prompt is always present for the reply
-    // match, however large the turn) or the tail (recent history for the phone). Remember the file end as
-    // the read floor we'll capture at the next turn-open.
+    // match, however large the turn) or the tail (recent history for the phone).
     const { turns, eof } = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS, this.voiceReadFloor());
-    this.lastEof = eof;
+    if (captureFloor) this.lastEof = eof;
     // Hide the start-skill's "voice remote is live" QR/URL reply — it's noise on the phone (and must
     // never be spoken). Matched on our own session URL, so it's prose-independent. See the helper.
     return dropSessionAnnouncement(
@@ -742,49 +760,89 @@ export class VoiceDaemon {
     const entry = this.pending.find((p) => !p.opened && p.text.trim() === text);
     if (entry) {
       entry.opened = true;
-      entry.openOffset = this.lastEof;
+      // `lastEof` is the size as of our previous read — just before this prompt. On the VERY first turn
+      // after a cold start (no projection has run yet), it's undefined; fall back to 0 so the read still
+      // includes the prompt (reading from the start) rather than the tail, which a huge turn could outgrow.
+      entry.openOffset = this.lastEof ?? 0;
     }
   }
 
-  // Bind each opened-but-unbound voice entry to its native user record (newest matching one not already
-  // claimed), capturing its uuid + timestamp. Runs on every projection, so a prompt whose record wasn't
-  // flushed at turn-open binds as soon as it appears. Once bound, the entry shows as the native row, not an
-  // optimistic one.
+  // Bind each opened-but-unbound voice entry to its native user record, capturing its uuid + timestamp.
+  // Runs on every projection, so a prompt whose record wasn't flushed at turn-open binds as soon as it
+  // appears.
+  //
+  // Two tolerances make the merged/glued-prompt case work (Claude Code combined two fast utterances "A" and
+  // "B" into one on-path "A.B" record, leaving "A" a dead/orphaned sibling the active branch drops):
+  //   1. A binding whose native record fell OFF the active branch (the entry bound to "A" at turn-open,
+  //      before "A.B" existed, then "A" became an orphan) is released so it can re-bind — but the orphan's
+  //      `userParentUuid` is KEPT, so the re-bind only accepts a SIBLING.
+  //   2. The match is substring-tolerant — the native turn CONTAINS the injected text — so the entry
+  //      re-binds to the surviving "A.B" ("A.B" contains "A"). The reply then resolves and is spoken once.
   private bindPending(turns: ProjectedTurn[]): void {
+    const present = new Set(turns.map((t) => t.uuid));
+    for (const entry of this.pending) {
+      if (entry.userUuid && !present.has(entry.userUuid)) entry.userUuid = undefined; // re-bind; keep parent hint
+    }
     const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
+    const claim = (entry: PendingVoice, t: ProjectedTurn): void => {
+      entry.userUuid = t.uuid;
+      entry.userTs = t.timestamp;
+      entry.userParentUuid = t.parentUuid;
+      claimed.add(t.uuid);
+    };
+    // Pass 1 — EXACT match (newest unclaimed). Always wins over a substring match, so two distinct prompts
+    // ("status" and "status of the build") each take their own record rather than the shorter stealing the
+    // longer's turn.
     for (const entry of this.pending) {
       if (!entry.opened || entry.userUuid) continue;
       for (let i = turns.length - 1; i >= 0; i--) {
         const t = turns[i];
-        if (t.role === "user" && t.text.trim() === entry.text.trim() && !claimed.has(t.uuid)) {
-          entry.userUuid = t.uuid;
-          entry.userTs = t.timestamp;
-          claimed.add(t.uuid);
+        if (t.role === "user" && !claimed.has(t.uuid) && t.text.trim() === entry.text.trim()) {
+          claim(entry, t);
           break;
         }
       }
     }
+    // Pass 2 — SUBSTRING, for the glued survivor (no exact match for injected "A"; the on-path "A.B" contains
+    // it). On a RE-BIND (the entry bound before, so `userTs` is set, kept across the re-bind), the survivor
+    // is DETERMINISTICALLY the orphan's SIBLING: the active branch is a single chain, so it has exactly ONE
+    // on-path user turn whose parentUuid equals the orphan's (compared null-normalized, so a root orphan's
+    // sibling is the lone root-level turn). We match that turn alone — an unrelated later look-alike sits
+    // deeper in the chain with a different parent and is never a candidate, no timestamp/ordering heuristic
+    // needed. The text-contains check still applies, so a REWIND (the sibling is a different prompt that
+    // doesn't contain the orphan's words) leaves the entry unbound — the abandoned prompt is never spoken.
+    // A FIRST bind (never bound, no orphan) takes the newest containing turn (the survivor just appeared).
+    for (const entry of this.pending) {
+      if (!entry.opened || entry.userUuid) continue;
+      const et = entry.text.trim();
+      const rebinding = entry.userTs !== undefined;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const t = turns[i];
+        if (t.role !== "user" || claimed.has(t.uuid) || !t.text.trim().includes(et)) continue;
+        if (rebinding && (t.parentUuid ?? null) !== (entry.userParentUuid ?? null)) continue;
+        claim(entry, t);
+        break;
+      }
+    }
   }
 
-  // Build the `history` snapshot: native rows from the transcript, plus an optimistic row for each voice
-  // prompt not yet visible there (unbound) — the phone orders by native timestamp, so they sort newest.
-  // The snapshot is the complete, deduped, ordered thread; the phone just displays it.
+  // Build the `history` snapshot — a PURE PROJECTION of the transcript's active branch, nothing else. The
+  // phone reconciles its instant stt_echo against this (dropping the echo once the real row appears), so the
+  // daemon never emits a daemon-side row that could orphan. We still bind pending voice prompts here, but
+  // only for reply resolution (see bindPending) — they are never rendered.
   private historyFrom(turns: ProjectedTurn[]): Extract<DaemonToBrowserEvent, { type: "history" }> {
     this.bindPending(turns);
-    const rows: HistoryTurn[] = [
-      ...turns.map((t) => ({
+    return {
+      type: "history",
+      turns: turns.map((t) => ({
         requestId: t.uuid,
         timestamp: t.timestamp,
         role: t.role,
         text: t.text,
         hasAudio: this.audio.has(t.uuid),
         interim: t.interim
-      })),
-      ...this.pending
-        .filter((p) => p.userUuid === undefined)
-        .map((p) => ({ requestId: p.id, timestamp: p.ts, role: "user" as const, text: p.text, hasAudio: false }))
-    ];
-    return { type: "history", turns: rows };
+      }))
+    };
   }
 
   // "read every step" is on AND a VOICE turn is in progress → speak its newly-appeared steps as they land
@@ -844,6 +902,7 @@ export class VoiceDaemon {
     await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
     const turns = this.projectedNow();
     this.sendToBrowser(this.historyFrom(turns));
+    this.emitStatus(turns); // the reply has flushed → the lamp flips to idle from the transcript
     this.speakReadyVoiceReplies(turns);
   }
 
@@ -962,7 +1021,7 @@ export class VoiceDaemon {
     return {
       threadId: this.init.threadId,
       label: this.sealedLabel, // sealed (EncBlob): the worker stores/relays it without reading it
-      state: this.turns.isWorking() ? "working" : "idle",
+      state: this.lastWorking ? "working" : "idle", // cached from the last emitStatus (transcript-derived)
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
@@ -1000,13 +1059,25 @@ export class VoiceDaemon {
 
   // ---- helpers ---------------------------------------------------------------
 
-  // Status carries this thread's id (so the phone files it correctly); a thread_register rides along to
-  // keep the roster's state/listening in lockstep.
-  private emitStatus(): void {
+  // Working = our injection hasn't landed yet (the gap before the transcript catches up), OR the pane is
+  // mid-turn (the inject gate's `isBusy`) AND the transcript's active branch shows the newest user turn
+  // still awaiting its final reply. The AND is the whole robustness story: a missed Stop leaves `isBusy`
+  // stuck, but the transcript going idle (a final reply landed) still flips it; an interrupt clears
+  // `isBusy`, so the lamp idles at once; and the transcript can't read "working" past a real reply.
+  private isWorking(turns: ProjectedTurn[]): boolean {
+    return this.turns.hasInFlight || (this.turns.isBusy && isPaneWorking(turns));
+  }
+
+  // Status carries this thread's id (so the phone files it correctly); a thread_register rides along to keep
+  // the roster's state/listening in lockstep. Pass the turns already projected this cycle to avoid a
+  // re-read; callers without them fall back to a pure read (no floor move).
+  private emitStatus(turns?: ProjectedTurn[]): void {
+    const working = this.isWorking(turns ?? this.projectedNow(false));
+    this.lastWorking = working;
     const state: SessionState = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,
-      state: this.turns.isWorking() ? "working" : "idle"
+      state: working ? "working" : "idle"
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.turns.currentVoicePrompt } });
     // Keep the roster's state/listening in lockstep with status (idle↔working, listening

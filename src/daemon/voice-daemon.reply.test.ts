@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
-import { synthesizeSpeech } from "./openai.js";
+import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { TAIL_BYTES } from "./transcript-reader.js";
 import { VoiceDaemon } from "./voice-daemon.js";
 
@@ -273,6 +273,66 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     const spoken = await waitForSpeak();
     expect(spoken).toContain(ANSWER); // resolved via the floor — the tail alone couldn't see U
     expect(await waitForTtsRequestId()).toBe("ANSWER");
+
+    daemon.stop();
+  }, 20000);
+
+  it("speaks the reply ONCE for a merged/glued prompt (the 18s-apart incident), projecting only the survivor", async () => {
+    // Two utterances spoken in quick succession; Claude Code MERGES them: the transcript holds an orphan
+    // "A" record and the consumed, glued "A.B" record (same parent), and Claude answers only A.B. Two
+    // UserPromptSubmit fire but one Stop. The active-branch projection drops the orphan; the voice entry
+    // re-binds from the orphan to the survivor; the reply is synthesized exactly once.
+    const transcript = join(dataDir, "transcript.jsonl");
+    const parented = (uuid: string, ts: string, text: string, parentUuid: string) =>
+      `${JSON.stringify({ type: "user", uuid, parentUuid, timestamp: ts, promptSource: "typed", message: { role: "user", content: text } })}\n`;
+    const reply = (uuid: string, ts: string, text: string, parentUuid: string) =>
+      `${JSON.stringify({ type: "assistant", uuid, parentUuid, timestamp: ts, message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } })}\n`;
+
+    // A prior reply: the daemon reads the file once (turn-progress) → records the floor before our prompts.
+    writeFileSync(transcript, reply("P", "2026-06-22T23:01:00.000Z", "ready", "ROOT"));
+
+    const daemon = new VoiceDaemon({
+      config: {
+        openaiApiKey: "k",
+        openaiVoice: "marin",
+        ttsModel: "m",
+        sttModel: "s",
+        bridgeUrl: `http://127.0.0.1:${bridgePort}`
+      },
+      surface: "SURF",
+      threadId: "SURF",
+      secret: "sek",
+      daemonKey: "dk",
+      sessionId: "sid",
+      browserUrl: "https://voice.example.com/s/sek"
+    });
+    await daemon.start();
+    for (let i = 0; i < 50 && !sendToDaemon; i++) await sleep(20);
+    const port = JSON.parse(readFileSync(join(dataDir, "runtime", "SURF.json"), "utf8")).port as number;
+    await post(port, "/turn-progress", { transcriptPath: transcript }); // floor anchor at end of "ready"
+
+    // Both utterances are transcribed + tracked (the daemon injects the first, queues the second).
+    vi.mocked(transcribeAudio).mockResolvedValueOnce("первая фраза").mockResolvedValueOnce("Mluvím česky");
+    await sendToDaemon?.({ type: "submit_audio", audioBase64: "AAA", mimeType: "audio/webm", mode: "queue" });
+    await sleep(120);
+    await sendToDaemon?.({ type: "submit_audio", audioBase64: "AAA", mimeType: "audio/webm", mode: "queue" });
+    await sleep(120);
+
+    // The merge: orphan "A", then the glued "A.B" (same parent P), then the answer under A.B.
+    appendFileSync(transcript, parented("A", "2026-06-22T23:03:57.000Z", "первая фраза", "P"));
+    await post(port, "/turn-open", { transcriptPath: transcript, prompt: "первая фраза", permissionMode: "default" });
+    appendFileSync(transcript, parented("AB", "2026-06-22T23:04:15.000Z", "первая фраза Mluvím česky", "P"));
+    await post(port, "/turn-open", {
+      transcriptPath: transcript,
+      prompt: "первая фраза Mluvím česky",
+      permissionMode: "default"
+    });
+    appendFileSync(transcript, reply("R", "2026-06-22T23:04:33.000Z", "Smazáno.", "AB"));
+    await post(port, "/turn-close", { transcriptPath: transcript });
+
+    const spoken = await waitForSpeak();
+    expect(spoken).toEqual(["Smazáno."]); // exactly once — never the orphan, never twice
+    expect(await waitForTtsRequestId()).toBe("R"); // keyed to the surviving turn's reply
 
     daemon.stop();
   }, 20000);
