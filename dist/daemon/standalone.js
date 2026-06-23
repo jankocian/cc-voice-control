@@ -19792,6 +19792,7 @@ class TurnCoordinator {
 
 // src/daemon/voice-daemon.ts
 var RECONNECT_DELAY_MS = 1500;
+var MAX_HANDLED_SUBMITS = 200;
 var BRIDGE_PING_INTERVAL_MS = 25000;
 var CMUX_HEALTH_INTERVAL_MS = 5000;
 var PAIRING_WINDOW_MS = 90000;
@@ -19832,6 +19833,7 @@ class VoiceDaemon {
   seen = new Set;
   floor = 0;
   seeded = false;
+  handledSubmits = new Set;
   transcriptWatcher;
   watchedPath;
   syncDebounce;
@@ -20052,6 +20054,9 @@ class VoiceDaemon {
   async handleBrowserEvent(event) {
     switch (event.type) {
       case "submit_audio":
+        this.sendToBrowser({ type: "submit_ack", requestId: event.requestId });
+        if (!rememberBounded(this.handledSubmits, event.requestId, MAX_HANDLED_SUBMITS))
+          return;
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
@@ -20410,6 +20415,14 @@ function capForSpeech(text) {
 }
 function errText(error51) {
   return error51 instanceof Error ? error51.message : String(error51);
+}
+function rememberBounded(seen, id, cap) {
+  if (seen.has(id))
+    return false;
+  seen.add(id);
+  if (seen.size > cap)
+    seen.delete(seen.values().next().value);
+  return true;
 }
 
 // src/daemon/standalone.ts
