@@ -163,6 +163,7 @@ function PagerDemo() {
     duration: 0,
     playableIds: new Set<string>(),
     audioStatus: new Map<string, "pending" | "failed">(),
+    pendingPlayId: null,
     onPlay: noop,
     onReplay: noop,
     onSeek: noop

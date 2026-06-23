@@ -41,9 +41,9 @@ export function MessageBubble({
         {children && <div className="mb-2">{children}</div>}
         {body &&
           (isUser ? (
-            <p className="whitespace-pre-wrap break-words">{body}</p>
+            <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{body}</p>
           ) : (
-            <div className="break-words">{renderMarkdown(body)}</div>
+            <div className="[overflow-wrap:anywhere]">{renderMarkdown(body)}</div>
           ))}
       </div>
 

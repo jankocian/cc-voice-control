@@ -38,6 +38,8 @@ export type Playback = {
   playableIds: ReadonlySet<string>;
   // Per-reply audio lifecycle: "pending" (synthesizing) / "failed" (retryable). Absent once playable.
   audioStatus: ReadonlyMap<string, "pending" | "failed">;
+  // requestId for which a tap-to-play fetch is in flight (audio requested but not yet arrived).
+  pendingPlayId: string | null;
   speaking: boolean;
   playbackRate: number;
   formattedRate: string;
@@ -138,9 +140,10 @@ export function usePlayback({
   onAutoReplyFinishedRef.current = onAutoReplyFinished;
 
   // The requestId of a tap-to-play whose audio we've requested but don't have yet. When
-  // that audio lands in attachAudio we play it immediately and clear this. A ref (not
-  // state) so attachAudio reads the latest value without re-subscribing.
+  // that audio lands in attachAudio we play it immediately and clear this. The ref is
+  // the fast-path gate for attachAudio; the state drives the loading spinner in the UI.
   const pendingPlayIdRef = useRef<string | null>(null);
+  const [pendingPlayId, setPendingPlayId] = useState<string | null>(null);
 
   player.playbackRate = playbackRate;
 
@@ -267,6 +270,7 @@ export function usePlayback({
       // unlock already happened on first tap; pending playback resumes the iOS session in
       // attachAudio → playEntry.
       pendingPlayIdRef.current = requestId;
+      setPendingPlayId(requestId);
       onRequestAudioRef.current?.(requestId);
     },
     [player, loadEntry, startPlayback]
@@ -278,6 +282,7 @@ export function usePlayback({
         // No cached bytes yet (a history row). Fetch on demand; attachAudio plays it from
         // the start since a freshly-loaded clip begins at 0.
         pendingPlayIdRef.current = requestId;
+        setPendingPlayId(requestId);
         onRequestAudioRef.current?.(requestId);
         return;
       }
@@ -323,6 +328,7 @@ export function usePlayback({
       // same id doesn't re-trigger.
       if (pendingPlayIdRef.current === requestId) {
         pendingPlayIdRef.current = null;
+        setPendingPlayId(null);
         playEntry(requestId);
         return;
       }
@@ -401,7 +407,10 @@ export function usePlayback({
         setPosition(0);
         setDuration(0);
       }
-      if (pendingPlayIdRef.current === requestId) pendingPlayIdRef.current = null;
+      if (pendingPlayIdRef.current === requestId) {
+        pendingPlayIdRef.current = null;
+        setPendingPlayId(null);
+      }
       audioByRequest.current.delete(requestId);
       clearAudioStatus(requestId);
       setPlayableIds((prev) => {
@@ -425,6 +434,7 @@ export function usePlayback({
     duration,
     playableIds,
     audioStatus,
+    pendingPlayId,
     speaking,
     playbackRate,
     formattedRate,

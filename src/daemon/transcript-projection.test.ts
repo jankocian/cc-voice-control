@@ -347,8 +347,12 @@ describe("dropSessionAnnouncement — hide the start-skill QR/URL reply", () => 
 describe("projectTurns — interactive AskUserQuestion", () => {
   const askRec = (uuid: string, ts: string, toolUseId: string, questions: unknown): TranscriptRecord =>
     asst(uuid, ts, [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }], "tool_use");
-  const answerRec = (uuid: string, ts: string, toolUseId: string): TranscriptRecord =>
-    user(uuid, ts, [{ type: "tool_result", tool_use_id: toolUseId, content: "answered" }], { promptSource: "typed" });
+  // A real answered AskUserQuestion: the user record carries BOTH the tool_result (its tool_use_id flips the
+  // question to answered) AND toolUseResult.answers (the chosen answer, which we project as a "you" turn).
+  const answerRec = (uuid: string, ts: string, toolUseId: string, answer = "Mixing"): TranscriptRecord =>
+    user(uuid, ts, [{ type: "tool_result", tool_use_id: toolUseId, content: "answered" }], {
+      toolUseResult: { answers: { "Which audio strategy?": answer } }
+    });
   const Q = [
     {
       question: "Which audio strategy?",
@@ -378,13 +382,26 @@ describe("projectTurns — interactive AskUserQuestion", () => {
     expect(turns[0].text).toContain("Which audio strategy?"); // spoken rendering present for TTS
   });
 
-  it("marks the question answered once its tool_result lands", () => {
+  it("marks the question answered AND projects the answer as a 'you' turn (drawn from the real transcript)", () => {
     const turns = projectTurns([
       askRec("q1", "2026-06-21T15:00:00.000Z", "tu_1", Q),
-      answerRec("r1", "2026-06-21T15:00:30.000Z", "tu_1")
+      answerRec("r1", "2026-06-21T15:00:30.000Z", "tu_1", "Mixing")
     ]);
-    expect(turns).toHaveLength(1); // the tool_result itself is not a conversational turn
+    expect(turns).toHaveLength(2); // the question card + the user's answer (no longer a separate optimistic row)
     expect(turns[0].question?.answered).toBe(true);
+    expect(turns[1]).toMatchObject({ role: "user", text: "Mixing", interim: false }); // logged → two checks, floored by /clear
+  });
+
+  it("does NOT project a rejected/clarified question as an answer (no answers map)", () => {
+    const turns = projectTurns([
+      askRec("q1", "2026-06-21T15:00:00.000Z", "tu_1", Q),
+      // a rejection: tool_result present (flips answered) but toolUseResult is a string, not an answers map
+      user("r1", "2026-06-21T15:00:30.000Z", [{ type: "tool_result", tool_use_id: "tu_1", content: "rejected" }], {
+        toolUseResult: "User rejected tool use"
+      })
+    ]);
+    expect(turns).toHaveLength(1); // only the question card — no phantom "you" answer bubble
+    expect(turns.some((t) => t.role === "user")).toBe(false);
   });
 
   it("a question does NOT end the working state — the pane stays working until the real conclusion lands", () => {
@@ -419,10 +436,10 @@ describe("projectTurns — interactive AskUserQuestion", () => {
     expect(turns.some((t) => t.question)).toBe(false);
   });
 
-  it("questionSpeech letters the options and omits Claude Code's appended rows", () => {
+  it("questionSpeech letters the options, reads their descriptions, and omits Claude Code's appended rows", () => {
     const spoken = questionSpeech(Q);
-    expect(spoken).toContain("A: Mixing");
-    expect(spoken).toContain("B: Pause");
+    expect(spoken).toContain("A: Mixing, over music"); // label AND description read aloud (user can't see the screen)
+    expect(spoken).toContain("B: Pause"); // no description → label only, no trailing comma
     expect(spoken).not.toContain("Type something");
   });
 });

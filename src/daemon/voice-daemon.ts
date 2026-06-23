@@ -725,7 +725,16 @@ export class VoiceDaemon {
       if (result === "sent") {
         // The answer lands as a tool_result, not a user row or a UserPromptSubmit, so the phone's "sent ✓"
         // path never fires — echo an accepted prompt_status with the answer text so the mic spinner clears
-        // (and the answer shows as a "you" row). Then re-project so the card flips to answered.
+        // (and the answer shows as a "you" row, reconciled to the logged answer the transcript projects).
+        // Flip the overlay to answered NOW so the lamp leaves "awaiting" immediately (Claude is processing the
+        // answer = working), instead of lingering until the transcript flushes ~1s later; the projection then
+        // takes over (the question card's answered state + the answer "you" turn).
+        if (this.pendingQuestionOverlay?.question) {
+          this.pendingQuestionOverlay = {
+            ...this.pendingQuestionOverlay,
+            question: { ...this.pendingQuestionOverlay.question, answered: true }
+          };
+        }
         this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
         this.syncFromTranscript();
         return;

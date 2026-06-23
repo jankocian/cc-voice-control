@@ -46,6 +46,10 @@ export type TranscriptRecord = {
   isMeta?: boolean;
   promptSource?: string; // "typed" | "queued" | "system" | undefined
   message?: { role?: string; content?: unknown; stop_reason?: string | null };
+  // Present on the user record that ANSWERS an AskUserQuestion: `answers` maps each question to the chosen/
+  // typed response. This is how the answer reaches the transcript (the user record is a tool_result, not a
+  // real prompt) — we project it as a "you" turn so the answer is real-log-sourced, not a separate row.
+  toolUseResult?: { answers?: unknown };
 };
 
 // Real user input is `typed` (terminal OR our voice injection) or `queued` (a prompt Claude queued while
@@ -155,6 +159,18 @@ export function questionContentSig(questions: Question[]): string {
   return questions.map((q) => `${q.question}::${q.options.map((o) => o.label).join(",")}`).join("||");
 }
 
+// An answered AskUserQuestion: Claude writes a user record carrying `toolUseResult.answers` (question ->
+// chosen/typed answer) when the user responds. Project that as the user's answer text, so the answer is drawn
+// from the real transcript (deduped, "logged" two-check, floored by /clear) instead of a separate optimistic
+// row that never reconciles. A rejection/clarification has no `answers` object → yields nothing (not shown).
+function extractQuestionAnswer(r: TranscriptRecord): string | undefined {
+  if (roleOf(r) !== "user" || r.isSidechain) return undefined;
+  const answers = r.toolUseResult?.answers;
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) return undefined;
+  const values = Object.values(answers).filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  return values.length > 0 ? values.join(", ") : undefined;
+}
+
 // tool_use_ids that already have a tool_result anywhere in the records — i.e. questions the user answered.
 function answeredToolUseIds(records: TranscriptRecord[]): Set<string> {
   const ids = new Set<string>();
@@ -177,7 +193,11 @@ function answeredToolUseIds(records: TranscriptRecord[]): Set<string> {
 // in the transcript, so we never read them.
 export function questionSpeech(questions: Question[]): string {
   const one = (q: Question) => {
-    const opts = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}`).join(". ");
+    // Read each option's label AND its description (when present) — the user usually can't see the screen, so
+    // the description is the context they need to choose.
+    const opts = q.options
+      .map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}${o.description ? `, ${o.description}` : ""}`)
+      .join(". ");
     return opts ? `${q.question} Options — ${opts}.` : q.question;
   };
   if (questions.length === 1) return `Claude is asking: ${one(questions[0])}`;
@@ -267,6 +287,12 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
     if (!r.uuid) continue;
     const ts = toEpoch(r.timestamp);
     const parentUuid = r.parentUuid ?? undefined;
+    const answer = extractQuestionAnswer(r);
+    if (answer !== undefined) {
+      // The user's reply to an AskUserQuestion, drawn from the real transcript — a normal "you" turn.
+      turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "user", text: answer, interim: false });
+      continue;
+    }
     if (isRealUserTurn(r)) {
       turns.push({
         uuid: r.uuid,

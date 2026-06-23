@@ -80,7 +80,7 @@ export function renderMarkdown(text: string): ReactNode {
       if (i < last) seg = seg.replace(/\n\s*$/, "");
       if (!seg) continue;
       out.push(
-        <span key={key} className="whitespace-pre-wrap break-words">
+        <span key={key} className="whitespace-pre-wrap [overflow-wrap:anywhere]">
           {renderInline(seg, key)}
         </span>
       );
