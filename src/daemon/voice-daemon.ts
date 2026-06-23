@@ -394,7 +394,11 @@ export class VoiceDaemon {
               // approval → "awaiting"); "idle" = idle_prompt (60s+ idle → a floor that clears a stuck-busy
               // lamp if a Stop was dropped). emitStatus re-projects, so the transcript still has final say.
               const { kind } = JSON.parse(body || "{}") as { kind?: string };
-              if (kind === "permission") this.turns.notePermissionPrompt();
+              // A pending question already shows "awaiting" from the transcript/overlay, and clears itself the
+              // instant the answer lands. Don't ALSO arm the sticky permission flag for it — that flag only
+              // clears on a later edge (Stop / next tool), so it would leave the lamp stuck on "needs you"
+              // after you answered. Arm it only for a genuine tool-permission prompt (no open question).
+              if (kind === "permission" && !pendingQuestion(this.projectedNow())) this.turns.notePermissionPrompt();
               else if (kind === "idle") this.turns.forceIdle();
             } else {
               // Stop: the turn ended. Release the idle-gate (so a queued voice prompt can inject) and re-sync.
@@ -725,16 +729,8 @@ export class VoiceDaemon {
       if (result === "sent") {
         // The answer lands as a tool_result, not a user row or a UserPromptSubmit, so the phone's "sent ✓"
         // path never fires — echo an accepted prompt_status with the answer text so the mic spinner clears
-        // (and the answer shows as a "you" row, reconciled to the logged answer the transcript projects).
-        // Flip the overlay to answered NOW so the lamp leaves "awaiting" immediately (Claude is processing the
-        // answer = working), instead of lingering until the transcript flushes ~1s later; the projection then
-        // takes over (the question card's answered state + the answer "you" turn).
-        if (this.pendingQuestionOverlay?.question) {
-          this.pendingQuestionOverlay = {
-            ...this.pendingQuestionOverlay,
-            question: { ...this.pendingQuestionOverlay.question, answered: true }
-          };
-        }
+        // (and the answer shows as a "you" row, reconciled to the logged answer the transcript projects). The
+        // "awaiting" lamp clears on its own once the transcript flushes the answer (the overlay yields).
         this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
         this.syncFromTranscript();
         return;

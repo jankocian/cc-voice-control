@@ -5,6 +5,7 @@ import {
   type ProjectedTurn,
   pendingQuestion,
   projectTurns,
+  questionContentSig,
   questionSpeech,
   selectActiveBranch,
   type TranscriptRecord
@@ -434,6 +435,18 @@ describe("projectTurns — interactive AskUserQuestion", () => {
     ]);
     expect(turns.map((t) => t.uuid)).toEqual(["u1", "a1"]); // broken record skipped, conversation intact
     expect(turns.some((t) => t.question)).toBe(false);
+  });
+
+  it("questionContentSig distinguishes questions that share a prompt but differ in options/descriptions/header", () => {
+    const base = [{ question: "Pick one?", options: [{ label: "A" }, { label: "B" }] }];
+    expect(questionContentSig(base)).toBe(questionContentSig(base)); // stable for the same content (overlay ↔ transcript)
+    // same prompt + labels, but different descriptions / header / multiSelect → different identity (no false yield)
+    expect(questionContentSig(base)).not.toBe(
+      questionContentSig([{ question: "Pick one?", options: [{ label: "A", description: "x" }, { label: "B" }] }])
+    );
+    expect(questionContentSig(base)).not.toBe(
+      questionContentSig([{ question: "Pick one?", header: "H", options: [{ label: "A" }, { label: "B" }] }])
+    );
   });
 
   it("questionSpeech letters the options, reads their descriptions, and omits Claude Code's appended rows", () => {
