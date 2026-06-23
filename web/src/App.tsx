@@ -377,6 +377,14 @@ export function App({ session }: { session: Session }) {
     if (activeConnected && !prevActiveConnectedRef.current) retryInflightRef.current();
     prevActiveConnectedRef.current = activeConnected;
   }, [activeConnected]);
+
+  // The flip side of the nudge: while we're disconnected from the in-flight send's daemon, an ALREADY-ACKED
+  // send has lost its only remaining spinner-clear (the watchdog stopped on ack; the daemon owing us
+  // prompt_status/history is gone). Release the spinner so the mic frees up — un-acked sends are untouched
+  // (the watchdog still owns them). onConnectionLost is a no-op unless there's an acked in-flight send.
+  useEffect(() => {
+    if (!connected || !activeConnected) voice.onConnectionLost();
+  }, [connected, activeConnected, voice.onConnectionLost]);
   // Bridge the recorder + transcribing state into the (earlier-defined) auto-respond callback.
   transcribingRef.current = transcribing;
   startRecordingRef.current = voice.onMic;

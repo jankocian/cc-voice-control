@@ -72,6 +72,11 @@ export function useVoiceControls({
     if (retryTimerRef.current) window.clearTimeout(retryTimerRef.current);
     retryTimerRef.current = 0;
   }, []);
+  // Tear down the in-flight send + its watchdog (the spinner + any toast are handled by each caller).
+  const dropInflight = useCallback(() => {
+    clearRetryTimer();
+    inflightRef.current = null;
+  }, [clearRetryTimer]);
 
   // Dismiss a stale resend toast (a new recording / a confirmed send supersedes a prior failure).
   const clearResendToast = useCallback(() => {
@@ -116,11 +121,10 @@ export function useVoiceControls({
 
   // Give up on the in-flight send: drop it + the spinner, raise the actionable "Resend" toast.
   const giveUp = useCallback(() => {
-    clearRetryTimer();
-    inflightRef.current = null;
+    dropInflight();
     setTranscribingThreadId(null);
     raiseResendToast();
-  }, [clearRetryTimer, setTranscribingThreadId, raiseResendToast]);
+  }, [dropInflight, setTranscribingThreadId, raiseResendToast]);
 
   // Transmit the current attempt and arm the ack watchdog. On timeout: advance to the next attempt (its
   // wait grows per ACK_WAIT_MS), or give up once the schedule is spent. Acked sends short-circuit the tick.
@@ -128,7 +132,6 @@ export function useVoiceControls({
     const f = inflightRef.current;
     if (!f) return;
     sendOnce();
-    setTranscribingThreadId(f.threadId);
     clearRetryTimer();
     retryTimerRef.current = window.setTimeout(
       () => {
@@ -140,7 +143,7 @@ export function useVoiceControls({
       },
       ACK_WAIT_MS[Math.min(f.attempt, ACK_WAIT_MS.length - 1)]
     );
-  }, [sendOnce, setTranscribingThreadId, clearRetryTimer, giveUp]);
+  }, [sendOnce, clearRetryTimer, giveUp]);
 
   const sendAudio = useCallback(
     (clip: RecordedClip, mode: "queue" | "interrupt") => {
@@ -153,9 +156,10 @@ export function useVoiceControls({
       }
       clearRetryTimer();
       inflightRef.current = { clip, mode, threadId, requestId: crypto.randomUUID(), attempt: 0, acked: false };
+      setTranscribingThreadId(threadId); // spinner pinned to this thread for the whole in-flight lifecycle
       transmit();
     },
-    [activeThreadIdRef, clearRetryTimer, transmit, giveUp]
+    [activeThreadIdRef, clearRetryTimer, setTranscribingThreadId, transmit, giveUp]
   );
   sendAudioRef.current = sendAudio;
 
@@ -177,17 +181,28 @@ export function useVoiceControls({
   // spinner itself is cleared by the reducer's success/error path that triggered this.)
   const onSendSettled = useCallback(
     (ok: boolean) => {
-      clearRetryTimer();
-      inflightRef.current = null;
+      dropInflight();
       if (ok) clearResendToast();
       else raiseResendToast();
     },
-    [clearRetryTimer, clearResendToast, raiseResendToast]
+    [dropInflight, clearResendToast, raiseResendToast]
   );
 
+  // Connectivity to the in-flight send's daemon dropped (phone socket closed, or that thread went offline).
+  // An UN-acked send is left to the retransmit watchdog — it re-sends on reconnect, so the spinner honestly
+  // stays "Sending…". But an ACKED send has lost its only remaining clears (the watchdog already stopped, and
+  // the daemon that owed us prompt_status/history is now gone): release the spinner so the mic frees up. The
+  // history snapshot on reconnect is authoritative for whether the turn actually landed.
+  const onConnectionLost = useCallback(() => {
+    if (!inflightRef.current?.acked) return;
+    dropInflight();
+    setTranscribingThreadId(null);
+  }, [dropInflight, setTranscribingThreadId]);
+
   // Reconnect reconciliation: re-send an un-acked in-flight clip the instant the daemon is reachable again
-  // (App calls this on the active thread's offline→online transition). The watchdog keeps running, so this
-  // is a bonus immediate attempt; the daemon dedups it if the original actually arrived.
+  // (App calls this on the active thread's offline→online transition), as long as we're still inside the
+  // retry window. The watchdog keeps running, so this is a bonus immediate attempt; the daemon dedups it if
+  // the original actually arrived. After the window is spent (giveUp cleared inflight), the Resend toast owns it.
   const retryInflightNow = useCallback(() => {
     const f = inflightRef.current;
     if (f && !f.acked) sendOnce();
@@ -240,6 +255,13 @@ export function useVoiceControls({
   const startRecording = useCallback(
     (mode: "queue" | "interrupt") => {
       if (transcribing) return;
+      // The mic is shared: one voice turn in flight at a time. `transcribing` only blocks the ACTIVE thread,
+      // so guard here too against an un-acked send still being delivered to ANOTHER thread (switching threads
+      // unblocks the mic) — starting over would overwrite inflightRef and silently drop that undelivered clip.
+      if (inflightRef.current && !inflightRef.current.acked) {
+        showFlash("Still sending your last message…");
+        return;
+      }
       if (!bridgeReady(activeThreadIdRef.current)) {
         showFlash("Not connected to Claude Code yet");
         return;
@@ -275,10 +297,12 @@ export function useVoiceControls({
     visualizerActive,
     // The thread-messages reducer drives the in-flight send lifecycle through these: `onSendAcked` (daemon
     // got the audio) stops the retransmit watchdog; `onSendSettled` (turn landed / daemon errored) finalizes
-    // + toasts; `retryInflightNow` is the reconnect nudge (App calls it on the daemon coming back online).
+    // + toasts. App drives the connectivity hooks: `retryInflightNow` (reconnect nudge — re-send on the daemon
+    // coming back) and `onConnectionLost` (release a stuck spinner once an acked send loses its daemon).
     onSendAcked,
     onSendSettled,
     retryInflightNow,
+    onConnectionLost,
     onMic: useCallback(() => startRecording("queue"), [startRecording]),
     onSteer: useCallback(() => startRecording("queue"), [startRecording]),
     onInterrupt: useCallback(() => startRecording("interrupt"), [startRecording]),
