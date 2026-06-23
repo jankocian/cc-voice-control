@@ -43,6 +43,8 @@ type Audio = { audioBase64: string; mimeType: string };
 
 // Reconnect backoff for transient bridge drops (a terminal 1008 close is handled separately).
 const RECONNECT_DELAY_MS = 1500;
+// How many recent submit_audio requestIds we remember for dedup (bounds the set; see rememberBounded).
+const MAX_HANDLED_SUBMITS = 200;
 // Bridge keepalive interval. Pinging well under any network/NAT idle timeout keeps the socket warm and
 // catches a half-open drop within ~2 ticks (see bridge-heartbeat.ts). Cheap: Cloudflare auto-pongs
 // without waking the hibernated Durable Object.
@@ -174,6 +176,12 @@ export class VoiceDaemon {
   private readonly seen = new Set<string>();
   private floor = 0;
   private seeded = false;
+
+  // requestIds of `submit_audio`s we've already handled, so a phone RETRANSMIT (same requestId, sent when
+  // its end-to-end ack didn't arrive — e.g. a network blip dropped the audio at the relay) is acked again
+  // but NOT processed twice. Bounded (oldest dropped past the cap); a process restart clears it, which is
+  // safe — a restarted daemon never processed the prior copy. See submit_ack in the protocol.
+  private readonly handledSubmits = new Set<string>();
 
   // The live tail on the active transcript (see watchTranscript): the SINGLE mechanism that keeps the phone
   // current. `transcriptWatcher`/`watchedPath` are the fs.watch + which file it's on; `syncDebounce`
@@ -531,6 +539,10 @@ export class VoiceDaemon {
   private async handleBrowserEvent(event: BrowserToDaemonEvent): Promise<void> {
     switch (event.type) {
       case "submit_audio":
+        // Ack receipt FIRST (before the slow transcription) so the phone stops retransmitting; a duplicate
+        // requestId (a retransmit whose earlier ack was lost) is re-acked but skipped — idempotent.
+        this.sendToBrowser({ type: "submit_ack", requestId: event.requestId });
+        if (!rememberBounded(this.handledSubmits, event.requestId, MAX_HANDLED_SUBMITS)) return;
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
@@ -1025,4 +1037,14 @@ function capForSpeech(text: string): string {
 
 function errText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Add `id` to a bounded, insertion-ordered set; return true iff it was NEW (not already present). Past
+// `cap` the oldest id is evicted (a Set iterates in insertion order). This is the idempotency guarantee
+// behind submit_audio retransmits: a re-sent requestId returns false, so the prompt is handled exactly once.
+export function rememberBounded(seen: Set<string>, id: string, cap: number): boolean {
+  if (seen.has(id)) return false;
+  seen.add(id);
+  if (seen.size > cap) seen.delete(seen.values().next().value as string);
+  return true;
 }

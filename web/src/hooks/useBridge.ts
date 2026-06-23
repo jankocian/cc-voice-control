@@ -25,16 +25,19 @@ export type BridgeContentEvent = Extract<
   | { type: "tts_status" }
   | { type: "history" }
   | { type: "prompt_status" }
+  | { type: "submit_ack" }
   | { type: "error" }
   | { type: "session_status" }
   | { type: "spawn_pending" }
 >;
 
 // Everything the daemon would need a requestId for, minus the requestId itself (the hook mints
-// it). `get_audio` already carries its own requestId (the reply being fetched), so the hook leaves
-// it untouched. `spawn_thread` and `set_speak_mode` carry no requestId.
+// it). `get_audio` (the reply being fetched) and `submit_audio` (stable across retransmits) already
+// carry their own, so the hook leaves those untouched. `spawn_thread` and `set_speak_mode` carry none.
 export type DaemonCommand =
-  | { type: "submit_audio"; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
+  // requestId is caller-minted (stable across retransmits) so the daemon's submit_ack/dedup can match it;
+  // every other turn command's requestId is minted here in sendDaemon.
+  | { type: "submit_audio"; requestId: string; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
   | { type: "status_request" }
   | { type: "summary_request" }
   | { type: "stop_task" }
