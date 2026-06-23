@@ -19822,6 +19822,7 @@ var MAX_AUDIO_ENTRIES = 20;
 var SPOKEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
 var MAX_PENDING_VOICE = 16;
 var REPLY_FLUSH_CAP_MS = 120000;
+var USER_TURN_FLUSH_CAP_MS = REPLY_FLUSH_CAP_MS;
 var FLUSH_POLL_MS = 1000;
 var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
@@ -19940,7 +19941,8 @@ class VoiceDaemon {
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
               this.bindVoicePrompt(realPrompt);
-              this.projectAndEmit();
+              this.emitPromptAccepted(realPrompt);
+              this.handleTurnOpen(realPrompt);
             } else if (route === "/turn-progress") {
               const { transcriptPath } = JSON.parse(body || "{}");
               if (transcriptPath)
@@ -20176,6 +20178,7 @@ class VoiceDaemon {
       this.turns.interruptWith(text);
     else
       this.turns.enqueueVoice(text);
+    this.sendToBrowser({ type: "prompt_status", text, state: "queued" });
     this.projectAndEmit();
   }
   async injectIntoPane(text) {
@@ -20316,6 +20319,20 @@ class VoiceDaemon {
       }
     }
     this.sendToBrowser(audio ? { type: "tts_audio", requestId: uuid3, replay: true, ...audio } : { type: "error", requestId: uuid3, message: "Audio for that reply is no longer available." });
+  }
+  emitPromptAccepted(prompt) {
+    const text = prompt.trim();
+    if (!text || text.startsWith("/"))
+      return;
+    this.sendToBrowser({ type: "prompt_status", text, state: "accepted" });
+  }
+  async handleTurnOpen(prompt) {
+    this.projectAndEmit();
+    const target = prompt.trim();
+    if (!target || target.startsWith("/"))
+      return;
+    await this.waitForTranscript(() => this.projectedNow(false).some((t) => t.role === "user" && t.text.includes(target)), USER_TURN_FLUSH_CAP_MS);
+    this.projectAndEmit();
   }
   async handleTurnClose() {
     if (!this.lastTranscriptPath)
