@@ -20,6 +20,7 @@ export type ProjectedRole = "user" | "claude";
 
 export type ProjectedTurn = {
   uuid: string; // native record uuid — identity / dedup key
+  parentUuid?: string; // native parent link — lets the daemon re-bind a voice reply to a glued sibling
   timestamp: number; // native record timestamp (epoch ms) — order key
   role: ProjectedRole;
   text: string;
@@ -155,11 +156,19 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
   for (const r of selectActiveBranch(records)) {
     if (!r.uuid) continue;
     const ts = toEpoch(r.timestamp);
+    const parentUuid = r.parentUuid ?? undefined;
     if (isRealUserTurn(r)) {
-      turns.push({ uuid: r.uuid, timestamp: ts, role: "user", text: extractText(r.message?.content), interim: false });
+      turns.push({
+        uuid: r.uuid,
+        parentUuid,
+        timestamp: ts,
+        role: "user",
+        text: extractText(r.message?.content),
+        interim: false
+      });
     } else {
       const c = claudeText(r);
-      if (c) turns.push({ uuid: r.uuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
+      if (c) turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "claude", text: c.text, interim: c.interim });
     }
   }
   // Records are already in chronological (file) order; sort by native timestamp defensively so a row can

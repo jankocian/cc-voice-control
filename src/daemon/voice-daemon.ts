@@ -58,6 +58,10 @@ type PendingVoice = {
   opened?: boolean;
   userUuid?: string;
   userTs?: number;
+  // The native parentUuid of the user record this entry bound to. Kept across a re-bind (when that record
+  // falls off the active branch) so the entry only re-binds to a SIBLING — the glued survivor shares the
+  // orphan's parent, while an unrelated later turn does not — never to a coincidental look-alike.
+  userParentUuid?: string;
   openOffset?: number;
 };
 
@@ -770,19 +774,20 @@ export class VoiceDaemon {
   // Two tolerances make the merged/glued-prompt case work (Claude Code combined two fast utterances "A" and
   // "B" into one on-path "A.B" record, leaving "A" a dead/orphaned sibling the active branch drops):
   //   1. A binding whose native record fell OFF the active branch (the entry bound to "A" at turn-open,
-  //      before "A.B" existed, then "A" became an orphan) is released so it can re-bind — but its `userTs`
-  //      (the orphan's time) is KEPT as a proximity hint for the re-bind.
+  //      before "A.B" existed, then "A" became an orphan) is released so it can re-bind — but the orphan's
+  //      `userParentUuid` is KEPT, so the re-bind only accepts a SIBLING.
   //   2. The match is substring-tolerant — the native turn CONTAINS the injected text — so the entry
   //      re-binds to the surviving "A.B" ("A.B" contains "A"). The reply then resolves and is spoken once.
   private bindPending(turns: ProjectedTurn[]): void {
     const present = new Set(turns.map((t) => t.uuid));
     for (const entry of this.pending) {
-      if (entry.userUuid && !present.has(entry.userUuid)) entry.userUuid = undefined; // re-bind; keep userTs hint
+      if (entry.userUuid && !present.has(entry.userUuid)) entry.userUuid = undefined; // re-bind; keep parent hint
     }
     const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
     const claim = (entry: PendingVoice, t: ProjectedTurn): void => {
       entry.userUuid = t.uuid;
       entry.userTs = t.timestamp;
+      entry.userParentUuid = t.parentUuid;
       claimed.add(t.uuid);
     };
     // Pass 1 — EXACT match (newest unclaimed). Always wins over a substring match, so two distinct prompts
@@ -799,22 +804,20 @@ export class VoiceDaemon {
       }
     }
     // Pass 2 — SUBSTRING, for the glued survivor (no exact match for injected "A"; the on-path "A.B" contains
-    // it). Among unclaimed containing turns, pick the one CLOSEST in time to the entry's prior binding (the
-    // orphan it's re-binding off): the merged survivor sits at ~the orphan's timestamp, while an unrelated
-    // later look-alike ("yes" vs a later "yes please") is far off — so a short prompt can't be stolen by a
-    // later turn. With no hint (a first bind), fall back to the newest containing turn.
+    // it). On a re-bind we know the orphan's parent, and the glued survivor is its SIBLING — same parentUuid
+    // — so we require that match: an unrelated later turn that merely contains the text (a different parent)
+    // can never be bound, even when it's the only candidate present. A first bind with no parent hint takes
+    // the newest containing turn (the survivor just appeared; later look-alikes haven't yet).
     for (const entry of this.pending) {
       if (!entry.opened || entry.userUuid) continue;
       const et = entry.text.trim();
-      let best: ProjectedTurn | undefined;
-      for (const t of turns) {
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const t = turns[i];
         if (t.role !== "user" || claimed.has(t.uuid) || !t.text.trim().includes(et)) continue;
-        if (best === undefined) best = t;
-        else if (entry.userTs !== undefined)
-          best = Math.abs(t.timestamp - entry.userTs) < Math.abs(best.timestamp - entry.userTs) ? t : best;
-        else if (t.timestamp > best.timestamp) best = t;
+        if (entry.userParentUuid !== undefined && t.parentUuid !== entry.userParentUuid) continue;
+        claim(entry, t);
+        break;
       }
-      if (best) claim(entry, best);
     }
   }
 
