@@ -19821,8 +19821,7 @@ var MAX_PROJECTED_TURNS = 40;
 var MAX_AUDIO_ENTRIES = 20;
 var SPOKEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
 var MAX_PENDING_VOICE = 16;
-var REPLY_FLUSH_CAP_MS = 120000;
-var USER_TURN_FLUSH_CAP_MS = REPLY_FLUSH_CAP_MS;
+var SYNC_DEBOUNCE_MS = 150;
 var FLUSH_POLL_MS = 1000;
 var PLUGIN_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 var SPAWN_PLUGIN_DIR = stateDir().endsWith("-inline") ? PLUGIN_ROOT : undefined;
@@ -19856,6 +19855,11 @@ class VoiceDaemon {
   pending = [];
   spoken = new Set;
   floor = 0;
+  transcriptWatcher;
+  watchedPath;
+  syncDebounce;
+  syncPoll;
+  lastHistorySig = "";
   speakMode = "final";
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
@@ -19936,26 +19940,22 @@ class VoiceDaemon {
               if (typeof permissionMode === "string" && PERMISSION_MODES.has(permissionMode)) {
                 this.inheritedPermissionMode = permissionMode;
               }
-              if (transcriptPath)
-                this.lastTranscriptPath = transcriptPath;
+              this.setTranscript(transcriptPath);
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
               this.bindVoicePrompt(realPrompt);
+              this.ensurePoll();
               this.emitPromptAccepted(realPrompt);
-              this.handleTurnOpen(realPrompt);
+              this.syncFromTranscript(true);
             } else if (route === "/turn-progress") {
               const { transcriptPath } = JSON.parse(body || "{}");
-              if (transcriptPath)
-                this.lastTranscriptPath = transcriptPath;
-              const turns = this.projectedNow();
-              this.sendToBrowser(this.historyFrom(turns));
-              this.speakNewSteps(turns);
+              this.setTranscript(transcriptPath);
+              this.syncFromTranscript(true);
             } else {
               const { transcriptPath } = JSON.parse(body || "{}");
-              if (transcriptPath)
-                this.lastTranscriptPath = transcriptPath;
+              this.setTranscript(transcriptPath);
               this.turns.turnClosed();
-              this.handleTurnClose();
+              this.syncFromTranscript(true);
             }
           } catch {}
         });
@@ -20005,7 +20005,7 @@ class VoiceDaemon {
     this.pending.length = 0;
     this.turns.reset();
     console.error("[reset] cleared voice history for this thread (/clear or /compact)");
-    this.projectAndEmit();
+    this.syncFromTranscript(true);
   }
   openPairWindow() {
     if (this.ws?.readyState === wrapper_default.OPEN) {
@@ -20089,15 +20089,13 @@ class VoiceDaemon {
         await cmuxInterrupt(this.init.surface);
         this.pending.length = 0;
         this.turns.interrupt();
-        this.projectAndEmit();
+        this.syncFromTranscript(true);
         return;
       case "sync":
-        this.emitStatus();
-        if (this.lastTranscriptPath) {
-          const turns = this.projectedNow();
-          this.sendToBrowser(this.historyFrom(turns));
-          this.speakReadyVoiceReplies(turns);
-        }
+        if (this.lastTranscriptPath)
+          this.syncFromTranscript(true);
+        else
+          this.emitStatus();
         return;
       case "get_audio":
         await this.serveAudio(event.requestId);
@@ -20179,7 +20177,7 @@ class VoiceDaemon {
     else
       this.turns.enqueueVoice(text);
     this.sendToBrowser({ type: "prompt_status", text, state: "queued" });
-    this.projectAndEmit();
+    this.syncFromTranscript(true);
   }
   async injectIntoPane(text) {
     console.error(`[inject] surface=${this.init.surface ?? "(default $CMUX_SURFACE_ID)"} text=${JSON.stringify(text)}`);
@@ -20200,13 +20198,74 @@ class VoiceDaemon {
       type: "error",
       message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
     });
-    this.projectAndEmit();
+    this.syncFromTranscript(true);
     return false;
   }
-  projectAndEmit() {
-    const turns = this.projectedNow();
-    this.sendToBrowser(this.historyFrom(turns));
-    this.emitStatus(turns);
+  setTranscript(path) {
+    if (!path)
+      return;
+    this.lastTranscriptPath = path;
+    if (path === this.watchedPath)
+      return;
+    this.transcriptWatcher?.close();
+    try {
+      this.transcriptWatcher = watch(path, () => this.scheduleSync());
+      this.watchedPath = path;
+    } catch {
+      this.transcriptWatcher = undefined;
+      this.watchedPath = undefined;
+    }
+  }
+  scheduleSync() {
+    if (this.stopped || this.syncDebounce)
+      return;
+    this.syncDebounce = setTimeout(() => {
+      this.syncDebounce = undefined;
+      this.reflect(this.projectedNow(false), false);
+    }, SYNC_DEBOUNCE_MS);
+  }
+  ensurePoll() {
+    if (this.syncPoll)
+      return;
+    this.syncPoll = setInterval(() => {
+      if (this.stopped || !this.isTurnActive()) {
+        if (this.syncPoll)
+          clearInterval(this.syncPoll);
+        this.syncPoll = undefined;
+        return;
+      }
+      this.scheduleSync();
+    }, FLUSH_POLL_MS);
+  }
+  isTurnActive() {
+    return this.turns.isBusy || this.pending.some((p) => p.opened);
+  }
+  syncFromTranscript(captureFloor) {
+    if (!this.lastTranscriptPath)
+      return;
+    this.reflect(this.projectedNow(captureFloor), true);
+  }
+  reflect(turns, force) {
+    this.bindPending(turns);
+    const sig = turns.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}`).join("|");
+    if (force || sig !== this.lastHistorySig) {
+      this.lastHistorySig = sig;
+      this.sendToBrowser({
+        type: "history",
+        turns: turns.map((t) => ({
+          requestId: t.uuid,
+          timestamp: t.timestamp,
+          role: t.role,
+          text: t.text,
+          hasAudio: this.audio.has(t.uuid),
+          interim: t.interim
+        }))
+      });
+    }
+    if (force || this.isWorking(turns) !== this.lastWorking)
+      this.emitStatus(turns);
+    this.speakNewSteps(turns);
+    this.speakReadyVoiceReplies(turns);
   }
   projectedNow(captureFloor = true) {
     if (!this.lastTranscriptPath)
@@ -20274,20 +20333,6 @@ class VoiceDaemon {
       }
     }
   }
-  historyFrom(turns) {
-    this.bindPending(turns);
-    return {
-      type: "history",
-      turns: turns.map((t) => ({
-        requestId: t.uuid,
-        timestamp: t.timestamp,
-        role: t.role,
-        text: t.text,
-        hasAudio: this.audio.has(t.uuid),
-        interim: t.interim
-      }))
-    };
-  }
   speakNewSteps(turns) {
     if (this.speakMode !== "all")
       return;
@@ -20325,56 +20370,6 @@ class VoiceDaemon {
     if (!text || text.startsWith("/"))
       return;
     this.sendToBrowser({ type: "prompt_status", text, state: "accepted" });
-  }
-  async handleTurnOpen(prompt) {
-    this.projectAndEmit();
-    const target = prompt.trim();
-    if (!target || target.startsWith("/"))
-      return;
-    await this.waitForTranscript(() => this.projectedNow(false).some((t) => t.role === "user" && t.text.includes(target)), USER_TURN_FLUSH_CAP_MS);
-    this.projectAndEmit();
-  }
-  async handleTurnClose() {
-    if (!this.lastTranscriptPath)
-      return;
-    this.sendToBrowser(this.historyFrom(this.projectedNow()));
-    await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
-    const turns = this.projectedNow();
-    this.sendToBrowser(this.historyFrom(turns));
-    this.emitStatus(turns);
-    this.speakReadyVoiceReplies(turns);
-  }
-  repliesSettled() {
-    const turns = this.projectedNow();
-    this.bindPending(turns);
-    return this.pending.every((p) => !p.opened || this.findReply(turns, p) !== undefined);
-  }
-  waitForTranscript(ready, capMs) {
-    return new Promise((resolve) => {
-      const path = this.lastTranscriptPath;
-      if (!path || this.stopped || ready())
-        return resolve();
-      let watcher;
-      let poll;
-      let cap;
-      const finish = () => {
-        watcher?.close();
-        if (poll)
-          clearInterval(poll);
-        if (cap)
-          clearTimeout(cap);
-        resolve();
-      };
-      const check2 = () => {
-        if (this.stopped || ready())
-          finish();
-      };
-      try {
-        watcher = watch(path, check2);
-      } catch {}
-      poll = setInterval(check2, FLUSH_POLL_MS);
-      cap = setTimeout(finish, capMs);
-    });
   }
   speakReadyVoiceReplies(turns) {
     for (let i = this.pending.length - 1;i >= 0; i--) {
@@ -20496,6 +20491,11 @@ class VoiceDaemon {
       clearInterval(this.healthTimer);
     if (this.pairingTimer)
       clearTimeout(this.pairingTimer);
+    if (this.syncDebounce)
+      clearTimeout(this.syncDebounce);
+    if (this.syncPoll)
+      clearInterval(this.syncPoll);
+    this.transcriptWatcher?.close();
     this.stopHeartbeat?.();
     this.send({ channel: "control", event: { type: "terminate" } });
     try {
