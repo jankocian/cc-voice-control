@@ -804,17 +804,20 @@ export class VoiceDaemon {
       }
     }
     // Pass 2 — SUBSTRING, for the glued survivor (no exact match for injected "A"; the on-path "A.B" contains
-    // it). On a re-bind we know the orphan's parent, and the glued survivor is its SIBLING — same parentUuid
-    // — so we require that match: an unrelated later turn that merely contains the text (a different parent)
-    // can never be bound, even when it's the only candidate present. A first bind with no parent hint takes
-    // the newest containing turn (the survivor just appeared; later look-alikes haven't yet).
+    // it). On a RE-BIND (the entry bound before, so `userTs` is set — kept across the re-bind) the glued
+    // survivor is the orphan's SIBLING, so we require a parent match, compared null-normalized so a ROOT
+    // orphan (no parent) only re-binds to another root-level turn. This rejects an unrelated later turn that
+    // merely contains the text (different parent) even when it's the SOLE candidate present. A FIRST bind
+    // (never bound, `userTs` undefined) has no sibling to match, so it takes the newest containing turn (the
+    // survivor just appeared; later look-alikes haven't yet).
     for (const entry of this.pending) {
       if (!entry.opened || entry.userUuid) continue;
       const et = entry.text.trim();
+      const rebinding = entry.userTs !== undefined;
       for (let i = turns.length - 1; i >= 0; i--) {
         const t = turns[i];
         if (t.role !== "user" || claimed.has(t.uuid) || !t.text.trim().includes(et)) continue;
-        if (entry.userParentUuid !== undefined && t.parentUuid !== entry.userParentUuid) continue;
+        if (rebinding && (t.parentUuid ?? null) !== (entry.userParentUuid ?? null)) continue;
         claim(entry, t);
         break;
       }
