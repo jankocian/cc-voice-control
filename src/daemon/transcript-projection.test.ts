@@ -3,9 +3,7 @@ import {
   dropSessionAnnouncement,
   isPaneWorking,
   type ProjectedTurn,
-  pairReplies,
   projectTurns,
-  resolveVoiceReply,
   selectActiveBranch,
   type TranscriptRecord
 } from "./transcript-projection.js";
@@ -121,7 +119,6 @@ describe("projectTurns — the filter", () => {
       ["step", true],
       ["answer", false] // the thinking-only record is gone
     ]);
-    expect(pairReplies(turns).map((p) => [p.prompt?.uuid, p.reply.uuid])).toEqual([["u", "answer"]]);
   });
 
   it("keeps mid-turn narration as a step and the end_turn text as the final reply", () => {
@@ -233,94 +230,6 @@ describe("selectActiveBranch — drop dead branches so the phone matches the des
       asst("a1", "2026-06-21T15:00:02.000Z", text("b"))
     ];
     expect(selectActiveBranch(records)).toBe(records); // same reference: nothing to drop
-  });
-});
-
-describe("pairReplies — voice TTS targeting", () => {
-  it("pairs each reply with the user prompt it answers", () => {
-    const turns = projectTurns([
-      user("u1", "2026-06-21T15:00:01.000Z", "spoken", { promptSource: "typed" }),
-      asst("a1", "2026-06-21T15:00:02.000Z", text("answer"))
-    ]);
-    const pairs = pairReplies(turns);
-    expect(pairs).toHaveLength(1);
-    expect(pairs[0].reply.uuid).toBe("a1");
-    expect(pairs[0].prompt?.text).toBe("spoken");
-  });
-
-  it("pairs the voice reply correctly even when a typed prompt queued behind it (reply not newest)", () => {
-    // voice "spoken" → its reply, then a typed "typed q" that queued, then ITS reply (newest).
-    const turns = projectTurns([
-      user("u1", "2026-06-21T15:00:01.000Z", "spoken", { promptSource: "typed" }),
-      asst("a1", "2026-06-21T15:00:02.000Z", text("voice reply")),
-      user("u2", "2026-06-21T15:00:03.000Z", "typed q", { promptSource: "queued" }),
-      asst("a2", "2026-06-21T15:00:04.000Z", text("typed reply"))
-    ]);
-    const pairs = pairReplies(turns);
-    expect(pairs.map((p) => [p.prompt?.text, p.reply.uuid])).toEqual([
-      ["spoken", "a1"],
-      ["typed q", "a2"]
-    ]);
-  });
-
-  it("returns no pairs when there is no reply yet", () => {
-    const turns = projectTurns([user("u1", "2026-06-21T15:00:01.000Z", "hi", { promptSource: "typed" })]);
-    expect(pairReplies(turns)).toEqual([]);
-  });
-});
-
-describe("resolveVoiceReply — pick the FINAL reply to speak by identity, never an interim step", () => {
-  const turn = (uuid: string, role: ProjectedTurn["role"], ts: number, interim = false): ProjectedTurn => ({
-    uuid,
-    timestamp: ts,
-    role,
-    text: `${uuid}-text`,
-    interim
-  });
-
-  it("returns the final reply paired to our prompt uuid, not the interim steps before it", () => {
-    const turns = [
-      turn("u", "user", 1),
-      turn("s1", "claude", 2, true),
-      turn("s2", "claude", 3, true),
-      turn("final", "claude", 4)
-    ];
-    expect(resolveVoiceReply(turns, "u")?.uuid).toBe("final");
-  });
-
-  it("returns undefined while only interim steps have flushed — so the caller keeps waiting for the answer", () => {
-    // THE REGRESSION: the Stop hook can fire (or be polled) before the answer text lands; the old fallback
-    // grabbed the first step here and spoke/consumed it, so the real answer was never spoken (no audio).
-    const turns = [turn("u", "user", 1), turn("s1", "claude", 2, true), turn("s2", "claude", 3, true)];
-    expect(resolveVoiceReply(turns, "u")).toBeUndefined();
-  });
-
-  it("matches by IDENTITY, not order: with two prompts + replies, each uuid resolves to its own reply", () => {
-    const turns = [turn("u1", "user", 1), turn("a1", "claude", 2), turn("u2", "user", 3), turn("a2", "claude", 4)];
-    expect(resolveVoiceReply(turns, "u1")?.uuid).toBe("a1");
-    expect(resolveVoiceReply(turns, "u2")?.uuid).toBe("a2");
-  });
-
-  it("returns undefined when the prompt uuid isn't anchored yet", () => {
-    expect(resolveVoiceReply([turn("final", "claude", 4)], undefined)).toBeUndefined();
-  });
-
-  it("resolves a GLUED prompt's reply via the active branch — the orphan sibling resolves to nothing", () => {
-    // End-to-end of the incident's reply path: the daemon binds the injected prompt to the on-path glued
-    // user turn (AB) by substring (bindPending), and resolveVoiceReply finds its reply on the active branch.
-    // The orphan A is off-branch, so its uuid resolves to no reply — it is never spoken.
-    const records: TranscriptRecord[] = [
-      asst("P", "2026-06-22T23:01:00.000Z", text("previous answer")),
-      user("A", "2026-06-22T23:03:57.000Z", "Я вот смышто это к ничему.", { promptSource: "typed", parentUuid: "P" }),
-      user("AB", "2026-06-22T23:04:15.000Z", "Я вот смышто это к ничему.Mluvím česky.", {
-        promptSource: "typed",
-        parentUuid: "P"
-      }),
-      asst("R", "2026-06-22T23:04:33.000Z", text("Smazáno."), "end_turn", { parentUuid: "AB" })
-    ];
-    const turns = projectTurns(records);
-    expect(resolveVoiceReply(turns, "AB")?.uuid).toBe("R"); // the glued turn's reply, spoken once
-    expect(resolveVoiceReply(turns, "A")).toBeUndefined(); // orphan is off-branch → no reply
   });
 });
 

@@ -91,7 +91,10 @@ export function useThreadMessages({
           // replace with it (and mark fetchable replies tap-to-play). markPlayable is keyed by native
           // uuid (globally unique), so flagging another thread's rows never bleeds here.
           const restored = event.turns.map(messageFromHistory);
-          markPlayable(event.turns.filter((t) => t.hasAudio).map((t) => t.requestId));
+          // Every Claude row is tap-to-playable, whether or not the daemon pre-synthesized it: tapping
+          // fetches the audio on demand (get_audio → the daemon synthesizes from the same projection). So
+          // a reply can never show as text with no way to hear it — audio follows the one source of truth.
+          markPlayable(event.turns.filter((t) => t.role === "claude").map((t) => t.requestId));
           // The mic turn lands when the user's spoken message appears as the newest row: clear the
           // "transcribing…" indicator + confirm it reached Claude. A terminal-typed turn (we weren't
           // transcribing) or an incoming reply (newest row is Claude's) correctly does neither.

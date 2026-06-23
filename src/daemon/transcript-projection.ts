@@ -222,36 +222,3 @@ export function dropSessionAnnouncement(turns: ProjectedTurn[], sessionUrl: stri
   if (!sessionUrl) return turns;
   return turns.filter((t) => !(t.role === "claude" && t.text.includes(sessionUrl)));
 }
-
-/** Pair every FINAL claude reply with the user prompt it answers (its nearest preceding user turn). The
- *  daemon uses this to decide voice TTS: speak a reply iff its prompt is one we injected. Interim steps are
- *  excluded — they're never the turn's "reply" and are only spoken under "read every step". Oldest-first. */
-export function pairReplies(turns: ProjectedTurn[]): { reply: ProjectedTurn; prompt?: ProjectedTurn }[] {
-  const pairs: { reply: ProjectedTurn; prompt?: ProjectedTurn }[] = [];
-  for (let i = 0; i < turns.length; i++) {
-    if (turns[i].role !== "claude" || turns[i].interim) continue;
-    let prompt: ProjectedTurn | undefined;
-    for (let j = i - 1; j >= 0; j--) {
-      if (turns[j].role === "user") {
-        prompt = turns[j];
-        break;
-      }
-    }
-    pairs.push({ reply: turns[i], prompt });
-  }
-  return pairs;
-}
-
-/**
- * Resolve the FINAL reply to a voice prompt we injected — the row the daemon speaks — by IDENTITY: the
- * final (non-interim) reply whose immediately-preceding user turn IS our native prompt record, matched by
- * `userUuid`. The daemon reads the transcript from the start of the turn (transcript-reader's `floorOffset`),
- * so the prompt record is ALWAYS present and this is an exact match — no ordering guess, no timestamp
- * heuristic. `pairReplies` only yields final replies, so an interim step (narration before a tool call) can
- * never be returned, even on a long extended-thinking turn where the answer text flushes well after the
- * steps. Returns undefined until the answer has flushed (then the caller speaks it).
- */
-export function resolveVoiceReply(turns: ProjectedTurn[], userUuid: string | undefined): ProjectedTurn | undefined {
-  if (!userUuid) return undefined;
-  return pairReplies(turns).find((p) => p.prompt?.uuid === userUuid)?.reply;
-}
