@@ -19615,6 +19615,15 @@ function normalizeQuestions(raw) {
 function questionContentSig(questions) {
   return questions.map((q) => `${q.question}::${q.options.map((o) => o.label).join(",")}`).join("||");
 }
+function extractQuestionAnswer(r) {
+  if (roleOf(r) !== "user" || r.isSidechain)
+    return;
+  const answers = r.toolUseResult?.answers;
+  if (!answers || typeof answers !== "object" || Array.isArray(answers))
+    return;
+  const values = Object.values(answers).filter((v) => typeof v === "string" && v.trim().length > 0);
+  return values.length > 0 ? values.join(", ") : undefined;
+}
 function answeredToolUseIds(records) {
   const ids = new Set;
   for (const r of records) {
@@ -19633,7 +19642,7 @@ function answeredToolUseIds(records) {
 }
 function questionSpeech(questions) {
   const one = (q) => {
-    const opts = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}`).join(". ");
+    const opts = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}${o.description ? `, ${o.description}` : ""}`).join(". ");
     return opts ? `${q.question} Options — ${opts}.` : q.question;
   };
   if (questions.length === 1)
@@ -19691,6 +19700,11 @@ function projectTurns(records, maxTurns = 40) {
       continue;
     const ts = toEpoch(r.timestamp);
     const parentUuid = r.parentUuid ?? undefined;
+    const answer = extractQuestionAnswer(r);
+    if (answer !== undefined) {
+      turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "user", text: answer, interim: false });
+      continue;
+    }
     if (isRealUserTurn(r)) {
       turns.push({
         uuid: r.uuid,
@@ -20310,6 +20324,12 @@ class VoiceDaemon {
         this.answeringQuestion = false;
       }
       if (result === "sent") {
+        if (this.pendingQuestionOverlay?.question) {
+          this.pendingQuestionOverlay = {
+            ...this.pendingQuestionOverlay,
+            question: { ...this.pendingQuestionOverlay.question, answered: true }
+          };
+        }
         this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
         this.syncFromTranscript();
         return;
