@@ -763,51 +763,59 @@ export class VoiceDaemon {
     }
   }
 
-  // Bind each opened-but-unbound voice entry to its native user record (the newest matching one not already
-  // claimed), capturing its uuid + timestamp. Runs on every projection, so a prompt whose record wasn't
-  // flushed at turn-open binds as soon as it appears.
+  // Bind each opened-but-unbound voice entry to its native user record, capturing its uuid + timestamp.
+  // Runs on every projection, so a prompt whose record wasn't flushed at turn-open binds as soon as it
+  // appears.
   //
   // Two tolerances make the merged/glued-prompt case work (Claude Code combined two fast utterances "A" and
   // "B" into one on-path "A.B" record, leaving "A" a dead/orphaned sibling the active branch drops):
   //   1. A binding whose native record fell OFF the active branch (the entry bound to "A" at turn-open,
-  //      before "A.B" existed, then "A" became an orphan) is released so it can re-bind below.
+  //      before "A.B" existed, then "A" became an orphan) is released so it can re-bind — but its `userTs`
+  //      (the orphan's time) is KEPT as a proximity hint for the re-bind.
   //   2. The match is substring-tolerant — the native turn CONTAINS the injected text — so the entry
   //      re-binds to the surviving "A.B" ("A.B" contains "A"). The reply then resolves and is spoken once.
   private bindPending(turns: ProjectedTurn[]): void {
     const present = new Set(turns.map((t) => t.uuid));
     for (const entry of this.pending) {
-      if (entry.userUuid && !present.has(entry.userUuid)) {
-        entry.userUuid = undefined; // its record fell off the active branch → re-bind to the survivor
-        entry.userTs = undefined;
-      }
+      if (entry.userUuid && !present.has(entry.userUuid)) entry.userUuid = undefined; // re-bind; keep userTs hint
     }
     const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
-    // Bind in two passes so an EXACT match always wins over a substring one. Otherwise a short prompt
-    // ("status") could claim a longer turn ("status of the build") and starve the longer prompt's own
-    // entry, mis-speaking or losing a reply. Pass 1: exact. Pass 2: substring for whatever's left — the
-    // merged/glued survivor "A.B" (no exact match for injected "A") binds because it CONTAINS "A".
-    const bindBy = (matches: (turnText: string, entryText: string) => boolean): void => {
-      for (const entry of this.pending) {
-        if (!entry.opened || entry.userUuid) continue;
-        for (let i = turns.length - 1; i >= 0; i--) {
-          const t = turns[i];
-          if (t.role !== "user" || claimed.has(t.uuid)) continue;
-          if (matches(t.text.trim(), entry.text.trim())) {
-            entry.userUuid = t.uuid;
-            entry.userTs = t.timestamp;
-            claimed.add(t.uuid);
-            break;
-          }
+    const claim = (entry: PendingVoice, t: ProjectedTurn): void => {
+      entry.userUuid = t.uuid;
+      entry.userTs = t.timestamp;
+      claimed.add(t.uuid);
+    };
+    // Pass 1 — EXACT match (newest unclaimed). Always wins over a substring match, so two distinct prompts
+    // ("status" and "status of the build") each take their own record rather than the shorter stealing the
+    // longer's turn.
+    for (const entry of this.pending) {
+      if (!entry.opened || entry.userUuid) continue;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const t = turns[i];
+        if (t.role === "user" && !claimed.has(t.uuid) && t.text.trim() === entry.text.trim()) {
+          claim(entry, t);
+          break;
         }
       }
-    };
-    bindBy((turnText, entryText) => turnText === entryText);
-    // Substring pass for the glued survivor only. Skip a turn whose text is EXACTLY some pending prompt —
-    // it belongs to that prompt's own entry (claimed in pass 1, or reserved for it), so a shorter prompt
-    // can't steal a longer one's turn. (The rebind runs the instant the survivor appears, before any later
-    // turn, and entries retire once their reply is spoken, so a later look-alike turn can't be stolen.)
-    const exactTexts = new Set(this.pending.map((p) => p.text.trim()));
-    bindBy((turnText, entryText) => turnText.includes(entryText) && !exactTexts.has(turnText));
+    }
+    // Pass 2 — SUBSTRING, for the glued survivor (no exact match for injected "A"; the on-path "A.B" contains
+    // it). Among unclaimed containing turns, pick the one CLOSEST in time to the entry's prior binding (the
+    // orphan it's re-binding off): the merged survivor sits at ~the orphan's timestamp, while an unrelated
+    // later look-alike ("yes" vs a later "yes please") is far off — so a short prompt can't be stolen by a
+    // later turn. With no hint (a first bind), fall back to the newest containing turn.
+    for (const entry of this.pending) {
+      if (!entry.opened || entry.userUuid) continue;
+      const et = entry.text.trim();
+      let best: ProjectedTurn | undefined;
+      for (const t of turns) {
+        if (t.role !== "user" || claimed.has(t.uuid) || !t.text.trim().includes(et)) continue;
+        if (best === undefined) best = t;
+        else if (entry.userTs !== undefined)
+          best = Math.abs(t.timestamp - entry.userTs) < Math.abs(best.timestamp - entry.userTs) ? t : best;
+        else if (t.timestamp > best.timestamp) best = t;
+      }
+      if (best) claim(entry, best);
+    }
   }
 
   // Build the `history` snapshot — a PURE PROJECTION of the transcript's active branch, nothing else. The
