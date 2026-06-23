@@ -11,6 +11,7 @@ import type {
   BrowserToDaemonEvent,
   DaemonToBrowserEvent,
   InjectMode,
+  SessionRuntimeState,
   SessionSignal,
   SessionState,
   SpeakMode,
@@ -36,7 +37,12 @@ import { computeLabel } from "./labels.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
-import { dropSessionAnnouncement, isPaneWorking, type ProjectedTurn } from "./transcript-projection.js";
+import {
+  dropSessionAnnouncement,
+  isPaneWorking,
+  type ProjectedTurn,
+  pendingQuestion
+} from "./transcript-projection.js";
 import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
@@ -155,9 +161,9 @@ export class VoiceDaemon {
   // can never stick. See turn-coordinator.ts.
   private readonly turns: TurnCoordinator;
 
-  // Last derived working state, cached so buildThreadInfo (and any registerThread caller) reflects it
-  // without re-reading the transcript. Authoritatively recomputed in emitStatus.
-  private lastWorking = false;
+  // Last derived runtime state (idle/working/awaiting), cached so buildThreadInfo (and any registerThread
+  // caller) reflects it without re-reading the transcript. Authoritatively recomputed in emitStatus.
+  private lastState: SessionRuntimeState = "idle";
 
   // The ONLY state we keep of our own; everything the phone shows is projected from Claude's transcript.
   //  - `audio`: synthesized reply audio keyed by native reply uuid, for tap-to-play + reconnect.
@@ -302,12 +308,14 @@ export class VoiceDaemon {
       const server = createServer((req, res) => {
         // POST routes from the plugin's hooks/skills: /turn-open (UserPromptSubmit → a turn started,
         // with the REAL pre-expansion prompt + live permission mode), /turn-close (Stop → the turn's
-        // reply), /reset (SessionStart on clear/compact → wipe history), /spawn (the spawn skill).
+        // reply), /notify (Notification → permission_prompt = "awaiting", idle_prompt = 60s idle floor),
+        // /reset (SessionStart on clear/compact → wipe history), /spawn (the spawn skill).
         const route = req.method === "POST" ? req.url : undefined;
         if (
           route !== "/turn-open" &&
           route !== "/turn-progress" &&
           route !== "/turn-close" &&
+          route !== "/notify" &&
           route !== "/reset" &&
           route !== "/pair" &&
           route !== "/spawn"
@@ -361,7 +369,15 @@ export class VoiceDaemon {
               // the transcript; the live tail also catches the step if it flushes a beat after this hook.
               const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
               this.setTranscript(transcriptPath);
+              this.turns.noteProgress(); // a tool is running → no longer parked on a permission prompt
               this.syncFromTranscript();
+            } else if (route === "/notify") {
+              // Notification hook: "permission" = a permission_prompt fired (Claude blocked on the user's
+              // approval → "awaiting"); "idle" = idle_prompt (60s+ idle → a floor that clears a stuck-busy
+              // lamp if a Stop was dropped). emitStatus re-projects, so the transcript still has final say.
+              const { kind } = JSON.parse(body || "{}") as { kind?: string };
+              if (kind === "permission") this.turns.notePermissionPrompt();
+              else if (kind === "idle") this.turns.forceIdle();
             } else {
               // Stop: the turn ended. Release the idle-gate (so a queued voice prompt can inject) and re-sync.
               // The reply text may still be streaming in (extended thinking) — the live tail shows/speaks it
@@ -840,7 +856,7 @@ export class VoiceDaemon {
     }
     // Only refresh the lamp when it actually flips (or on a forced hook/sync) — the tail fires on every
     // write, and re-emitting an unchanged "working" status each time would spam the bridge for nothing.
-    if (force || this.isWorking(turns) !== this.lastWorking) this.emitStatus(turns);
+    if (force || this.computeState(turns) !== this.lastState) this.emitStatus(turns);
     this.synthesizeReplies(turns); // synthesize + send a just-landed reply (idempotent via `seen`)
   }
 
@@ -972,7 +988,7 @@ export class VoiceDaemon {
     return {
       threadId: this.init.threadId,
       label: this.sealedLabel, // sealed (EncBlob): the worker stores/relays it without reading it
-      state: this.lastWorking ? "working" : "idle", // cached from the last emitStatus (transcript-derived)
+      state: this.lastState, // cached from the last emitStatus (transcript-derived)
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
@@ -1010,25 +1026,29 @@ export class VoiceDaemon {
 
   // ---- helpers ---------------------------------------------------------------
 
-  // Working = our injection hasn't landed yet (the gap before the transcript catches up), OR the pane is
-  // mid-turn (the inject gate's `isBusy`) AND the transcript's active branch shows the newest user turn
-  // still awaiting its final reply. The AND is the whole robustness story: a missed Stop leaves `isBusy`
-  // stuck, but the transcript going idle (a final reply landed) still flips it; an interrupt clears
-  // `isBusy`, so the lamp idles at once; and the transcript can't read "working" past a real reply.
-  private isWorking(turns: ProjectedTurn[]): boolean {
-    return this.turns.hasInFlight || (this.turns.isBusy && isPaneWorking(turns));
+  // The runtime state shown on the phone, derived deterministically from three sources of truth:
+  //   • "awaiting" — Claude is blocked on the HUMAN: an interactive question is open (transcript), or a
+  //     permission_prompt fired (Notification hook). Takes priority — a wait must never read as "working".
+  //   • "working"  — our injection hasn't landed yet (hasInFlight), OR the pane is mid-turn (isBusy), OR the
+  //     transcript shows an unanswered user turn. ORed, not ANDed: a dropped Stop can't flip the lamp idle
+  //     while a reply is still streaming; `idle_prompt`/the reaper clear a stuck `isBusy`.
+  //   • "idle"     — none of the above: the turn is fully answered and Claude is free.
+  private computeState(turns: ProjectedTurn[]): SessionRuntimeState {
+    if (pendingQuestion(turns) || this.turns.awaitingPermission) return "awaiting";
+    if (this.turns.hasInFlight || this.turns.isBusy || isPaneWorking(turns)) return "working";
+    return "idle";
   }
 
   // Status carries this thread's id (so the phone files it correctly); a thread_register rides along to keep
   // the roster's state/listening in lockstep. Pass the turns already projected this cycle to avoid a
   // re-read; callers without them fall back to a pure read (no floor move).
   private emitStatus(turns?: ProjectedTurn[]): void {
-    const working = this.isWorking(turns ?? this.projectedNow());
-    this.lastWorking = working;
+    const runtimeState = this.computeState(turns ?? this.projectedNow());
+    this.lastState = runtimeState;
     const state: SessionState = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,
-      state: working ? "working" : "idle"
+      state: runtimeState
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.turns.currentVoicePrompt } });
     // Keep the roster's state/listening in lockstep with status (idle↔working, listening

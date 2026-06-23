@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 //   • connecting/waiting  → three travelling dots
 //   • working / sending   → an animated equalizer (coral)
 //   • speaking            → an animated equalizer (violet)
+//   • awaiting            → the "your turn" dot-wave, amber (Claude needs you: a question/permission)
 //   • ready / idle        → the equalizer at rest (calm, dimmed)
 //
 // Every child shares one grid cell (col/row-start-1) so they stack centered.
@@ -54,10 +55,13 @@ export function StatusVisual({
   const speaking = dataState === "speaking";
   const working = dataState === "working" || dataState === "sending";
   const ready = dataState === "ready";
+  // "Claude needs you" (a question/permission waiting). Reuses the "your turn" dot-wave below, amber-toned
+  // — semantically a your-turn moment, distinct from ready (green) and working (coral).
+  const awaiting = dataState === "awaiting";
   const active = working || speaking; // strong equalizer animation
-  // Colour by state: violet = speaking, green = connected/ready (waiting for you),
+  // Colour by state: violet = speaking, green = connected/ready (waiting for you), amber = needs you,
   // coral = working/sending (and the calm fallback for any other state).
-  const tone = speaking ? "bg-violet" : ready ? "bg-success" : "bg-coral";
+  const tone = speaking ? "bg-violet" : ready ? "bg-success" : awaiting ? "bg-warning" : "bg-coral";
   // The hero paints the live mic waveform into a canvas while recording; the mini bar has no canvas and
   // shows the (red) equalizer for recording instead. So: hero → equalizer unless recording; mini →
   // equalizer for everything that isn't the travelling dots.
@@ -65,8 +69,8 @@ export function StatusVisual({
   const showEqualizer = !connectingDots && (mini || !recording);
   // "Ready / your turn" reuses the SAME equalizer elements but collapses them to uniform dots doing a
   // staggered appear-wave (awaiting input) instead of the breathing bars — so the row visibly morphs
-  // bars↔dots as Claude goes idle/active.
-  const readyDots = ready && !recording;
+  // bars↔dots as Claude goes idle/active. "Claude needs you" is also a your-turn moment (amber via `tone`).
+  const readyDots = (ready || awaiting) && !recording;
 
   return (
     <div
@@ -82,8 +86,8 @@ export function StatusVisual({
         <div
           className={cn(
             "h-28 w-64 bg-[radial-gradient(ellipse_at_center,currentColor,transparent_65%)] transition-opacity duration-500",
-            speaking ? "text-violet" : ready ? "text-success" : "text-coral",
-            recording || active ? "opacity-[0.12]" : ready ? "opacity-[0.08]" : "opacity-[0.05]"
+            speaking ? "text-violet" : ready ? "text-success" : awaiting ? "text-warning" : "text-coral",
+            recording || active ? "opacity-[0.12]" : ready || awaiting ? "opacity-[0.08]" : "opacity-[0.05]"
           )}
         />
       )}

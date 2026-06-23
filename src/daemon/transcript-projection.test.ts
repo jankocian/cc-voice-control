@@ -3,6 +3,7 @@ import {
   dropSessionAnnouncement,
   isPaneWorking,
   type ProjectedTurn,
+  pendingQuestion,
   projectTurns,
   questionSpeech,
   selectActiveBranch,
@@ -264,6 +265,42 @@ describe("isPaneWorking — working lamp derived from the transcript, never coun
   it("idle with no user turn at all", () => {
     expect(isPaneWorking([turn("a", "claude")])).toBe(false);
     expect(isPaneWorking([])).toBe(false);
+  });
+});
+
+describe("pendingQuestion — Claude is blocked on the user (awaiting), derived from the transcript", () => {
+  const turn = (uuid: string, role: ProjectedTurn["role"], interim = false): ProjectedTurn => ({
+    uuid,
+    timestamp: 0,
+    role,
+    text: `${uuid}-text`,
+    interim
+  });
+  const question = (uuid: string, answered: boolean): ProjectedTurn => ({
+    ...turn(uuid, "claude"),
+    question: { toolUseId: `tu-${uuid}`, questions: [{ question: "Pick one?", options: [{ label: "A" }] }], answered }
+  });
+
+  it("awaiting when the newest content turn is an unanswered question", () => {
+    expect(pendingQuestion([turn("u", "user"), question("q", false)])).toBe(true);
+  });
+
+  it("not awaiting once the question is answered (Claude is now concluding → working, not awaiting)", () => {
+    expect(pendingQuestion([turn("u", "user"), question("q", true)])).toBe(false);
+  });
+
+  it("not awaiting when a real reply is the newest content turn", () => {
+    expect(pendingQuestion([turn("u", "user"), turn("a", "claude")])).toBe(false);
+  });
+
+  it("skips interim steps to find the unanswered question (still awaiting)", () => {
+    // The scan ignores interim turns, so the newest NON-interim claude turn — the open question — still wins.
+    expect(pendingQuestion([turn("u", "user"), question("q", false), turn("s", "claude", true)])).toBe(true);
+  });
+
+  it("not awaiting with no claude turn at all", () => {
+    expect(pendingQuestion([turn("u", "user")])).toBe(false);
+    expect(pendingQuestion([])).toBe(false);
   });
 });
 

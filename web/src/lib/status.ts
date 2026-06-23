@@ -10,6 +10,7 @@ export type StatusKey =
   | "sending"
   | "speaking"
   | "working"
+  | "awaiting"
   | "ready"
   | "not-listening";
 
@@ -21,7 +22,7 @@ export const RECONNECT_GRACE_MS = 90_000;
 
 // data-state on the status panel only uses this reduced set (the offline branches
 // and not-listening all map to "offline" visually).
-export type StatusDataState = "offline" | "ready" | "recording" | "sending" | "speaking" | "working";
+export type StatusDataState = "offline" | "ready" | "recording" | "sending" | "speaking" | "working" | "awaiting";
 
 export type StatusView = {
   key: StatusKey;
@@ -119,6 +120,13 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
     // obvious from the playing audio + the violet visual. The compact bar still
     // uses `title` as its label.
     detail = "";
+  } else if (runtimeState === "awaiting") {
+    // Claude is blocked on the user: an interactive question is open, or it needs permission to run a tool.
+    // A distinct attention state (amber) — never "working" (coral), which would read as "no action needed".
+    key = "awaiting";
+    dataState = "awaiting";
+    title = "Claude needs you";
+    detail = "Answer to continue";
   } else if (runtimeState === "working") {
     key = "working";
     dataState = "working";
@@ -162,7 +170,7 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
 // rule as deriveStatus (#10): a thread with no live daemon is "offline" only once it's been
 // gone past the grace window — a brief drop still reads as present so a Wi-Fi flap doesn't
 // grey every chip. A working thread is coral; a connected idle/ready thread is success.
-export type ThreadTone = "success" | "coral" | "faint";
+export type ThreadTone = "success" | "coral" | "amber" | "faint";
 
 export function gradeThread(inputs: {
   connected: boolean;
@@ -172,9 +180,10 @@ export function gradeThread(inputs: {
   const { connected, state, listening } = inputs;
   // A thread with no live daemon, or one whose daemon can't reach its cmux pane, isn't
   // actionable → grey it (the #10 reconnecting-vs-offline distinction is carried by the active
-  // thread's full StatusView/hero; the chip dot only needs reachable-or-not). A reachable
-  // thread is coral while working, success when idle/ready.
+  // thread's full StatusView/hero; the chip dot only needs reachable-or-not). A reachable thread is
+  // amber when it needs you (a question/permission waiting), coral while working, success when idle.
   if (!connected || !listening) return "faint";
+  if (state === "awaiting") return "amber";
   return state === "working" ? "coral" : "success";
 }
 
