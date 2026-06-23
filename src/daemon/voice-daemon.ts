@@ -731,12 +731,13 @@ export class VoiceDaemon {
     if (!path) return;
     this.lastTranscriptPath = path;
     if (path === this.watchedPath) return;
-    this.watchedPath = path;
     this.transcriptWatcher?.close();
     try {
       this.transcriptWatcher = watch(path, () => this.scheduleSync());
+      this.watchedPath = path; // only on success, so a throw (e.g. file not yet created) is retried next hook
     } catch {
-      this.transcriptWatcher = undefined; // fs.watch unsupported here → the while-active poll carries it
+      this.transcriptWatcher = undefined; // fs.watch unsupported/failed → the while-active poll carries it
+      this.watchedPath = undefined;
     }
   }
 
