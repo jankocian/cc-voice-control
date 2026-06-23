@@ -309,6 +309,22 @@ export function isPaneWorking(turns: ProjectedTurn[]): boolean {
 }
 
 /**
+ * Is the newest content turn an interactive AskUserQuestion still awaiting the user's answer? That means
+ * Claude is blocked on the HUMAN — "awaiting", not "working". We look at the newest non-interim claude turn:
+ * an unanswered question → awaiting; a real reply (or an answered question Claude is now concluding) → not.
+ * `answered` flips once the selection's tool_result lands, so this self-heals from the transcript like the
+ * rest of the projection.
+ */
+export function pendingQuestion(turns: ProjectedTurn[]): boolean {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t.role !== "claude" || t.interim) continue; // skip steps and user rows
+    return t.question !== undefined && t.question.answered === false;
+  }
+  return false;
+}
+
+/**
  * Drop the start-skill announcement (the "voice remote is live" QR + URL reply) from a projection. We key
  * on the daemon's OWN session URL — a value the daemon minted and the skill always prints as the tap/copy
  * fallback — never on the surrounding prose, so reworded copy still filters and a normal reply can't match

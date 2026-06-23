@@ -85,6 +85,28 @@ describe("gradeThread — the per-thread switcher dot (#10 reused per thread)", 
   it("a connected thread whose pane is unreachable is faint (not actionable)", () => {
     expect(gradeThread({ connected: true, state: "idle", listening: false })).toBe("faint");
   });
+
+  it("a connected thread that needs you (awaiting) is amber", () => {
+    expect(gradeThread({ connected: true, state: "awaiting", listening: true })).toBe("amber");
+  });
+});
+
+describe("deriveStatus — 'Claude needs you' (awaiting: a question/permission is waiting)", () => {
+  const ready = (over: Partial<StatusInputs>) => deriveStatus(noDaemon({ daemonConnected: true, ...over }));
+
+  it("awaiting → a distinct attention state, NOT working (coral)", () => {
+    const status = ready({ runtimeState: "awaiting" });
+    expect(status.key).toBe("awaiting");
+    expect(status.dataState).toBe("awaiting");
+    expect(status.title).toBe("Claude needs you");
+    expect(status.detail).toBe("Answer to continue");
+    // The user must still be able to answer (canAct stays true).
+    expect(status.canAct).toBe(true);
+  });
+
+  it("a local action (recording your answer) outranks awaiting", () => {
+    expect(ready({ runtimeState: "awaiting", recording: true }).key).toBe("recording");
+  });
 });
 
 describe("humanizeAgo", () => {

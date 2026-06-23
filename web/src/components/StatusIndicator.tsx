@@ -29,9 +29,9 @@ export function StatusIndicator({
   const label = dataState === "working" && elapsed > 0 ? `${title} · ${formatClock(elapsed)}` : title;
   const message = flash ?? label;
   // Red for an alert flash (an action the user must notice). Amber for the steady attention states
-  // (daemon down / not listening). Neutral white otherwise.
+  // (daemon down / not listening / Claude needs you). Neutral white otherwise.
   const danger = flash !== null && flashAlert;
-  const alert = !danger && (key === "waiting" || key === "not-listening");
+  const alert = !danger && (key === "waiting" || key === "not-listening" || key === "awaiting");
   // A small state-toned dot makes the steady pill read as a live indicator (never over a flash,
   // and not for the attention states — their amber/neutral copy already carries the meaning).
   const dotTone = ready

@@ -3,9 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import type { RosterThread, ThreadId } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
 
-// The active thread's presence dot tone (#10 grading): working = coral, idle/ready = success,
-// offline/unreachable = faint.
-export type DotTone = "success" | "coral" | "faint";
+// The active thread's presence dot tone (#10 grading): needs-you = amber, working = coral,
+// idle/ready = success, offline/unreachable = faint. Mirrors ThreadTone (lib/status#gradeThread).
+export type DotTone = "success" | "coral" | "amber" | "faint";
 
 export type ThreadRow = {
   thread: RosterThread;
@@ -193,7 +193,13 @@ function Dot({ tone }: { tone: DotTone }) {
     <span
       className={cn(
         "size-2 shrink-0 rounded-full",
-        tone === "success" ? "bg-success" : tone === "coral" ? "bg-coral" : "bg-ink-faint"
+        tone === "success"
+          ? "bg-success"
+          : tone === "coral"
+            ? "bg-coral"
+            : tone === "amber"
+              ? "bg-warning"
+              : "bg-ink-faint"
       )}
       aria-hidden="true"
     />

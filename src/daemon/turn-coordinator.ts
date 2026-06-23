@@ -6,8 +6,13 @@
 // "Busy" is a single LEVEL, not a count. Claude runs a pane's turns serially, so a Stop means "idle now"
 // no matter how many UserPromptSubmit preceded it — a glued/merged prompt fires two opens but one close.
 // Modelling it as a counter was the bug that left the gate (and the old hook-counted lamp) stuck. The
-// daemon folds `isBusy` into the working lamp ANDed with the transcript truth, so neither signal alone can
-// wedge the lamp; the reaper below is a last-resort backstop for the INJECT GATE only.
+// daemon ORs `isBusy` with the transcript truth for the working lamp (see VoiceDaemon.computeState): either
+// an open turn OR an unanswered transcript turn reads as working, so a dropped Stop can't flip the lamp to
+// idle while a reply is still streaming. `idle_prompt` (60s) and the reaper below clear a stuck `isBusy`.
+//
+// `permissionPending` is the one thing the transcript CAN'T see: a permission_prompt (Claude blocked on the
+// user's approval) writes no transcript record. The Notification hook sets it; the next forward-progress
+// edge (a tool ran, the turn opened/closed, or a 60s idle_prompt) clears it.
 
 // A turn open this long with no Stop is treated as abandoned and reaped, so the idle-gate can release
 // queued prompts. Generous: real agent turns run minutes; this is only the unattended backstop.
@@ -33,6 +38,10 @@ export class TurnCoordinator {
   private paneBusy = false;
   private busySince?: number;
 
+  // Claude is blocked on the user's approval (a permission_prompt Notification). Set by the hook, cleared on
+  // the next forward-progress edge. The transcript can't see this (no record), so it lives here. See header.
+  private permissionPending = false;
+
   // Identity token for the current injection, bumped on every inject AND clear. pump() captures it before
   // awaiting inject() and re-checks after, so a late result is recognised as stale by IDENTITY, not by the
   // prompt string (the canned status/summary prompts repeat).
@@ -51,9 +60,14 @@ export class TurnCoordinator {
   }
 
   /** The pane is mid-turn (a UserPromptSubmit without its Stop yet), as the inject gate sees it. The daemon
-   *  ANDs this with the transcript-derived state for the working lamp, so a stale hook can't wedge it. */
+   *  ORs this with the transcript-derived state for the working lamp, so a dropped Stop can't idle it early. */
   get isBusy(): boolean {
     return this.paneBusy;
+  }
+
+  /** Claude is blocked on the user's approval (a permission_prompt). The daemon shows "awaiting" for this. */
+  get awaitingPermission(): boolean {
+    return this.permissionPending;
   }
 
   /** The voice prompt currently in flight (for the status "currentTask"), if any. */
@@ -77,6 +91,7 @@ export class TurnCoordinator {
     }
     this.paneBusy = true;
     this.busySince = this.now();
+    this.permissionPending = false; // a new prompt is forward progress past any pending approval
     this.deps.onStatusChange();
   }
 
@@ -84,6 +99,32 @@ export class TurnCoordinator {
   turnClosed(): void {
     this.paneBusy = false;
     this.busySince = undefined;
+    this.permissionPending = false;
+    void this.pump();
+    this.deps.onStatusChange();
+  }
+
+  /** Claude is blocked on the user's approval (a permission_prompt Notification): show "awaiting". */
+  notePermissionPrompt(): void {
+    if (this.permissionPending) return;
+    this.permissionPending = true;
+    this.deps.onStatusChange();
+  }
+
+  /** A forward-progress edge that isn't a turn open/close (a tool ran — PreToolUse) clears a pending
+   *  approval: if Claude is running tools again, it's no longer parked on the permission prompt. */
+  noteProgress(): void {
+    if (!this.permissionPending) return;
+    this.permissionPending = false;
+    this.deps.onStatusChange();
+  }
+
+  /** `idle_prompt` (Claude has been idle 60s+): a guaranteed floor that clears a stuck-busy lamp if a Stop
+   *  was ever dropped. The transcript still decides whether there's genuinely unfinished work. */
+  forceIdle(): void {
+    this.paneBusy = false;
+    this.busySince = undefined;
+    this.permissionPending = false;
     void this.pump();
     this.deps.onStatusChange();
   }

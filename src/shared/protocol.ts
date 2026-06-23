@@ -9,7 +9,11 @@ import type { EncBlob } from "./e2e.js";
 // secret, just an opaque routing key that attributes every event to one daemon/thread.
 export type ThreadId = string;
 
-export type SessionRuntimeState = "idle" | "working";
+// "awaiting" = Claude is blocked on the HUMAN (an interactive AskUserQuestion still open, or a permission
+// prompt) — not working, not free. Distinct from "idle" so the phone can flag "Claude needs you" instead of
+// lying "working" (coral) through a wait. Derived from the transcript (a pending question) + the Notification
+// hook (a permission_prompt); see VoiceDaemon.computeState.
+export type SessionRuntimeState = "idle" | "working" | "awaiting";
 
 export type SessionState = {
   sessionId: string;
