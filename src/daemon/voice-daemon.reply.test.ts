@@ -66,6 +66,15 @@ const answerRec = (uuid: string, ts: string, text: string) =>
     timestamp: ts,
     message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] }
   });
+// A user tool_result that ANSWERS a question (its tool_use_id matches the AskUserQuestion tool_use id) — what
+// flushes to the transcript when the user picks an option, flipping the projected question to `answered`.
+const questionAnswerRec = (uuid: string, ts: string, toolUseId: string) =>
+  rec({
+    type: "user",
+    uuid,
+    timestamp: ts,
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: "ok" }] }
+  });
 // A bulky tool result (not a conversational turn — dropped by the projection) used to overflow the tail.
 const fillerRec = (uuid: string, bytes: number) =>
   rec({
@@ -183,7 +192,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
   // Start a daemon wired to the fake bridge, drive a voice turn up to (but not including) its answer, and
   // return the bits a test needs to finish it. `transcriptAtClose` lets a test control exactly what the
   // transcript tail looks like when the Stop hook fires (e.g. with the prompt scrolled out).
-  async function driveUpToClose(transcript: string): Promise<{ daemon: VoiceDaemon; port: number }> {
+  async function startDaemon(): Promise<{ daemon: VoiceDaemon; port: number }> {
     const daemon = new VoiceDaemon({
       config: {
         openaiApiKey: "k",
@@ -203,6 +212,11 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     for (let i = 0; i < 50 && !sendToDaemon; i++) await sleep(20); // wait for the bridge socket
     expect(sendToDaemon).toBeDefined();
     const port = JSON.parse(readFileSync(join(dataDir, "runtime", "SURF.json"), "utf8")).port as number;
+    return { daemon, port };
+  }
+
+  async function driveUpToClose(transcript: string): Promise<{ daemon: VoiceDaemon; port: number }> {
+    const { daemon, port } = await startDaemon();
 
     // Phone asks for a status → the daemon enqueues + "injects" the canned prompt (a tracked voice turn).
     await sendToDaemon?.({ type: "status_request" });
@@ -279,15 +293,85 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     return false;
   }
 
-  it("surfaces an interactive question LIVE via the watch/poll, with NO further hook (picker blocks the pane)", async () => {
+  it("surfaces an interactive question LIVE via the live watch, with NO further hook (picker blocks the pane)", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
     writeFileSync(transcript, "");
-    const { daemon } = await driveUpToClose(transcript); // turn-open + steps → watch+poll armed, isBusy true
+    const { daemon } = await driveUpToClose(transcript); // turn-open + steps → watch armed, isBusy true
 
     // The AskUserQuestion record lands. The picker now BLOCKS the pane, so no turn-progress/close hook fires
-    // and no further bytes are written — only the watch (on this write) + the 1s poll can push it. They MUST.
+    // and no further bytes are written — only the live watch on this write can push it. It MUST.
     appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
     expect(await waitForHistoryQuestion()).toBe(true);
+
+    daemon.stop();
+  }, 20000);
+
+  // Root cause of "the question never showed until I tapped Stop" #1: a fresh session/new instance. Hooks fire
+  // BEFORE the first record flushes, so the transcript file does not exist yet at /turn-open → fs.watch throws
+  // ENOENT. The watch must keep retrying and arm itself once the file appears, then deliver a later write with
+  // no further hook. (Pre-fix this only worked because an always-on poll masked it.)
+  it("arms the live tail when the transcript doesn't exist yet at turn-open, then delivers with NO further hook", async () => {
+    const transcript = join(dataDir, "not-created-yet.jsonl"); // intentionally NOT created before turn-open
+    const { daemon, port } = await startDaemon();
+    await post(port, "/turn-open", { transcriptPath: transcript, prompt: CANNED, permissionMode: "default" });
+    await sleep(120); // the watch arm threw ENOENT and is now retrying
+
+    // Claude creates the transcript and the question lands — the picker blocks the pane, so NO further hook fires.
+    writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
+    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
+    expect(await waitForHistoryQuestion()).toBe(true);
+
+    daemon.stop();
+  }, 20000);
+
+  // Root cause #2: /clear or /compact rewrites the transcript at the SAME path → the inode-bound watcher dies
+  // and the old `path === watchedPath` guard never re-armed it. The watch must re-arm on the 'rename' and
+  // deliver a write to the NEW inode with no further hook.
+  it("re-arms the live tail when the transcript is replaced at the same path, delivering with NO further hook", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon } = await driveUpToClose(transcript); // watch armed on the original inode
+
+    rmSync(transcript); // /clear|/compact: same path, new file → the original watcher is now dead
+    writeFileSync(transcript, userRec("U2", "2026-06-22T14:00:00.000Z", CANNED));
+    await sleep(120);
+    appendFileSync(transcript, questionRec("Q2", "2026-06-22T14:00:05.000Z"));
+    expect(await waitForHistoryQuestion()).toBe(true);
+
+    daemon.stop();
+  }, 20000);
+
+  // The HEADLINE fix: Claude does NOT write the AskUserQuestion record to the transcript until it's answered
+  // (verified live), so the projection alone can NEVER show a pending question — there's nothing to read. The
+  // PreToolUse hook carries it, so the daemon surfaces it live from the hook payload, then yields to the
+  // transcript (without double-showing or re-speaking) once the answer flushes it there.
+  it("surfaces a PENDING AskUserQuestion LIVE from the PreToolUse hook (absent from the transcript), then yields on answer", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
+    const { daemon, port } = await startDaemon();
+    await post(port, "/turn-open", { transcriptPath: transcript, prompt: CANNED, permissionMode: "default" });
+    await sleep(80);
+
+    // PreToolUse fires the instant the picker opens, with the question in its payload. The transcript does NOT
+    // contain the question (Claude flushes it only on answer) — same content as questionRec ("Which?", A/B).
+    const questions = [
+      { question: "Which?", header: "H", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }
+    ];
+    await post(port, "/turn-progress", { transcriptPath: transcript, question: { toolUseId: "q1", questions } });
+
+    // It MUST reach the phone live as a pending question, read aloud once — though it's nowhere in the file.
+    expect(await waitForHistoryQuestion()).toBe(true);
+    await sleep(60);
+    const spokeQuestion = () => vi.mocked(synthesizeSpeech).mock.calls.filter((c) => c[1].includes("Which?")).length;
+    expect(spokeQuestion()).toBe(1);
+
+    // Claude answers → the record (same content) finally flushes to the transcript, now answered. The overlay
+    // must yield (one card, not two) and the answered question must NOT be read aloud again.
+    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
+    appendFileSync(transcript, questionAnswerRec("AR", "2026-06-22T13:54:05.000Z", "q1"));
+    await post(port, "/turn-progress", { transcriptPath: transcript });
+    await sleep(250);
+    expect(spokeQuestion()).toBe(1); // still once — the answered flush is never re-spoken
 
     daemon.stop();
   }, 20000);
