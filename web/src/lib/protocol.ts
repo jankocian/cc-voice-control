@@ -7,6 +7,9 @@ export type {
   DaemonToBrowserEvent,
   HistoryTurn,
   InjectMode,
+  Question,
+  QuestionOption,
+  QuestionPayload,
   RegistryEvent,
   RosterEvent,
   RosterThread,
@@ -23,3 +26,4 @@ export type {
   WireRosterEvent,
   WireRosterThread
 } from "../../../src/shared/protocol";
+export { isVoiceAnswerable } from "../../../src/shared/protocol";

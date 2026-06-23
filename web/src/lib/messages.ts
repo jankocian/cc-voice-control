@@ -2,7 +2,7 @@
 // transcript (see src/daemon/transcript-projection.ts) and sent in a `history` snapshot; `id` is the
 // turn's native uuid, so audio attaches to it and a turn re-sent in a later snapshot never duplicates.
 
-import type { HistoryTurn } from "./protocol";
+import type { HistoryTurn, QuestionPayload } from "./protocol";
 
 export type MessageKind = "you" | "claude";
 
@@ -27,6 +27,9 @@ export type Message = {
   hasAudio?: boolean;
   // A "step": Claude's narration before a tool call. Rendered dimmer; tap-to-play synthesizes on demand.
   interim?: boolean;
+  // Present iff this turn is Claude's interactive AskUserQuestion — rendered as a question card (the question
+  // + lettered options), read aloud, and answered by voice. `body` still holds the flattened spoken text.
+  question?: QuestionPayload;
   title: string;
   body: string;
   // Wall-clock time the turn happened, e.g. "12:34 AM".
@@ -45,6 +48,7 @@ export function messageFromHistory(turn: HistoryTurn): Message {
     timestamp: turn.timestamp,
     hasAudio: turn.hasAudio,
     interim: turn.interim === true,
+    ...(turn.question ? { question: turn.question } : {}),
     title: turn.role === "user" ? "You" : "Claude Code",
     body: turn.text,
     time: formatClock(turn.timestamp)
@@ -110,9 +114,13 @@ function formatClock(timestamp: number): string {
 
 // Play-on-land: the newest incoming reply to autoplay when landing on a thread that had unread. `messages`
 // is newest-first (see buildThread), so the first non-interim Claude turn with a requestId is the one. A
-// step ("interim") narration or a user turn never plays. Returns its requestId, or null if none.
+// step ("interim") narration or a user turn never plays; an ALREADY-ANSWERED question never replays either
+// (an unanswered question still does — landing should read out the question awaiting you). Returns its
+// requestId, or null if none.
 export function newestPlayableReply(messages: readonly Message[]): string | null {
-  const reply = messages.find((m) => m.kind === "claude" && !m.interim && Boolean(m.requestId));
+  const reply = messages.find(
+    (m) => m.kind === "claude" && !m.interim && !m.question?.answered && Boolean(m.requestId)
+  );
   return reply?.requestId ?? null;
 }
 
