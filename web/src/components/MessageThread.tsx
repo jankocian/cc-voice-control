@@ -63,7 +63,15 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
     <div className="flex flex-col gap-4 px-4 pb-28">
       {messages.map((message) => {
         if (message.kind === "you") {
-          return <MessageBubble key={message.id} side="user" body={message.body} time={message.time} delivered />;
+          return (
+            <MessageBubble
+              key={message.id}
+              side="user"
+              body={message.body}
+              time={message.time}
+              delivery={message.delivery}
+            />
+          );
         }
 
         // A step: Claude's interim narration. Dim, compact, tap-to-play (synthesized on demand).

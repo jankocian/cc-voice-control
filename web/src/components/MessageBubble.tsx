@@ -1,25 +1,27 @@
-import { Check } from "lucide-react";
+import { Check, CheckCheck, Clock } from "lucide-react";
 import type { ReactNode } from "react";
 import { renderMarkdown } from "@/lib/markdown";
+import type { Delivery } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 
-// A chat bubble. User messages: right-aligned peach bubble, plain transcribed text + time + coral
-// check. Agent messages: left-aligned lavender bubble that may contain arbitrary children (the inline
-// audio player embeds here) above the body, which is rendered as light Markdown so it reads like the
-// terminal. `onActivate` (agent rows with audio) makes the whole card a play/pause target — the player's
-// own controls stop propagation so they aren't double-triggered.
+// A chat bubble. User messages: right-aligned peach bubble, plain transcribed text + time + a WhatsApp-style
+// delivery mark (clock = queued, one check = received by Claude, two coral checks = in Claude's transcript).
+// Agent messages: left-aligned lavender bubble that may contain arbitrary children (the inline audio player
+// embeds here) above the body, which is rendered as light Markdown so it reads like the terminal.
+// `onActivate` (agent rows with audio) makes the whole card a play/pause target — the player's own controls
+// stop propagation so they aren't double-triggered.
 export function MessageBubble({
   side,
   body,
   time,
-  delivered,
+  delivery,
   onActivate,
   children
 }: {
   side: "user" | "agent";
   body: string;
   time: string;
-  delivered?: boolean;
+  delivery?: Delivery;
   onActivate?: () => void;
   children?: ReactNode;
 }) {
@@ -49,7 +51,15 @@ export function MessageBubble({
         className={cn("mt-1 flex items-center gap-1 px-1 text-[11px] text-ink-faint", isUser ? "flex-row" : "flex-row")}
       >
         <span className="tabular-nums">{time}</span>
-        {isUser && delivered && <Check className="size-3.5 text-coral" />}
+        {isUser &&
+          delivery &&
+          (delivery === "queued" ? (
+            <Clock className="size-3.5 text-ink-faint" aria-label="Queued" />
+          ) : delivery === "accepted" ? (
+            <Check className="size-3.5 text-ink-faint" aria-label="Received by Claude" />
+          ) : (
+            <CheckCheck className="size-3.5 text-coral" aria-label="In Claude's history" />
+          ))}
       </div>
     </div>
   );

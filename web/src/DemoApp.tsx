@@ -269,7 +269,7 @@ function StateDemo({ state }: { state: string }) {
           <div className="flex flex-col gap-4 px-4 pb-6">
             {DEMO_THREAD.map((m) =>
               m.side === "user" ? (
-                <MessageBubble key={m.id} side="user" body={m.body} time={m.time} delivered />
+                <MessageBubble key={m.id} side="user" body={m.body} time={m.time} delivery="logged" />
               ) : (
                 <MessageBubble
                   key={m.id}

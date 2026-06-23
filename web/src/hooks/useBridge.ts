@@ -24,6 +24,7 @@ export type BridgeContentEvent = Extract<
   | { type: "tts_audio" }
   | { type: "tts_status" }
   | { type: "history" }
+  | { type: "prompt_status" }
   | { type: "error" }
   | { type: "session_status" }
   | { type: "spawn_pending" }
