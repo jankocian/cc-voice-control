@@ -19727,6 +19727,15 @@ function isPaneWorking(turns) {
   }
   return false;
 }
+function pendingQuestion(turns) {
+  for (let i = turns.length - 1;i >= 0; i--) {
+    const t = turns[i];
+    if (t.role !== "claude" || t.interim)
+      continue;
+    return t.question !== undefined && t.question.answered === false;
+  }
+  return false;
+}
 function dropSessionAnnouncement(turns, sessionUrl) {
   if (!sessionUrl)
     return turns;
@@ -19783,6 +19792,7 @@ class TurnCoordinator {
   queue = [];
   paneBusy = false;
   busySince;
+  permissionPending = false;
   injectSeq = 0;
   now;
   constructor(deps) {
@@ -19794,6 +19804,9 @@ class TurnCoordinator {
   }
   get isBusy() {
     return this.paneBusy;
+  }
+  get awaitingPermission() {
+    return this.permissionPending;
   }
   get currentVoicePrompt() {
     return this.inFlight;
@@ -19811,11 +19824,32 @@ class TurnCoordinator {
     }
     this.paneBusy = true;
     this.busySince = this.now();
+    this.permissionPending = false;
     this.deps.onStatusChange();
   }
   turnClosed() {
     this.paneBusy = false;
     this.busySince = undefined;
+    this.permissionPending = false;
+    this.pump();
+    this.deps.onStatusChange();
+  }
+  notePermissionPrompt() {
+    if (this.permissionPending)
+      return;
+    this.permissionPending = true;
+    this.deps.onStatusChange();
+  }
+  noteProgress() {
+    if (!this.permissionPending)
+      return;
+    this.permissionPending = false;
+    this.deps.onStatusChange();
+  }
+  forceIdle() {
+    this.paneBusy = false;
+    this.busySince = undefined;
+    this.permissionPending = false;
     this.pump();
     this.deps.onStatusChange();
   }
@@ -19919,7 +19953,7 @@ class VoiceDaemon {
   pairingOpen = null;
   pairingTimer;
   turns;
-  lastWorking = false;
+  lastState = "idle";
   audio = new Map;
   lastTranscriptPath;
   seen = new Set;
@@ -19984,7 +20018,7 @@ class VoiceDaemon {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         const route = req.method === "POST" ? req.url : undefined;
-        if (route !== "/turn-open" && route !== "/turn-progress" && route !== "/turn-close" && route !== "/reset" && route !== "/pair" && route !== "/spawn") {
+        if (route !== "/turn-open" && route !== "/turn-progress" && route !== "/turn-close" && route !== "/notify" && route !== "/reset" && route !== "/pair" && route !== "/spawn") {
           res.statusCode = 404;
           res.end();
           return;
@@ -20021,7 +20055,14 @@ class VoiceDaemon {
             } else if (route === "/turn-progress") {
               const { transcriptPath } = JSON.parse(body || "{}");
               this.setTranscript(transcriptPath);
+              this.turns.noteProgress();
               this.syncFromTranscript();
+            } else if (route === "/notify") {
+              const { kind } = JSON.parse(body || "{}");
+              if (kind === "permission")
+                this.turns.notePermissionPrompt();
+              else if (kind === "idle")
+                this.turns.forceIdle();
             } else {
               const { transcriptPath } = JSON.parse(body || "{}");
               this.setTranscript(transcriptPath);
@@ -20364,7 +20405,7 @@ class VoiceDaemon {
         }))
       });
     }
-    if (force || this.isWorking(turns) !== this.lastWorking)
+    if (force || this.computeState(turns) !== this.lastState)
       this.emitStatus(turns);
     this.synthesizeReplies(turns);
   }
@@ -20456,7 +20497,7 @@ class VoiceDaemon {
     return {
       threadId: this.init.threadId,
       label: this.sealedLabel,
-      state: this.lastWorking ? "working" : "idle",
+      state: this.lastState,
       listening: this.cmuxHealthy,
       spawnId: this.pendingSpawnId
     };
@@ -20483,16 +20524,20 @@ class VoiceDaemon {
     if (this.ws?.readyState === wrapper_default.OPEN)
       this.registerThread();
   }
-  isWorking(turns) {
-    return this.turns.hasInFlight || this.turns.isBusy && isPaneWorking(turns);
+  computeState(turns) {
+    if (pendingQuestion(turns) || this.turns.awaitingPermission)
+      return "awaiting";
+    if (this.turns.hasInFlight || this.turns.isBusy || isPaneWorking(turns))
+      return "working";
+    return "idle";
   }
   emitStatus(turns) {
-    const working = this.isWorking(turns ?? this.projectedNow());
-    this.lastWorking = working;
+    const runtimeState = this.computeState(turns ?? this.projectedNow());
+    this.lastState = runtimeState;
     const state = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,
-      state: working ? "working" : "idle"
+      state: runtimeState
     };
     this.sendToBrowser({ type: "session_status", state, memory: { currentTask: this.turns.currentVoicePrompt } });
     if (this.ws?.readyState === wrapper_default.OPEN)
