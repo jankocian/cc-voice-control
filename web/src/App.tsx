@@ -499,6 +499,7 @@ export function App({ session }: { session: Session }) {
     duration: playback.duration,
     playableIds: playback.playableIds,
     audioStatus: playback.audioStatus,
+    pendingPlayId: playback.pendingPlayId,
     onPlay: playback.playEntry,
     onReplay: playback.replayEntry,
     onSeek: playback.seekEntry

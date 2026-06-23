@@ -13,17 +13,28 @@ export type ThreadPlayback = {
   playableIds: ReadonlySet<string>;
   // Per-reply audio lifecycle (pending = synthesizing, failed = retryable) for the loading/retry indicator.
   audioStatus: ReadonlyMap<string, "pending" | "failed">;
+  // requestId for which a tap-to-play fetch is in flight (loading spinner for steps + history rows).
+  pendingPlayId: string | null;
   onPlay: (requestId: string) => void;
   onReplay: (requestId: string) => void;
   onSeek: (requestId: string, seconds: number) => void;
 };
 
-// Shown in an agent bubble while its audio is still being synthesized.
-function AudioPending() {
+// Skeleton player shown while audio is synthesizing — same structural dimensions as InlineAudioPlayer
+// so the bubble height never shifts when the real player swaps in.
+function AudioPendingPlayer() {
   return (
-    <div className="flex items-center gap-2 text-xs font-medium text-violet-ink/70">
-      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-      <span>Generating voice…</span>
+    <div className="flex items-center gap-3">
+      <div className="grid size-9 shrink-0 place-items-center rounded-full bg-violet/40">
+        <Loader2 className="size-4 animate-spin text-white" aria-hidden="true" />
+      </div>
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="w-9 shrink-0 text-right text-[11px] font-medium tabular-nums text-violet-ink/40">0:00</span>
+        <div className="h-1.5 flex-1 rounded-full bg-violet/15" />
+        <span className="w-9 shrink-0 text-[11px] font-medium tabular-nums text-violet-ink/40" />
+      </div>
+      {/* placeholder keeps the same width as the replay button */}
+      <div className="size-8 shrink-0" />
     </div>
   );
 }
@@ -87,13 +98,16 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
           );
         }
 
-        // A step: Claude's interim narration. Dim, compact, tap-to-play (synthesized on demand).
+        // A step: Claude's interim narration. Dim, compact, whole-row tap-to-play (synthesized on demand).
         if (message.interim) {
+          const stepStatus = playback.audioStatus.get(message.requestId);
           return (
             <StepRow
               key={message.id}
               body={message.body}
               playing={playback.playingId === message.requestId}
+              loading={playback.pendingPlayId === message.requestId || stepStatus === "pending"}
+              failed={stepStatus === "failed"}
               onPlay={() => playback.onPlay(message.requestId)}
             />
           );
@@ -102,8 +116,28 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
         const requestId = message.requestId;
         const playable = requestId ? playback.playableIds.has(requestId) : false;
         const status = requestId ? playback.audioStatus.get(requestId) : undefined;
+        const isFetchPending = requestId ? playback.pendingPlayId === requestId : false;
         const id = requestId ?? message.id;
         const loaded = playback.loadedId === id;
+
+        // Status "pending" (synthesizing) takes precedence over playable — the skeleton player
+        // shows at the same height so no layout shift when real audio arrives.
+        const audioContent =
+          status === "pending" || isFetchPending ? (
+            <AudioPendingPlayer />
+          ) : playable && requestId ? (
+            <InlineAudioPlayer
+              playing={playback.playingId === requestId}
+              loaded={loaded}
+              position={loaded ? playback.position : 0}
+              duration={loaded ? playback.duration : 0}
+              onPlayPause={() => playback.onPlay(requestId)}
+              onReplay={() => playback.onReplay(requestId)}
+              onSeek={(seconds) => playback.onSeek(requestId, seconds)}
+            />
+          ) : status === "failed" && requestId ? (
+            <AudioRetry onRetry={() => playback.onPlay(requestId)} />
+          ) : null;
 
         return (
           <MessageBubble
@@ -113,21 +147,7 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
             time={message.time}
             onActivate={playable && requestId ? () => playback.onPlay(requestId) : undefined}
           >
-            {playable && requestId ? (
-              <InlineAudioPlayer
-                playing={playback.playingId === requestId}
-                loaded={loaded}
-                position={loaded ? playback.position : 0}
-                duration={loaded ? playback.duration : 0}
-                onPlayPause={() => playback.onPlay(requestId)}
-                onReplay={() => playback.onReplay(requestId)}
-                onSeek={(seconds) => playback.onSeek(requestId, seconds)}
-              />
-            ) : status === "pending" ? (
-              <AudioPending />
-            ) : status === "failed" && requestId ? (
-              <AudioRetry onRetry={() => playback.onPlay(requestId)} />
-            ) : null}
+            {audioContent}
           </MessageBubble>
         );
       })}
