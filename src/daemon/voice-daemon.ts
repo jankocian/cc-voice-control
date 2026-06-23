@@ -804,12 +804,14 @@ export class VoiceDaemon {
       }
     }
     // Pass 2 — SUBSTRING, for the glued survivor (no exact match for injected "A"; the on-path "A.B" contains
-    // it). On a RE-BIND (the entry bound before, so `userTs` is set — kept across the re-bind) the glued
-    // survivor is the orphan's SIBLING, so we require a parent match, compared null-normalized so a ROOT
-    // orphan (no parent) only re-binds to another root-level turn. This rejects an unrelated later turn that
-    // merely contains the text (different parent) even when it's the SOLE candidate present. A FIRST bind
-    // (never bound, `userTs` undefined) has no sibling to match, so it takes the newest containing turn (the
-    // survivor just appeared; later look-alikes haven't yet).
+    // it). On a RE-BIND (the entry bound before, so `userTs` is set, kept across the re-bind), the survivor
+    // is DETERMINISTICALLY the orphan's SIBLING: the active branch is a single chain, so it has exactly ONE
+    // on-path user turn whose parentUuid equals the orphan's (compared null-normalized, so a root orphan's
+    // sibling is the lone root-level turn). We match that turn alone — an unrelated later look-alike sits
+    // deeper in the chain with a different parent and is never a candidate, no timestamp/ordering heuristic
+    // needed. The text-contains check still applies, so a REWIND (the sibling is a different prompt that
+    // doesn't contain the orphan's words) leaves the entry unbound — the abandoned prompt is never spoken.
+    // A FIRST bind (never bound, no orphan) takes the newest containing turn (the survivor just appeared).
     for (const entry of this.pending) {
       if (!entry.opened || entry.userUuid) continue;
       const et = entry.text.trim();
