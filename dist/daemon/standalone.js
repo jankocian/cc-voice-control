@@ -19613,7 +19613,7 @@ function normalizeQuestions(raw) {
   return raw.map(normalizeQuestion).filter((q) => q !== undefined);
 }
 function questionContentSig(questions) {
-  return questions.map((q) => `${q.question}::${q.options.map((o) => o.label).join(",")}`).join("||");
+  return questions.map((q) => `${q.header ?? ""}|${q.multiSelect ? "m" : ""}|${q.question}::${q.options.map((o) => `${o.label}/${o.description ?? ""}`).join(",")}`).join("||");
 }
 function extractQuestionAnswer(r) {
   if (roleOf(r) !== "user" || r.isSidechain)
@@ -20084,7 +20084,7 @@ class VoiceDaemon {
               this.syncFromTranscript();
             } else if (route === "/notify") {
               const { kind } = JSON.parse(body || "{}");
-              if (kind === "permission")
+              if (kind === "permission" && !pendingQuestion(this.projectedNow()))
                 this.turns.notePermissionPrompt();
               else if (kind === "idle")
                 this.turns.forceIdle();
@@ -20324,12 +20324,6 @@ class VoiceDaemon {
         this.answeringQuestion = false;
       }
       if (result === "sent") {
-        if (this.pendingQuestionOverlay?.question) {
-          this.pendingQuestionOverlay = {
-            ...this.pendingQuestionOverlay,
-            question: { ...this.pendingQuestionOverlay.question, answered: true }
-          };
-        }
         this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
         this.syncFromTranscript();
         return;
