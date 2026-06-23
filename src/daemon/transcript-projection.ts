@@ -152,11 +152,21 @@ export function normalizeQuestions(raw: unknown): Question[] {
   return raw.map(normalizeQuestion).filter((q): q is Question => q !== undefined);
 }
 
-// Content identity for a question set: its prompt(s) + option labels. Lets the daemon recognize that the
-// pending-question OVERLAY (sourced from the PreToolUse hook) and the same question once it FLUSHES to the
-// transcript (on answer) are the same thing — so the overlay yields to the transcript without double-showing.
+// Content identity for a question set: header + multiSelect + prompt + every option's label & description.
+// Lets the daemon recognize that the pending-question OVERLAY (from the PreToolUse hook) and the same question
+// once it FLUSHES to the transcript (on answer) are the same thing — so the overlay yields without
+// double-showing. Keyed on the FULL content (not just prompt text) so two genuinely-different questions that
+// happen to share a prompt don't collide. ponytail: two byte-identical questions in one session still alias —
+// acceptable (the cards are indistinguishable anyway).
 export function questionContentSig(questions: Question[]): string {
-  return questions.map((q) => `${q.question}::${q.options.map((o) => o.label).join(",")}`).join("||");
+  return questions
+    .map(
+      (q) =>
+        `${q.header ?? ""}|${q.multiSelect ? "m" : ""}|${q.question}::${q.options
+          .map((o) => `${o.label}/${o.description ?? ""}`)
+          .join(",")}`
+    )
+    .join("||");
 }
 
 // An answered AskUserQuestion: Claude writes a user record carrying `toolUseResult.answers` (question ->
