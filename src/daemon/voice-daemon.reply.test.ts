@@ -262,6 +262,36 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     return false;
   }
 
+  // Poll for a `history` event that contains a question turn — to prove the question reaches the phone.
+  async function waitForHistoryQuestion(): Promise<boolean> {
+    for (let i = 0; i < 80; i++) {
+      for (const env of daemonOut as { channel?: string; threadId?: string; enc?: EncBlob }[]) {
+        if (env.channel !== "browser" || !env.enc) continue;
+        const event = await openJson<{ type?: string; turns?: { question?: unknown }[] }>(
+          key,
+          env.enc,
+          aad("browser", env.threadId ?? "SURF")
+        );
+        if (event.type === "history" && event.turns?.some((t) => t.question)) return true;
+      }
+      await sleep(50);
+    }
+    return false;
+  }
+
+  it("surfaces an interactive question LIVE via the watch/poll, with NO further hook (picker blocks the pane)", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon } = await driveUpToClose(transcript); // turn-open + steps → watch+poll armed, isBusy true
+
+    // The AskUserQuestion record lands. The picker now BLOCKS the pane, so no turn-progress/close hook fires
+    // and no further bytes are written — only the watch (on this write) + the 1s poll can push it. They MUST.
+    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
+    expect(await waitForHistoryQuestion()).toBe(true);
+
+    daemon.stop();
+  }, 20000);
+
   it("waits for the FINAL answer (never speaks an interim step) when it flushes after the Stop hook", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
     writeFileSync(transcript, "");

@@ -764,6 +764,7 @@ export class VoiceDaemon {
   private setTranscript(path?: string): void {
     if (!path) return;
     this.lastTranscriptPath = path;
+    this.ensurePoll(); // a session has a transcript now → run the deterministic live-tail poll
     if (path === this.watchedPath) return;
     this.transcriptWatcher?.close();
     try {
@@ -784,24 +785,23 @@ export class VoiceDaemon {
     }, SYNC_DEBOUNCE_MS);
   }
 
-  // While a turn could still be writing, back fs.watch up with a slow poll (some filesystems coalesce/miss
-  // events). It self-stops when the turn goes idle so an idle daemon never re-reads an unchanging file.
+  // DETERMINISTIC live tail: once a session has a transcript, re-read + reflect on a FIXED cadence for as
+  // long as the daemon is alive — NOT gated on the (imperfect) working-state. fs.watch still delivers instant
+  // updates; this poll is the guarantee that ANY transcript change reaches the phone within FLUSH_POLL_MS,
+  // even when a watch event is missed, the watched path just changed, or the working-state misreads "idle"
+  // (e.g. while Claude blocks on an AskUserQuestion). The read is cheap and a no-op send when nothing changed
+  // (reflect's sig guard), so an idle session costs only a bounded periodic read — the price of being rock
+  // solid. Stops only when the daemon stops.
   private ensurePoll(): void {
-    if (this.syncPoll) return;
+    if (this.syncPoll || this.stopped || !this.lastTranscriptPath) return;
     this.syncPoll = setInterval(() => {
-      if (this.stopped || !this.isTurnActive()) {
-        if (this.syncPoll) clearInterval(this.syncPoll);
+      if (this.stopped) {
+        clearInterval(this.syncPoll);
         this.syncPoll = undefined;
         return;
       }
       this.scheduleSync();
     }, FLUSH_POLL_MS);
-  }
-
-  // A turn is still "active" (worth polling) while Claude is mid-turn (the inject gate) OR the transcript's
-  // newest user turn still has no final reply — its answer may be streaming in after the Stop hook.
-  private isTurnActive(): boolean {
-    return this.turns.isBusy || isPaneWorking(this.projectedNow());
   }
 
   // Hook/sync-driven re-sync: authoritative, so it ALWAYS sends (force). The ONE call the hooks make;
