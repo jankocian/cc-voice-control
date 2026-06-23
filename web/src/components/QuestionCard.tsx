@@ -45,13 +45,15 @@ export function QuestionCard({
         </div>
 
         <div className="flex flex-col gap-3">
-          {questions.map((q, qi) => (
-            <div key={qi} className="flex flex-col gap-1.5">
+          {/* Key by content, not the array index: biome's noArrayIndexKey forbids index keys, and a
+              question's options/sub-questions are distinct, so label/question text is a stable unique key. */}
+          {questions.map((q) => (
+            <div key={q.question} className="flex flex-col gap-1.5">
               {q.header && <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">{q.header}</p>}
               <p className="text-[15px] font-medium leading-snug text-ink">{q.question}</p>
               <ol className="mt-0.5 flex flex-col gap-1">
                 {q.options.map((o, oi) => (
-                  <li key={oi} className="flex gap-2 text-[14px] leading-snug text-ink">
+                  <li key={o.label} className="flex gap-2 text-[14px] leading-snug text-ink">
                     <span className="font-semibold text-violet-ink">{String.fromCharCode(65 + oi)}</span>
                     <span>
                       {o.label}
