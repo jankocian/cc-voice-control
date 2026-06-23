@@ -63,41 +63,59 @@ A trailing unanswered user row is itself the leaf, so it shows (correct — it's
 
 ## Working state — derived, self-healing
 
-- `working` ⇔ the active branch's latest user turn has no final answer yet.
-- The `Stop` hook stays an **absolute idle edge for the inject gate only** (pane idle ⇒ inject
-  next). It is no longer a counter — there is no open/close balance to drift, so "working"
-  cannot stick. The reaper/zombie logic is deleted.
+`working = hasInFlight || (isBusy && isPaneWorking(activeBranch))`:
 
-## TTS reply — derived
+- `hasInFlight` — our injection is typed but not yet an open turn (the gap before it lands).
+- `isBusy` — the inject gate's level: a `UserPromptSubmit` without its `Stop` yet. It is a single
+  LEVEL, **not a counter** — a glued prompt fires two opens but one close, and one `Stop` means
+  idle, so it can't stick at "2".
+- `isPaneWorking` — the active branch's newest user turn has no final (non-interim) reply yet.
 
-- Speak the active branch's newest final answer to a **voice-originated** user turn, **deduped
-  by the answer record's `uuid`** (existing `spoken` set).
-- Voice-originated = the on-path user turn contains a prompt we injected (substring-tolerant, so
-  gluing is harmless: the merged turn is spoken once; the dead branch has no answer).
-- This replaces the fragile `userUuid` + exact-text pairing with tree-position + uuid dedup.
+The **AND** is the robustness: a missed `Stop` leaves `isBusy` stuck, but the transcript going
+idle (a real reply landed) still flips `working` off; an interrupt clears `isBusy`, so the lamp
+idles at once (the pure-transcript form would read "working" forever on an Esc'd turn); and the
+transcript can't read "working" past a real reply. Neither signal alone can wedge the lamp.
+
+The `TurnCoordinator` keeps a small **TTL reaper** as a backstop for the inject GATE only (a
+missed `Stop` or an injection whose open never arrives), so injection can't wedge forever. It
+never drives the lamp — the lamp self-heals from the transcript.
+
+## TTS reply — tree + uuid
+
+Replies bind to their native user record by `uuid` and resolve over the **active branch**
+(`resolveVoiceReply` on the projected turns), so a dead-branch turn is never the target. Two
+tolerances make the glued case work:
+
+- **Re-bind off a dead branch:** a `pending` entry bound to the orphan `A` at turn-open (before
+  `A.B` existed) is released when `A` drops off the active branch, then re-binds to the survivor.
+- **Two-pass match (exact, then substring):** so a short prompt can't steal a longer turn; the
+  merged `A.B` (no exact match for injected `A`) binds because it *contains* `A`.
+
+Dedup is by the answer record's `uuid` (the existing `spoken` set), so a reply is voiced once.
 
 ## Realtime / latency (the "must feel fast" requirement)
 
 - **Floor = STT (~1s).** You cannot render the user's text before transcribing it; this is
   inherent and architecture-independent.
 - **Post-STT pipeline stays tight and event-driven:** inject → `fs.watch` → `project` → push,
-  target <300ms after the JSONL write. No polling.
-- **Perceived-instant echo (isolated, optional):** on STT completion the daemon sends a
-  fire-and-forget `stt_echo` (NOT a conversation row); the phone shows a transient "sending…"
-  bubble that is **wiped wholesale by the next authoritative `history`**. Zero daemon
-  conversation state; it cannot orphan because the projection the phone renders is always the
-  complete truth. This buys back the ~0.5–1s that killing the optimistic row would otherwise
-  cost, without reintroducing a second source of truth.
+  target <300ms after the JSONL write. No polling. The existing "transcribing…" indicator covers
+  the gap from mic-release until the projected turn lands.
+- **Instant-text echo: deferred.** An `stt_echo` (daemon shows the words before the round-trip)
+  was prototyped and pulled: matching STT text to the recorded turn is fragile (false drops on
+  short/repeated phrases, stuck placeholders on a failed send) and duplicates the daemon's bind
+  rule on the client — a poor trade against the "above all, reliable" goal. Revisit only with a
+  correlation id carried end-to-end, not text matching.
 
-## What gets deleted (simpler is the point)
+## What changes (simpler is the point)
 
-- `pending` optimistic rows, `bindPending`, `bindVoicePrompt`, the optimistic branch of
-  `historyFrom`.
-- `TurnCoordinator.openTurns[]` counter + `reapStaleTurns` ⇒ reduced to an inject queue + a
-  single "pane idle" edge from `Stop`.
-- `resolveVoiceReply` text matching ⇒ tree + uuid dedup.
+- **Deleted:** the daemon-side optimistic ROWS — `historyFrom` is now a pure projection (the
+  phone shows nothing the transcript hasn't confirmed); `PendingVoice.id`/`ts` (render-only
+  fields); `TurnCoordinator.openTurns[]` **counter** (→ a single `paneBusy` level).
+- **Kept, made tree-aware:** `bindPending` / `bindVoicePrompt` / `resolveVoiceReply` now resolve
+  over the active branch with re-bind + two-pass matching; the TTL reaper remains as the gate
+  backstop. `pending` survives as reply bookkeeping only — it no longer feeds the view.
 
-Net change deletes more than it adds.
+Net change still deletes more than it adds.
 
 ## Invariants (the spec the tests defend)
 
@@ -120,5 +138,6 @@ Net change deletes more than it adds.
    correct even before the rest; optimistic layer now redundant.)
 2. Derive `working` from the projection; reduce `TurnCoordinator` to the inject gate; delete the
    counter + reaper.
-3. Delete the optimistic `pending` model; add the isolated `stt_echo`.
-4. Re-point TTS to tree + uuid binding; delete `resolveVoiceReply` text matching.
+3. Stop rendering the optimistic `pending` rows (`historyFrom` → pure projection); keep `pending`
+   as reply bookkeeping only.
+4. Make the reply binding tree-aware (re-bind off dead branches, two-pass exact-then-substring).

@@ -655,10 +655,6 @@ export class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    // Show the words on the phone the instant we have them — before the inject→transcript→projection
-    // round-trip — so realtime feels immediate. Purely a local placeholder the phone reconciles away once
-    // the projection includes this turn (see protocol stt_echo); the daemon keeps no state for it.
-    this.sendToBrowser({ type: "stt_echo", text: transcript });
     if (mode === "interrupt") await cmuxInterrupt(this.init.surface); // Esc the running turn, run this next
     this.queueVoice(transcript, mode);
   }
@@ -712,8 +708,9 @@ export class VoiceDaemon {
   // the same ground truth. Called on every turn event + on sync, so the phone's view AND its lamp always
   // converge together. Pure read; never throws into the caller.
   private projectAndEmit(): void {
-    this.sendToBrowser(this.historyFrom(this.projectedNow()));
-    this.emitStatus();
+    const turns = this.projectedNow();
+    this.sendToBrowser(this.historyFrom(turns));
+    this.emitStatus(turns); // reuse the same projection — no second file read
   }
 
   // Project the transcript for display/reply resolution. `captureFloor` advances `lastEof` — the byte
@@ -782,18 +779,27 @@ export class VoiceDaemon {
       }
     }
     const claimed = new Set(this.pending.map((p) => p.userUuid).filter(Boolean));
-    for (const entry of this.pending) {
-      if (!entry.opened || entry.userUuid) continue;
-      for (let i = turns.length - 1; i >= 0; i--) {
-        const t = turns[i];
-        if (t.role === "user" && t.text.trim().includes(entry.text.trim()) && !claimed.has(t.uuid)) {
-          entry.userUuid = t.uuid;
-          entry.userTs = t.timestamp;
-          claimed.add(t.uuid);
-          break;
+    // Bind in two passes so an EXACT match always wins over a substring one. Otherwise a short prompt
+    // ("status") could claim a longer turn ("status of the build") and starve the longer prompt's own
+    // entry, mis-speaking or losing a reply. Pass 1: exact. Pass 2: substring for whatever's left — the
+    // merged/glued survivor "A.B" (no exact match for injected "A") binds because it CONTAINS "A".
+    const bindBy = (matches: (turnText: string, entryText: string) => boolean): void => {
+      for (const entry of this.pending) {
+        if (!entry.opened || entry.userUuid) continue;
+        for (let i = turns.length - 1; i >= 0; i--) {
+          const t = turns[i];
+          if (t.role !== "user" || claimed.has(t.uuid)) continue;
+          if (matches(t.text.trim(), entry.text.trim())) {
+            entry.userUuid = t.uuid;
+            entry.userTs = t.timestamp;
+            claimed.add(t.uuid);
+            break;
+          }
         }
       }
-    }
+    };
+    bindBy((turnText, entryText) => turnText === entryText);
+    bindBy((turnText, entryText) => turnText.includes(entryText));
   }
 
   // Build the `history` snapshot — a PURE PROJECTION of the transcript's active branch, nothing else. The
@@ -872,7 +878,7 @@ export class VoiceDaemon {
     await this.waitForTranscript(() => this.repliesSettled(), REPLY_FLUSH_CAP_MS);
     const turns = this.projectedNow();
     this.sendToBrowser(this.historyFrom(turns));
-    this.emitStatus(); // the reply has flushed → the lamp flips to idle from the transcript
+    this.emitStatus(turns); // the reply has flushed → the lamp flips to idle from the transcript
     this.speakReadyVoiceReplies(turns);
   }
 
@@ -1029,21 +1035,21 @@ export class VoiceDaemon {
 
   // ---- helpers ---------------------------------------------------------------
 
-  // Working = our injection hasn't landed yet (the gap before the transcript catches up) OR the
-  // transcript's active branch shows the newest user turn still awaiting its final reply. DERIVED from the
-  // transcript, never a hook counter — that's what self-heals the lamp the merged-prompt bug used to stick.
-  private isWorking(): boolean {
-    return this.turns.hasInFlight || isPaneWorking(this.projectedNow(false)); // pure read: must not move the floor
+  // Working = our injection hasn't landed yet (the gap before the transcript catches up), OR the pane is
+  // mid-turn (the inject gate's `isBusy`) AND the transcript's active branch shows the newest user turn
+  // still awaiting its final reply. The AND is the whole robustness story: a missed Stop leaves `isBusy`
+  // stuck, but the transcript going idle (a final reply landed) still flips it; an interrupt clears
+  // `isBusy`, so the lamp idles at once; and the transcript can't read "working" past a real reply.
+  private isWorking(turns: ProjectedTurn[]): boolean {
+    return this.turns.hasInFlight || (this.turns.isBusy && isPaneWorking(turns));
   }
 
-  // Status carries this thread's id (so the phone files it correctly); a thread_register rides along to
-  // keep the roster's state/listening in lockstep.
-  private emitStatus(): void {
-    const working = this.isWorking();
+  // Status carries this thread's id (so the phone files it correctly); a thread_register rides along to keep
+  // the roster's state/listening in lockstep. Pass the turns already projected this cycle to avoid a
+  // re-read; callers without them fall back to a pure read (no floor move).
+  private emitStatus(turns?: ProjectedTurn[]): void {
+    const working = this.isWorking(turns ?? this.projectedNow(false));
     this.lastWorking = working;
-    // The transcript reads idle → release any paneBusy a missed Stop left set (self-heals the inject gate
-    // from ground truth, no timer). Done here because this is where working is authoritatively computed.
-    if (!working) this.turns.noteIdleFromTranscript();
     const state: SessionState = {
       sessionId: this.init.sessionId,
       listening: this.cmuxHealthy,

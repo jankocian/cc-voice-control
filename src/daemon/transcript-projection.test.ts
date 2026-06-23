@@ -190,18 +190,30 @@ describe("selectActiveBranch — drop dead branches so the phone matches the des
     expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["P", "AB", "R"]); // A and A1 both gone
   });
 
-  it("never drops a record whose parent is outside the window (conservative: can't prove it dead)", () => {
-    // A windowed tail read may begin mid-branch. A record off the leaf's path but rooted above the window
-    // is kept — hiding real history would be worse than a rare, desktop-divergent stale row.
+  it("drops a dead sibling that shares an out-of-window parent with the active path", () => {
+    // The orphan + its glued sibling both stay in the tail while their common parent scrolls out. The
+    // orphan still shares that (now out-of-window) parent with the on-path sibling, so it's recognised as
+    // superseded and dropped — the incident can't re-materialize once the window slides.
     const records: TranscriptRecord[] = [
-      user("orphanOld", "2026-06-21T15:00:00.000Z", "rooted above the window", {
+      user("orphan", "2026-06-21T15:00:00.000Z", "dead sibling", { promptSource: "typed", parentUuid: "GONE" }),
+      user("u1", "2026-06-21T15:00:01.000Z", "live sibling", { promptSource: "typed", parentUuid: "GONE" }),
+      asst("a1", "2026-06-21T15:00:02.000Z", text("hello"), "end_turn", { parentUuid: "u1" })
+    ];
+    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["u1", "a1"]); // orphan gone
+  });
+
+  it("keeps an off-path record whose parent is unknown and unshared (conservative: can't prove it dead)", () => {
+    // A windowed read may begin mid-branch on a record rooted above the window with no on-path sibling —
+    // hiding real history would be worse than a rare, desktop-divergent stale row, so it is kept.
+    const records: TranscriptRecord[] = [
+      user("disconnected", "2026-06-21T15:00:00.000Z", "rooted above the window", {
         promptSource: "typed",
-        parentUuid: "GONE"
+        parentUuid: "UNRELATED"
       }),
       user("u1", "2026-06-21T15:00:01.000Z", "hi", { promptSource: "typed", parentUuid: "GONE" }),
       asst("a1", "2026-06-21T15:00:02.000Z", text("hello"), "end_turn", { parentUuid: "u1" })
     ];
-    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["orphanOld", "u1", "a1"]);
+    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["disconnected", "u1", "a1"]);
   });
 
   it("is a no-op when records carry no parentUuid (flat fixtures behave exactly as before)", () => {

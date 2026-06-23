@@ -1,6 +1,6 @@
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PagerThread } from "../components/ThreadPager";
-import { echoMessage, type Message, mergeEchoes, messageFromHistory, unresolvedEchoes } from "../lib/messages";
+import { type Message, messageFromHistory } from "../lib/messages";
 import type { RosterThread, ThreadId } from "../lib/protocol";
 import {
   buildThreadAndPrune,
@@ -13,10 +13,6 @@ import {
 import type { BridgeContentEvent, BridgeRuntime } from "./useBridge";
 import type { usePlayback } from "./usePlayback";
 import type { useThreads } from "./useThreads";
-
-// Cap optimistic echoes retained per thread (normally 0–1 in flight; this just bounds a pathological run
-// where echoes somehow never reconcile).
-const MAX_ECHOES = 4;
 
 type Deps = {
   threads: ReturnType<typeof useThreads>;
@@ -51,10 +47,6 @@ export function useThreadMessages({
   // list + callbacks are stable), so the callbacks/effects below don't churn every render.
   const { threads: threadsList, noteActivity } = threads;
   const [messagesByThread, setMessagesByThread] = useState<Map<ThreadId, Message[]>>(new Map());
-  // Optimistic "sending…" placeholders per thread, from stt_echo — shown instantly until the projection
-  // includes the real turn (then dropped, see the history case). Local-only; never authoritative.
-  const [echoesByThread, setEchoesByThread] = useState<Map<ThreadId, Message[]>>(new Map());
-  const echoSeqRef = useRef(0);
   const [runtimeByThread, setRuntimeByThread] = useState<Map<ThreadId, BridgeRuntime>>(new Map());
   // The thread whose mic turn is in flight (transcribing) — one at a time, since the mic is shared.
   const [transcribingThreadId, setTranscribingThreadId] = useState<ThreadId | null>(null);
@@ -87,18 +79,6 @@ export function useThreadMessages({
             })
           );
           return;
-        case "stt_echo": {
-          // The user's just-spoken words, transcribed — show them instantly as a "sending…" placeholder,
-          // before the inject→transcript→projection round-trip lands. Reconciled away by the next history
-          // snapshot (see below). Local-only, so it can never orphan or duplicate the real row.
-          const echo = echoMessage(`echo-${++echoSeqRef.current}`, event.text, Date.now());
-          setEchoesByThread((prev) => {
-            const next = new Map(prev);
-            next.set(threadId, [...(prev.get(threadId) ?? []), echo].slice(-MAX_ECHOES));
-            return next;
-          });
-          return;
-        }
         case "history": {
           // The daemon's projected thread — the SINGLE source of transcript content. It re-projects on
           // every turn event (and on sync), so this snapshot is the complete, ordered, deduped thread; we
@@ -118,18 +98,6 @@ export function useThreadMessages({
             }
           }
           updateThreadMessages(setMessagesByThread, threadId, (prev) => buildThreadAndPrune(restored, prev, dropAudio));
-          // Drop any optimistic echo now reflected by a real (projected) user turn — the projection is the
-          // source of truth, so once it shows the turn the placeholder is redundant.
-          setEchoesByThread((prev) => {
-            const cur = prev.get(threadId);
-            if (!cur || cur.length === 0) return prev;
-            const kept = unresolvedEchoes(cur, restored);
-            if (kept.length === cur.length) return prev;
-            const next = new Map(prev);
-            if (kept.length === 0) next.delete(threadId);
-            else next.set(threadId, kept);
-            return next;
-          });
           // Unread: baseline a thread the first time we see it (a reconnect/restore is not new activity),
           // then add only what's genuinely new since the last we counted. We track the newest timestamp of
           // ANY row (so the "since" boundary advances past your own just-sent turn + interim steps), but
@@ -189,7 +157,6 @@ export function useThreadMessages({
   useEffect(() => {
     const live = new Set(threadsList.map((t) => t.threadId));
     setRuntimeByThread((prev) => pruneThreadMap(prev, live));
-    setEchoesByThread((prev) => pruneThreadMap(prev, live));
     setMessagesByThread((prev) =>
       pruneThreadMap(prev, live, (messages) => {
         for (const message of messages) if (message.requestId) dropAudio(message.requestId);
@@ -211,14 +178,9 @@ export function useThreadMessages({
     () =>
       threadsList.map((thread) => ({
         threadId: thread.threadId,
-        // Merge in any optimistic echoes (mergeEchoes returns the same array ref when there are none, so a
-        // thread without echoes keeps EMPTY_MESSAGES and doesn't churn the pager).
-        messages: mergeEchoes(
-          messagesByThread.get(thread.threadId) ?? EMPTY_MESSAGES,
-          echoesByThread.get(thread.threadId) ?? EMPTY_MESSAGES
-        )
+        messages: messagesByThread.get(thread.threadId) ?? EMPTY_MESSAGES
       })),
-    [threadsList, messagesByThread, echoesByThread]
+    [threadsList, messagesByThread]
   );
 
   const transcribing = transcribingThreadId !== null && transcribingThreadId === activeThreadId;

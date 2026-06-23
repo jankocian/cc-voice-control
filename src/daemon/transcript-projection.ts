@@ -126,13 +126,20 @@ export function selectActiveBranch(records: TranscriptRecord[]): TranscriptRecor
     cur = byUuid.get(cur)?.parentUuid;
   }
 
-  // Mark dead branches: a non-sidechain record off the path whose parent is on the path (superseded
-  // sibling) or already dropped (its descendant). File order ⇒ parents are classified before children.
+  // The parents of the on-path records — so a superseded sibling is recognised even when that shared parent
+  // has itself scrolled out of the read window (the orphan + its glued sibling stay in the tail while their
+  // common parent does not).
+  const onPathParents = new Set<string>();
+  for (const r of records) if (r.uuid && onPath.has(r.uuid) && r.parentUuid) onPathParents.add(r.parentUuid);
+
+  // Mark dead branches: a non-sidechain record off the path that shares a parent with the active path (a
+  // superseded sibling), is a child of the active path, or descends from an already-dropped node. File
+  // order ⇒ parents are classified before children, so the `dropped` cascade catches dead subtrees.
   const dropped = new Set<string>();
   for (const r of records) {
     if (!r.uuid || r.isSidechain || onPath.has(r.uuid)) continue;
     const parent = r.parentUuid;
-    if (parent && (onPath.has(parent) || dropped.has(parent))) dropped.add(r.uuid);
+    if (parent && (onPath.has(parent) || onPathParents.has(parent) || dropped.has(parent))) dropped.add(r.uuid);
   }
   return dropped.size === 0 ? records : records.filter((r) => !r.uuid || !dropped.has(r.uuid));
 }
