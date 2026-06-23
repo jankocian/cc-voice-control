@@ -40,8 +40,11 @@ import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
 import {
   dropSessionAnnouncement,
   isPaneWorking,
+  normalizeQuestions,
   type ProjectedTurn,
-  pendingQuestion
+  pendingQuestion,
+  questionContentSig,
+  questionSpeech
 } from "./transcript-projection.js";
 import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
@@ -73,17 +76,20 @@ const MAX_AUDIO_ENTRIES = 20;
 // It tracks more uuids than we keep audio for — every interim step a long turn sees, plus replies — so
 // it's a multiple of the audio cap rather than equal to it.
 const SEEN_UUID_CAP = MAX_AUDIO_ENTRIES * 4;
-// The phone mirrors the transcript via a LIVE TAIL (see watchTranscript): a single fs.watch re-syncs on
+// The phone mirrors the transcript via a SELF-HEALING LIVE TAIL (see armWatch): one fs.watch re-syncs on
 // every write, debounced so a burst coalesces into one re-projection. This is the whole fix for "the hook
 // fired before Claude flushed the record" — we react to the file write, not to hook timing, so a user
 // prompt, a step before a tool call, or an answer that streams in seconds-to-minutes after the Stop hook
 // (extended thinking: the thinking block flushes as its own `end_turn` record first) all reach the phone
 // the instant they land, never one event behind. ~150ms reads as instant while collapsing tool-output floods.
+// fs.watch on the file is reliable for every write pattern (verified); the only fragility was the watch going
+// DEAD — its file replaced (/clear, /compact → a new session file) or not yet created at arm time (a fresh
+// session's first record flushes AFTER its hook). So the watch re-arms itself; there is NO backup poll.
 const SYNC_DEBOUNCE_MS = 150;
-// fs.watch can coalesce/miss events on some filesystems, so a slow poll backs it up WHILE a turn is active
-// (an idle daemon must not churn the disk re-reading an unchanging file). The watch carries promptness;
-// this only bounds how long a missed event could stall a turn that's still in flight.
-const FLUSH_POLL_MS = 1_000;
+// How soon to re-arm the watch after it dies (file replaced/rotated) or fails to arm because the target file
+// isn't there yet. Short, so a fresh session's tail arms within a beat of the file appearing. Only runs during
+// that brief window — once armed there is no timer at all (an idle daemon does zero work).
+const WATCH_REARM_MS = 250;
 
 // Plugin-load root, three dirs up from this module either way (dist/daemon or src/daemon). Only used
 // to point a spawned `claude` at a `--plugin-dir`-loaded (dev) plugin.
@@ -190,19 +196,25 @@ export class VoiceDaemon {
   // safe — a restarted daemon never processed the prior copy. See submit_ack in the protocol.
   private readonly handledSubmits = new Set<string>();
 
-  // The live tail on the active transcript (see watchTranscript): the SINGLE mechanism that keeps the phone
-  // current. `transcriptWatcher`/`watchedPath` are the fs.watch + which file it's on; `syncDebounce`
-  // coalesces a burst of writes; `syncPoll` is the while-active backup; `lastHistorySig` lets the tail skip
-  // re-sending an unchanged thread (tool output that adds no conversational turn must not re-flood the wire).
+  // The live tail on the active transcript (see armWatch): the SINGLE mechanism that keeps the phone current —
+  // a self-healing fs.watch, no backup poll. `transcriptWatcher`/`watchedPath` are the watch + which file it's
+  // on; `rearmTimer` re-arms it when its file is replaced/rotated or isn't created yet; `syncDebounce`
+  // coalesces a burst of writes; `lastHistorySig` lets the tail skip re-sending an unchanged thread (tool
+  // output that adds no conversational turn must not re-flood the wire).
   private transcriptWatcher?: FSWatcher;
   private watchedPath?: string;
   private syncDebounce?: ReturnType<typeof setTimeout>;
-  private syncPoll?: ReturnType<typeof setInterval>;
+  private rearmTimer?: ReturnType<typeof setTimeout>;
   private lastHistorySig = "";
   // True while a spoken answer is being typed into an AskUserQuestion picker, so a second utterance arriving
   // during the STT+send window can't re-type into the same picker (the answered state derives from the
   // transcript, which may not have flushed when the first send completes).
   private answeringQuestion = false;
+  // The PENDING interactive question, surfaced from the PreToolUse hook because Claude does NOT write the
+  // AskUserQuestion record to the transcript until it's answered — so the projection alone can't show it while
+  // the user still needs to answer. projectedNow() injects this synthetic turn until the same question (by
+  // content) appears in the transcript, then yields. Cleared on a new turn / reset / once the answer is sent.
+  private pendingQuestionOverlay?: ProjectedTurn;
   // The phone's autoplay preference for VOICE turns: "off" speaks nothing, "final" speaks just the final
   // reply (default — the prior behaviour), "all" also speaks each interim step. Tap-to-play works in every
   // mode. Set via set_speak_mode.
@@ -355,9 +367,9 @@ export class VoiceDaemon {
                 this.inheritedPermissionMode = permissionMode;
               }
               this.setTranscript(transcriptPath); // point the live tail at this turn's transcript
+              this.pendingQuestionOverlay = undefined; // a new turn supersedes any prior pending question
               const realPrompt = typeof prompt === "string" ? prompt : "";
               this.turns.turnOpened(realPrompt);
-              this.ensurePoll(); // back the watch up while this turn is in flight
               // Claude Code RECEIVED the prompt (this is its UserPromptSubmit) → tell the phone NOW so the
               // message shows instantly with a single check, rather than only when the reply lands. Works for
               // a typed turn too (the daemon otherwise never knew its text). The authoritative native row
@@ -367,9 +379,15 @@ export class VoiceDaemon {
             } else if (route === "/turn-progress") {
               // PreToolUse: Claude is about to run a tool, so it just wrote a step (narration). Re-sync from
               // the transcript; the live tail also catches the step if it flushes a beat after this hook.
-              const { transcriptPath } = JSON.parse(body || "{}") as { transcriptPath?: string };
+              const { transcriptPath, question } = JSON.parse(body || "{}") as {
+                transcriptPath?: string;
+                question?: { toolUseId?: string; questions?: unknown };
+              };
               this.setTranscript(transcriptPath);
               this.turns.noteProgress(); // a tool is running → no longer parked on a permission prompt
+              // AskUserQuestion fired: the question is in THIS hook's payload, not the transcript (Claude
+              // doesn't flush it until answered). Surface it live as a pending-question overlay.
+              if (question) this.setPendingQuestion(question.toolUseId ?? "", question.questions);
               this.syncFromTranscript();
             } else if (route === "/notify") {
               // Notification hook: "permission" = a permission_prompt fired (Claude blocked on the user's
@@ -455,6 +473,7 @@ export class VoiceDaemon {
     this.floor = Date.now();
     this.audio.clear();
     this.seen.clear();
+    this.pendingQuestionOverlay = undefined;
     // /clear or /compact ends the current topic: drop every in-flight/queued/open turn (so a stale
     // turn can't be injected or wedge the idle-gate) — reset() also re-emits idle status.
     this.turns.reset();
@@ -574,9 +593,11 @@ export class VoiceDaemon {
         return;
       case "stop_task":
         // Esc the running turn → Claude goes idle; the coordinator drops every open turn and drains
-        // the queue (a late Stop for a dropped turn lands on an empty FIFO and is ignored).
+        // the queue (a late Stop for a dropped turn lands on an empty FIFO and is ignored). A pending
+        // question is dismissed by the Esc, so drop its overlay too.
         await cmuxInterrupt(this.init.surface);
         this.turns.interrupt();
+        this.pendingQuestionOverlay = undefined;
         this.syncFromTranscript();
         return;
       case "sync":
@@ -716,8 +737,10 @@ export class VoiceDaemon {
         });
         return;
       }
-      // result === "no-picker": the transcript still showed an unanswered question but the picker is already
-      // gone (a stale/dismissed question). Don't drop the words — fall through and treat them as a normal prompt.
+      // result === "no-picker": the question still showed as unanswered but the picker is already gone (a
+      // stale/dismissed question). Clear the stale overlay and don't drop the words — fall through and treat
+      // them as a normal prompt.
+      this.pendingQuestionOverlay = undefined;
     }
     if (mode === "interrupt") await cmuxInterrupt(this.init.surface); // Esc the running turn, run this next
     this.queueVoice(transcript, mode);
@@ -774,22 +797,59 @@ export class VoiceDaemon {
 
   // ---- the live transcript tail (single source of phone state) ---------------
 
-  // Point the live tail at the transcript a hook handed us. The fs.watch then re-syncs the phone on every
-  // write, so a record that flushes AFTER its hook (a user prompt, a step, a late-streamed reply) still
-  // reaches the phone the instant it lands — the fix for "shows up one event late". No-op if unchanged.
+  // Point the live tail at the transcript a hook handed us and keep a self-healing fs.watch armed on it. The
+  // watch re-syncs the phone on every write, so a record that flushes AFTER its hook (a user prompt, a step, a
+  // late-streamed reply, a blocking AskUserQuestion) reaches the phone the instant it lands. No-op if we're
+  // already watching this exact file; otherwise (re)arm — armWatch handles a not-yet-created file and rotation.
   private setTranscript(path?: string): void {
     if (!path) return;
     this.lastTranscriptPath = path;
-    this.ensurePoll(); // a session has a transcript now → run the deterministic live-tail poll
-    if (path === this.watchedPath) return;
-    this.transcriptWatcher?.close();
-    try {
-      this.transcriptWatcher = watch(path, () => this.scheduleSync());
-      this.watchedPath = path; // only on success, so a throw (e.g. file not yet created) is retried next hook
-    } catch {
-      this.transcriptWatcher = undefined; // fs.watch unsupported/failed → the while-active poll carries it
-      this.watchedPath = undefined;
+    if (path === this.watchedPath && this.transcriptWatcher) return; // already watching this exact file
+    this.armWatch();
+  }
+
+  // Arm (or re-arm) the self-healing fs.watch on the active transcript — the SINGLE mechanism keeping the phone
+  // current, with no backup poll. fs.watch is inode-bound, so it goes DEAD when its file is replaced/rotated
+  // (/clear, /compact → a new session file) and THROWS when the file doesn't exist yet (a fresh session's first
+  // record flushes after its hook). So: a 'change' re-syncs; a 'rename'/error means the file moved out from
+  // under the watch → re-arm onto the live file; a failed arm (ENOENT) retries until the file appears. Once
+  // armed there is NO timer — an idle daemon does zero work. The watch reliably catches every write when armed
+  // (verified across write patterns); the only job here is keeping it armed on whatever file is now live.
+  private armWatch(): void {
+    if (this.stopped) return;
+    const path = this.lastTranscriptPath;
+    if (!path) return;
+    if (this.rearmTimer) {
+      clearTimeout(this.rearmTimer);
+      this.rearmTimer = undefined;
     }
+    this.transcriptWatcher?.close();
+    this.transcriptWatcher = undefined;
+    this.watchedPath = undefined;
+    try {
+      const watcher = watch(path, (eventType) => {
+        if (this.lastTranscriptPath !== path) return; // a newer transcript path has superseded this watch
+        this.scheduleSync(); // always pull the latest, even on a 'rename' (it can carry the final content)
+        if (eventType === "rename") this.rearmSoon(); // file replaced/removed → our inode watch is dead → re-arm
+      });
+      watcher.on("error", () => this.rearmSoon());
+      this.transcriptWatcher = watcher;
+      this.watchedPath = path;
+      this.scheduleSync(); // the file just (re)appeared under us → sync whatever is already there
+    } catch {
+      this.rearmSoon(); // ENOENT: not created yet → retry until it is (a fresh session's first record is imminent)
+    }
+  }
+
+  // Re-arm the watch after a short delay, coalesced — a single replace can fire several rename/error events.
+  // ponytail: retries indefinitely while the file is missing; harmless (a real transcript path always appears,
+  // and a hook resets lastTranscriptPath), and it stops the instant the watch arms.
+  private rearmSoon(): void {
+    if (this.stopped || this.rearmTimer) return;
+    this.rearmTimer = setTimeout(() => {
+      this.rearmTimer = undefined;
+      this.armWatch();
+    }, WATCH_REARM_MS);
   }
 
   // Coalesce a burst of fs.watch events into one read-only re-sync (a single write fires several events).
@@ -799,25 +859,6 @@ export class VoiceDaemon {
       this.syncDebounce = undefined;
       this.reflect(this.projectedNow(), false); // guarded send (force=false): skips an unchanged thread
     }, SYNC_DEBOUNCE_MS);
-  }
-
-  // DETERMINISTIC live tail: once a session has a transcript, re-read + reflect on a FIXED cadence for as
-  // long as the daemon is alive — NOT gated on the (imperfect) working-state. fs.watch still delivers instant
-  // updates; this poll is the guarantee that ANY transcript change reaches the phone within FLUSH_POLL_MS,
-  // even when a watch event is missed, the watched path just changed, or the working-state misreads "idle"
-  // (e.g. while Claude blocks on an AskUserQuestion). The read is cheap and a no-op send when nothing changed
-  // (reflect's sig guard), so an idle session costs only a bounded periodic read — the price of being rock
-  // solid. Stops only when the daemon stops.
-  private ensurePoll(): void {
-    if (this.syncPoll || this.stopped || !this.lastTranscriptPath) return;
-    this.syncPoll = setInterval(() => {
-      if (this.stopped) {
-        clearInterval(this.syncPoll);
-        this.syncPoll = undefined;
-        return;
-      }
-      this.scheduleSync();
-    }, FLUSH_POLL_MS);
   }
 
   // Hook/sync-driven re-sync: authoritative, so it ALWAYS sends (force). The ONE call the hooks make;
@@ -860,15 +901,43 @@ export class VoiceDaemon {
     this.synthesizeReplies(turns); // synthesize + send a just-landed reply (idempotent via `seen`)
   }
 
+  // Record the pending interactive question handed to us by the PreToolUse hook (Claude doesn't flush the
+  // AskUserQuestion record to the transcript until it's answered, so this is the ONLY live source for it).
+  // Stored as a synthetic claude turn, uuid keyed by content so a NEW question isn't deduped against the last.
+  private setPendingQuestion(toolUseId: string, rawQuestions: unknown): void {
+    const questions = normalizeQuestions(rawQuestions);
+    if (questions.length === 0) return; // malformed/empty → leave the projection untouched, never break it
+    const sig = questionContentSig(questions);
+    this.pendingQuestionOverlay = {
+      uuid: `pending-question:${sig}`,
+      timestamp: Date.now(),
+      role: "claude",
+      text: questionSpeech(questions),
+      interim: false,
+      question: { toolUseId: toolUseId || `pending:${sig}`, questions, answered: false }
+    };
+  }
+
   // Project the recent transcript tail (the conversation the phone mirrors), oldest-first, hiding turns
-  // below the topic floor and the start-skill's QR/URL announcement (noise — never shown or spoken).
+  // below the topic floor and the start-skill's QR/URL announcement (noise — never shown or spoken). Then
+  // inject the pending-question overlay (if any) so a question Claude is blocked on shows live, even though
+  // its record isn't in the transcript yet — yielding to the transcript once the same question flushes there.
   private projectedNow(): ProjectedTurn[] {
-    if (!this.lastTranscriptPath) return [];
-    const { turns } = projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS);
-    return dropSessionAnnouncement(
-      turns.filter((t) => t.timestamp >= this.floor),
-      this.init.browserUrl
-    );
+    const base = this.lastTranscriptPath
+      ? dropSessionAnnouncement(
+          projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).turns.filter(
+            (t) => t.timestamp >= this.floor
+          ),
+          this.init.browserUrl
+        )
+      : [];
+    const overlay = this.pendingQuestionOverlay;
+    if (!overlay?.question) return base;
+    // Yield once the SAME question (by content) has flushed to the transcript (i.e. been answered) — else the
+    // card would show twice. Until then the synthetic turn carries the live show + read + voice-answer.
+    const sig = questionContentSig(overlay.question.questions);
+    const inTranscript = base.some((t) => t.question && questionContentSig(t.question.questions) === sig);
+    return inTranscript ? base : [...base, overlay];
   }
 
   // Synthesize every claude reply the projection shows, so audio follows the SAME source of truth as text —
@@ -894,6 +963,9 @@ export class VoiceDaemon {
       if (t.role !== "claude" || this.seen.has(t.uuid)) continue;
       this.remember(this.seen, t.uuid, SEEN_UUID_CAP); // seen once, never reconsidered
       if (t.interim && this.speakMode !== "all") continue; // steps auto-read only under "all"
+      // Never read an ANSWERED question aloud: the pending overlay already spoke it, and the transcript's
+      // answered version (a different uuid) flushes only on answer — speaking it would double-read.
+      if (t.question?.answered) continue;
       fresh.push(t);
     }
     const newest = fresh.length - 1;
@@ -1086,7 +1158,7 @@ export class VoiceDaemon {
     if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.pairingTimer) clearTimeout(this.pairingTimer);
     if (this.syncDebounce) clearTimeout(this.syncDebounce);
-    if (this.syncPoll) clearInterval(this.syncPoll);
+    if (this.rearmTimer) clearTimeout(this.rearmTimer);
     this.transcriptWatcher?.close();
     this.stopHeartbeat?.();
     // Tell the bridge to drop the session so a leaked URL can't reconnect. Best-effort:

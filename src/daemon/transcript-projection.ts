@@ -110,7 +110,7 @@ function extractQuestion(r: TranscriptRecord): { toolUseId: string; questions: Q
   const id = (tu as { id?: unknown }).id;
   const raw = (tu as { input?: { questions?: unknown } }).input?.questions;
   if (typeof id !== "string" || !Array.isArray(raw)) return undefined;
-  const questions = raw.map(normalizeQuestion).filter((q): q is Question => q !== undefined);
+  const questions = normalizeQuestions(raw);
   return questions.length > 0 ? { toolUseId: id, questions } : undefined;
 }
 
@@ -137,6 +137,22 @@ function normalizeQuestion(raw: unknown): Question | undefined {
     ...(typeof q.multiSelect === "boolean" ? { multiSelect: q.multiSelect } : {}),
     options
   };
+}
+
+// Normalize a raw AskUserQuestion `input.questions` array (from a PreToolUse hook payload OR a transcript
+// record) into our Question[] shape, dropping anything malformed. Shared so the hook-driven PENDING question
+// (which Claude does NOT write to the transcript until it's answered) and the transcript-projected ANSWERED
+// question normalize identically.
+export function normalizeQuestions(raw: unknown): Question[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeQuestion).filter((q): q is Question => q !== undefined);
+}
+
+// Content identity for a question set: its prompt(s) + option labels. Lets the daemon recognize that the
+// pending-question OVERLAY (sourced from the PreToolUse hook) and the same question once it FLUSHES to the
+// transcript (on answer) are the same thing — so the overlay yields to the transcript without double-showing.
+export function questionContentSig(questions: Question[]): string {
+  return questions.map((q) => `${q.question}::${q.options.map((o) => o.label).join(",")}`).join("||");
 }
 
 // tool_use_ids that already have a tool_result anywhere in the records — i.e. questions the user answered.
