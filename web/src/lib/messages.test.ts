@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildThread, messageFromHistory, newestPlayableReply } from "./messages";
+import {
+  buildThread,
+  echoMessage,
+  mergeEchoes,
+  messageFromHistory,
+  newestPlayableReply,
+  unresolvedEchoes
+} from "./messages";
 import type { HistoryTurn } from "./protocol";
 
 // A projected history turn: native uuid (requestId) + native timestamp.
@@ -106,5 +113,41 @@ describe("newestPlayableReply — play-on-land target", () => {
     expect(newestPlayableReply([])).toBeNull();
     expect(newestPlayableReply([step("s")])).toBeNull();
     expect(newestPlayableReply([messageFromHistory(turn("u", 1000, "user", "ask"))])).toBeNull();
+  });
+});
+
+describe("stt_echo placeholders — instant 'sending…', reconciled by the projection", () => {
+  it("renders an unresolved echo at the top of the thread", () => {
+    const messages = [messageFromHistory(turn("a", 1000, "claude", "earlier reply"))];
+    const out = mergeEchoes(messages, [echoMessage("echo-1", "new question", 2000)]);
+    expect(out.map((m) => m.body)).toEqual(["new question", "earlier reply"]);
+    expect(out[0].pending).toBe(true);
+    expect(out[0].kind).toBe("you");
+  });
+
+  it("drops an echo once the real user turn lands (exact match)", () => {
+    const messages = [messageFromHistory(turn("u", 1000, "user", "delete it"))];
+    expect(mergeEchoes(messages, [echoMessage("echo-1", "delete it", 2000)])).toBe(messages);
+    expect(unresolvedEchoes([echoMessage("echo-1", "delete it", 2000)], messages)).toEqual([]);
+  });
+
+  it("drops echoes resolved by a GLUED user turn (substring): 'A' and 'B' both reconcile against 'A.B'", () => {
+    // The exact incident, on the client: two utterances injected separately, Claude Code merged them into
+    // one "A.B" record. Both echoes must vanish, leaving only the one projected turn.
+    const glued = [messageFromHistory(turn("AB", 1000, "user", "первое.second utterance"))];
+    const echoes = [echoMessage("e1", "первое.", 1500), echoMessage("e2", "second utterance", 1600)];
+    expect(unresolvedEchoes(echoes, glued)).toEqual([]);
+    expect(mergeEchoes(glued, echoes)).toBe(glued); // nothing extra rendered
+  });
+
+  it("returns the same messages ref when there are no echoes (no pager churn)", () => {
+    const messages = [messageFromHistory(turn("u", 1000, "user", "hi"))];
+    expect(mergeEchoes(messages, [])).toBe(messages);
+  });
+
+  it("keeps an echo that has no matching turn yet, newest-first among multiple", () => {
+    const messages: ReturnType<typeof messageFromHistory>[] = [];
+    const out = mergeEchoes(messages, [echoMessage("e1", "first", 1000), echoMessage("e2", "second", 2000)]);
+    expect(out.map((m) => m.body)).toEqual(["second", "first"]);
   });
 });

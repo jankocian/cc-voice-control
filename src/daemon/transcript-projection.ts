@@ -5,7 +5,11 @@
 // voice layer (which prompts we injected + their synthesized audio); everything shown is a function of
 // this filter over the transcript.
 //
-// The filter is the whole correctness story. Claude Code writes many synthetic `user`-role records that
+// The transcript is a TREE (`parentUuid`), and the conversation is its ACTIVE BRANCH — the path from the
+// newest record back to the root, exactly what Claude Code renders. We resolve that branch first
+// (selectActiveBranch) so a superseded/dead branch can never leak to the phone, then filter it.
+//
+// The filter is the rest of the correctness story. Claude Code writes many synthetic `user`-role records that
 // are NOT conversation: tool results (`content` is a tool_result block), slash-command / skill bodies
 // (`isMeta`, or no promptSource), and system notifications (`promptSource: "system"`). The stable signal
 // that a user record is REAL input — typed in the terminal, or injected by us as a voice transcript (cmux
@@ -29,6 +33,7 @@ export type ProjectedTurn = {
 export type TranscriptRecord = {
   type?: string;
   uuid?: string;
+  parentUuid?: string | null; // tree link to the preceding record; null/absent at the conversation root
   timestamp?: string; // ISO 8601
   isSidechain?: boolean;
   isMeta?: boolean;
@@ -85,13 +90,62 @@ function claudeText(r: TranscriptRecord): { text: string; interim: boolean } | u
 }
 
 /**
+ * Reduce the records to their ACTIVE BRANCH — the path from the newest record (the conversation HEAD)
+ * back to the root, the same branch Claude Code itself renders. The transcript is a TREE (`parentUuid`),
+ * not a list: a prompt submitted while a previous one is still pending can be superseded by a sibling
+ * (e.g. two fast voice utterances the composer merges into one), leaving a DEAD branch — a real record
+ * with no answer that the desktop hides but a flat replay would show as a phantom message. Dropping
+ * exactly those dead branches makes the phone view identical to the desktop, structurally, no matter how
+ * the upstream tree got its shape.
+ *
+ * Conservative by construction. A record is dropped ONLY when it is off the active path AND its parent is
+ * on the active path (a superseded sibling) or is itself a dropped record (that sibling's descendants).
+ * A record whose parent link points outside the read window is never dropped, so a windowed read can
+ * never hide real history. Sidechains (subagent branches) are left untouched here — the turn filter drops
+ * them downstream. Records without `parentUuid` (e.g. synthetic test fixtures) make this a no-op.
+ */
+export function selectActiveBranch(records: TranscriptRecord[]): TranscriptRecord[] {
+  const byUuid = new Map<string, TranscriptRecord>();
+  for (const r of records) if (r.uuid) byUuid.set(r.uuid, r);
+
+  // HEAD = the newest non-sidechain record (a sidechain is a subagent's own branch, never the
+  // conversation leaf). Walk `parentUuid` from it to collect the active path present in this window.
+  let leaf: TranscriptRecord | undefined;
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i].uuid && !records[i].isSidechain) {
+      leaf = records[i];
+      break;
+    }
+  }
+  if (!leaf) return records;
+
+  const onPath = new Set<string>();
+  let cur: string | null | undefined = leaf.uuid;
+  while (cur && byUuid.has(cur) && !onPath.has(cur)) {
+    onPath.add(cur);
+    cur = byUuid.get(cur)?.parentUuid;
+  }
+
+  // Mark dead branches: a non-sidechain record off the path whose parent is on the path (superseded
+  // sibling) or already dropped (its descendant). File order ⇒ parents are classified before children.
+  const dropped = new Set<string>();
+  for (const r of records) {
+    if (!r.uuid || r.isSidechain || onPath.has(r.uuid)) continue;
+    const parent = r.parentUuid;
+    if (parent && (onPath.has(parent) || dropped.has(parent))) dropped.add(r.uuid);
+  }
+  return dropped.size === 0 ? records : records.filter((r) => !r.uuid || !dropped.has(r.uuid));
+}
+
+/**
  * Project parsed transcript records into the conversational turns to mirror, oldest-first by native
  * timestamp, keeping at most `maxTurns` (newest). Pure + deterministic: the phone thread is exactly this
- * over the transcript tail, so re-running it on every event converges the phone to ground truth.
+ * over the transcript tail, so re-running it on every event converges the phone to ground truth. Resolves
+ * the active branch first (see selectActiveBranch) so a superseded/dead branch never leaks to the phone.
  */
 export function projectTurns(records: TranscriptRecord[], maxTurns = 40): ProjectedTurn[] {
   const turns: ProjectedTurn[] = [];
-  for (const r of records) {
+  for (const r of selectActiveBranch(records)) {
     if (!r.uuid) continue;
     const ts = toEpoch(r.timestamp);
     if (isRealUserTurn(r)) {
@@ -105,6 +159,25 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
   // never appear out of order even if the tail is read mid-write, then keep the newest window.
   turns.sort((a, b) => a.timestamp - b.timestamp);
   return turns.length > maxTurns ? turns.slice(turns.length - maxTurns) : turns;
+}
+
+/**
+ * Is the pane working, derived from the active branch? True when the newest user turn has no FINAL
+ * (non-interim) reply after it yet — Claude is still answering. DERIVED, never counted: however many
+ * UserPromptSubmit/Stop hooks fired (a merged prompt fires two opens but one close), the answer's
+ * presence in the transcript is ground truth, so the working lamp can never stick. Interim steps don't
+ * count as the answer (a turn mid-tool-call is still working). Pass the projected turns (already active-
+ * branch-resolved + announcement-dropped) — the same set the phone is shown, so view and lamp agree.
+ */
+export function isPaneWorking(turns: ProjectedTurn[]): boolean {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role !== "user") continue;
+    for (let j = i + 1; j < turns.length; j++) {
+      if (turns[j].role === "claude" && !turns[j].interim) return false; // answered → idle
+    }
+    return true; // newest user turn still awaiting its final reply → working
+  }
+  return false; // no user turn → idle
 }
 
 /**

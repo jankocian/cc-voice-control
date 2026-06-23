@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { TurnCoordinator } from "./turn-coordinator.js";
 
-// Drive the coordinator with a fake clock + an inject spy. inject resolves true unless `failNext` is set.
+// Drive the coordinator with an inject spy. inject resolves true unless `failNext` is set. No clock: the
+// gate is a level (paneBusy), self-healed by signals, never a timer.
 function harness() {
   const injected: string[] = [];
-  let now = 1_000_000;
   let failNext = false;
   const coord = new TurnCoordinator({
     inject: async (text) => {
@@ -15,17 +15,13 @@ function harness() {
       }
       return true;
     },
-    onStatusChange: () => {},
-    now: () => now
+    onStatusChange: () => {}
   });
   // Let the microtask from an async inject() settle.
   const tick = () => new Promise<void>((r) => setTimeout(r, 0));
   return {
     coord,
     injected,
-    advance: (ms: number) => {
-      now += ms;
-    },
     failInjectOnce: () => {
       failNext = true;
     },
@@ -33,15 +29,13 @@ function harness() {
   };
 }
 
-const TTL = 20 * 60 * 1000;
-
 describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
   it("injects a queued voice prompt immediately when Claude is idle", async () => {
     const h = harness();
     h.coord.enqueueVoice("hello");
     await h.tick();
     expect(h.injected).toEqual(["hello"]);
-    expect(h.coord.isWorking()).toBe(true); // in flight until its turn opens
+    expect(h.coord.hasInFlight).toBe(true); // in flight until its turn opens
     expect(h.coord.currentVoicePrompt).toBe("hello");
   });
 
@@ -50,6 +44,7 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("first");
     await h.tick();
     h.coord.turnOpened("first"); // our injection landed → in-flight retires, but the open turn gates
+    expect(h.coord.hasInFlight).toBe(false);
     h.coord.enqueueVoice("second");
     await h.tick();
     expect(h.injected).toEqual(["first"]); // still gated by the open turn
@@ -61,13 +56,48 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
   it("a turn typed in the terminal (not ours) also gates injection until it closes", async () => {
     const h = harness();
     h.coord.turnOpened("user typed this"); // not one of ours
-    expect(h.coord.isWorking()).toBe(true);
     h.coord.enqueueVoice("queued");
     await h.tick();
-    expect(h.injected).toEqual([]); // gated
+    expect(h.injected).toEqual([]); // gated by the open turn
     h.coord.turnClosed();
     await h.tick();
     expect(h.injected).toEqual(["queued"]);
+  });
+
+  it("two UserPromptSubmit but one Stop STILL releases the gate (the merged/glued-prompt bug)", async () => {
+    // The incident: a glued prompt fired two opens but one close. A counter would be left at 1 and the gate
+    // (and the old lamp) would stick. As a LEVEL, a single Stop means idle no matter how many opens preceded.
+    const h = harness();
+    h.coord.turnOpened("Я вот смышто это к ничему.");
+    h.coord.turnOpened("Я вот смышто это к ничему.Mluvím česky, ty vole."); // merged sibling, second open
+    h.coord.enqueueVoice("next");
+    await h.tick();
+    expect(h.injected).toEqual([]); // gated while busy
+    h.coord.turnClosed(); // ONE Stop
+    await h.tick();
+    expect(h.injected).toEqual(["next"]); // gate released — not stuck
+  });
+
+  it("noteIdleFromTranscript releases a paneBusy left set by a missed Stop (self-heal, no timer)", async () => {
+    const h = harness();
+    h.coord.turnOpened("hung turn whose Stop never arrives");
+    h.coord.enqueueVoice("waiting");
+    await h.tick();
+    expect(h.injected).toEqual([]); // gated
+    h.coord.noteIdleFromTranscript(); // the transcript shows the pane idle → release the gate
+    await h.tick();
+    expect(h.injected).toEqual(["waiting"]);
+  });
+
+  it("noteIdleFromTranscript never clears an in-flight injection (would double-inject)", async () => {
+    const h = harness();
+    h.coord.enqueueVoice("typed but not open yet");
+    await h.tick();
+    expect(h.coord.hasInFlight).toBe(true);
+    h.coord.noteIdleFromTranscript(); // paneBusy is false here; must NOT touch inFlight
+    await h.tick();
+    expect(h.injected).toEqual(["typed but not open yet"]); // not re-injected
+    expect(h.coord.hasInFlight).toBe(true);
   });
 
   it("interrupt drops open turns and drains the queue", async () => {
@@ -79,7 +109,6 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.interrupt();
     await h.tick();
     expect(h.injected).toEqual(["after"]);
-    expect(h.coord.isWorking()).toBe(true);
   });
 
   it("interruptWith jumps the queue", async () => {
@@ -96,7 +125,7 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("a");
     await h.tick();
     h.coord.reset();
-    expect(h.coord.isWorking()).toBe(false);
+    expect(h.coord.hasInFlight).toBe(false);
     expect(h.coord.currentVoicePrompt).toBeUndefined();
   });
 
@@ -110,29 +139,6 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     expect(h.injected).toEqual(["flaky", "next"]);
   });
 
-  it("reaps a stale OPEN turn past the TTL so the gate can release", async () => {
-    const h = harness();
-    h.coord.turnOpened("hung");
-    h.coord.enqueueVoice("waiting");
-    await h.tick();
-    expect(h.injected).toEqual([]);
-    h.advance(TTL + 1);
-    h.coord.enqueueVoice("trigger"); // pump() reaps the stale turn first
-    await h.tick();
-    expect(h.injected).toContain("waiting");
-  });
-
-  it("reaps a stuck injection whose turn-open never arrived", async () => {
-    const h = harness();
-    h.coord.enqueueVoice("stuck");
-    await h.tick();
-    expect(h.coord.isWorking()).toBe(true); // in-flight, no turn-open
-    h.advance(TTL + 1);
-    h.coord.enqueueVoice("after");
-    await h.tick();
-    expect(h.injected).toEqual(["stuck", "after"]);
-  });
-
   it("drops a stale inject result by token when the SAME prompt is re-injected", async () => {
     const h = harness();
     h.coord.enqueueVoice("status");
@@ -143,6 +149,6 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     h.coord.enqueueVoice("status"); // same text, new token
     await h.tick();
     expect(h.injected.filter((t) => t === "status")).toHaveLength(2);
-    expect(h.coord.isWorking()).toBe(true);
+    expect(h.coord.hasInFlight).toBe(true);
   });
 });

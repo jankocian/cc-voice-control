@@ -83,6 +83,11 @@ export type DaemonToBrowserEvent =
   // reconciles by native uuid + native timestamp, so it self-heals to ground truth and can never drift,
   // duplicate, or reorder. Text only; audio is fetched per row on demand.
   | { type: "history"; turns: HistoryTurn[] }
+  // The daemon transcribed a spoken clip and is injecting it into the pane. Fire-and-forget UX ONLY: the
+  // phone shows the words instantly as a local "sending…" bubble so realtime feels immediate, then drops
+  // that bubble the moment an authoritative `history` projection includes the matching user turn. It is NOT
+  // conversation state — never persisted, never the source of truth — so it can never orphan or duplicate.
+  | { type: "stt_echo"; text: string }
   // This daemon just spawned a new thread (phone "+" OR the /voice-control:spawn skill). `spawnId`
   // is a one-shot correlation key carried end-to-end (spawn command env → child daemon → its first
   // thread_register → the thread_joined delta), so the phone follows the EXACT new thread — never a

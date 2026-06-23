@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   dropSessionAnnouncement,
+  isPaneWorking,
   type ProjectedTurn,
   pairReplies,
   projectTurns,
   resolveVoiceReply,
+  selectActiveBranch,
   type TranscriptRecord
 } from "./transcript-projection.js";
 
@@ -144,6 +146,73 @@ describe("projectTurns — the filter", () => {
   });
 });
 
+describe("selectActiveBranch — drop dead branches so the phone matches the desktop", () => {
+  it("drops a superseded sibling user turn (the real 18s-apart glued-prompt incident: transcript 02104852)", () => {
+    // Two voice utterances injected 18s apart; Claude Code merged them: the transcript holds TWO sibling
+    // user rows under the same parent — an orphan "A" (no answer) and the consumed, glued "A.B" — and
+    // Claude answered only A.B. A flat replay shows 3 messages; the desktop shows 1. We must show 1.
+    const records: TranscriptRecord[] = [
+      user("uprev", "2026-06-22T23:00:00.000Z", "previous q", { promptSource: "typed" }),
+      asst("P", "2026-06-22T23:01:00.000Z", text("previous answer")), // the shared parent
+      user("A", "2026-06-22T23:03:57.000Z", "Я вот смышто это к ничему.", { promptSource: "typed", parentUuid: "P" }),
+      user("AB", "2026-06-22T23:04:15.000Z", "Я вот смышто это к ничему.Mluvím česky, ty vole.", {
+        promptSource: "typed",
+        parentUuid: "P"
+      }),
+      asst("R", "2026-06-22T23:04:33.000Z", text("Smazáno."), "end_turn", { parentUuid: "AB" })
+    ];
+    const turns = projectTurns(records);
+    expect(turns.map((t) => t.uuid)).toEqual(["uprev", "P", "AB", "R"]); // orphan A is gone
+    expect(turns.filter((t) => t.role === "user").map((t) => t.text)).toEqual([
+      "previous q",
+      "Я вот смышто это к ничему.Mluvím česky, ty vole." // the glued turn, once — never the orphan A alone
+    ]);
+  });
+
+  it("leaves a normal linear conversation untouched (every record on the active path)", () => {
+    const records: TranscriptRecord[] = [
+      user("u1", "2026-06-21T15:00:01.000Z", "hi", { promptSource: "typed" }),
+      asst("a1", "2026-06-21T15:00:02.000Z", text("hello"), "end_turn", { parentUuid: "u1" }),
+      user("u2", "2026-06-21T15:00:03.000Z", "more", { promptSource: "typed", parentUuid: "a1" }),
+      asst("a2", "2026-06-21T15:00:04.000Z", text("ok"), "end_turn", { parentUuid: "u2" })
+    ];
+    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
+
+  it("drops a dead SUBTREE: a superseded turn AND its descendant reply", () => {
+    const records: TranscriptRecord[] = [
+      asst("P", "2026-06-22T23:01:00.000Z", text("parent")),
+      user("A", "2026-06-22T23:02:00.000Z", "dead branch", { promptSource: "typed", parentUuid: "P" }),
+      asst("A1", "2026-06-22T23:02:30.000Z", text("answer on the dead branch"), "end_turn", { parentUuid: "A" }),
+      user("AB", "2026-06-22T23:03:00.000Z", "live branch", { promptSource: "typed", parentUuid: "P" }),
+      asst("R", "2026-06-22T23:03:30.000Z", text("answer on the live branch"), "end_turn", { parentUuid: "AB" })
+    ];
+    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["P", "AB", "R"]); // A and A1 both gone
+  });
+
+  it("never drops a record whose parent is outside the window (conservative: can't prove it dead)", () => {
+    // A windowed tail read may begin mid-branch. A record off the leaf's path but rooted above the window
+    // is kept — hiding real history would be worse than a rare, desktop-divergent stale row.
+    const records: TranscriptRecord[] = [
+      user("orphanOld", "2026-06-21T15:00:00.000Z", "rooted above the window", {
+        promptSource: "typed",
+        parentUuid: "GONE"
+      }),
+      user("u1", "2026-06-21T15:00:01.000Z", "hi", { promptSource: "typed", parentUuid: "GONE" }),
+      asst("a1", "2026-06-21T15:00:02.000Z", text("hello"), "end_turn", { parentUuid: "u1" })
+    ];
+    expect(selectActiveBranch(records).map((r) => r.uuid)).toEqual(["orphanOld", "u1", "a1"]);
+  });
+
+  it("is a no-op when records carry no parentUuid (flat fixtures behave exactly as before)", () => {
+    const records: TranscriptRecord[] = [
+      user("u1", "2026-06-21T15:00:01.000Z", "a", { promptSource: "typed" }),
+      asst("a1", "2026-06-21T15:00:02.000Z", text("b"))
+    ];
+    expect(selectActiveBranch(records)).toBe(records); // same reference: nothing to drop
+  });
+});
+
 describe("pairReplies — voice TTS targeting", () => {
   it("pairs each reply with the user prompt it answers", () => {
     const turns = projectTurns([
@@ -211,6 +280,57 @@ describe("resolveVoiceReply — pick the FINAL reply to speak by identity, never
 
   it("returns undefined when the prompt uuid isn't anchored yet", () => {
     expect(resolveVoiceReply([turn("final", "claude", 4)], undefined)).toBeUndefined();
+  });
+
+  it("resolves a GLUED prompt's reply via the active branch — the orphan sibling resolves to nothing", () => {
+    // End-to-end of the incident's reply path: the daemon binds the injected prompt to the on-path glued
+    // user turn (AB) by substring (bindPending), and resolveVoiceReply finds its reply on the active branch.
+    // The orphan A is off-branch, so its uuid resolves to no reply — it is never spoken.
+    const records: TranscriptRecord[] = [
+      asst("P", "2026-06-22T23:01:00.000Z", text("previous answer")),
+      user("A", "2026-06-22T23:03:57.000Z", "Я вот смышто это к ничему.", { promptSource: "typed", parentUuid: "P" }),
+      user("AB", "2026-06-22T23:04:15.000Z", "Я вот смышто это к ничему.Mluvím česky.", {
+        promptSource: "typed",
+        parentUuid: "P"
+      }),
+      asst("R", "2026-06-22T23:04:33.000Z", text("Smazáno."), "end_turn", { parentUuid: "AB" })
+    ];
+    const turns = projectTurns(records);
+    expect(resolveVoiceReply(turns, "AB")?.uuid).toBe("R"); // the glued turn's reply, spoken once
+    expect(resolveVoiceReply(turns, "A")).toBeUndefined(); // orphan is off-branch → no reply
+  });
+});
+
+describe("isPaneWorking — working lamp derived from the transcript, never counted", () => {
+  const turn = (uuid: string, role: ProjectedTurn["role"], interim = false): ProjectedTurn => ({
+    uuid,
+    timestamp: 0,
+    role,
+    text: `${uuid}-text`,
+    interim
+  });
+
+  it("idle when the newest user turn has its final reply", () => {
+    expect(isPaneWorking([turn("u", "user"), turn("a", "claude")])).toBe(false);
+  });
+
+  it("working when the newest user turn has no reply yet", () => {
+    expect(isPaneWorking([turn("u1", "user"), turn("a1", "claude"), turn("u2", "user")])).toBe(true);
+  });
+
+  it("working when only interim steps have flushed (a turn mid-tool-call is still answering)", () => {
+    expect(isPaneWorking([turn("u", "user"), turn("s1", "claude", true), turn("s2", "claude", true)])).toBe(true);
+  });
+
+  it("self-heals the merged-prompt case: an answered glued turn reads idle however the hooks fired", () => {
+    // The transcript after selectActiveBranch: the orphan is gone, the glued turn is answered → idle. The
+    // lamp is right regardless of the two-opens/one-close hook imbalance that stuck the old counter.
+    expect(isPaneWorking([turn("AB", "user"), turn("R", "claude")])).toBe(false);
+  });
+
+  it("idle with no user turn at all", () => {
+    expect(isPaneWorking([turn("a", "claude")])).toBe(false);
+    expect(isPaneWorking([])).toBe(false);
   });
 });
 

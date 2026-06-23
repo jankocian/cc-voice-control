@@ -18,6 +18,9 @@ export type Message = {
   hasAudio?: boolean;
   // A "step": Claude's narration before a tool call. Rendered dimmer; tap-to-play synthesizes on demand.
   interim?: boolean;
+  // A local "sending…" placeholder for the user's just-spoken words (from an stt_echo), shown instantly
+  // until the authoritative projection includes the real turn. Never authoritative; never has audio.
+  pending?: boolean;
   title: string;
   body: string;
   // Wall-clock time the turn happened, e.g. "12:34 AM".
@@ -25,6 +28,39 @@ export type Message = {
 };
 
 export const MAX_LOG = 60;
+
+// An optimistic "you" placeholder built from an stt_echo — shown the instant we have the transcribed
+// words, before the inject→transcript→projection round-trip lands. `id` is local (never a transcript
+// uuid), so it can't collide with a real row; `mergeEchoes` drops it once the real turn appears.
+export function echoMessage(id: string, text: string, timestamp: number): Message {
+  return {
+    id,
+    kind: "you",
+    requestId: "", // not a transcript row → no audio, never a play target
+    timestamp,
+    pending: true,
+    title: "You",
+    body: text,
+    time: formatClock(timestamp)
+  };
+}
+
+// The echoes not yet reflected by a real user turn in `messages`. Match is substring — a real turn that
+// CONTAINS the echo text resolves it — so a merged/glued prompt ("A" + "B" → one "A.B" row) reconciles both
+// echoes. Used both to prune echo state once turns land and to decide what still renders. Pure.
+export function unresolvedEchoes(echoes: readonly Message[], messages: readonly Message[]): Message[] {
+  if (echoes.length === 0) return echoes as Message[];
+  const userTexts = messages.filter((m) => m.kind === "you").map((m) => m.body.trim());
+  return echoes.filter((e) => !userTexts.some((t) => t.includes(e.body.trim())));
+}
+
+// Merge optimistic echo placeholders into the authoritative (newest-first) thread for display: unresolved
+// echoes render at the top (the most recent thing the user did), above the projected turns. Pure.
+export function mergeEchoes(messages: readonly Message[], echoes: readonly Message[]): Message[] {
+  const unresolved = unresolvedEchoes(echoes, messages);
+  if (unresolved.length === 0) return messages as Message[];
+  return [...unresolved].sort((a, b) => b.timestamp - a.timestamp).concat(messages);
+}
 
 // Build a Message from a projected history turn.
 export function messageFromHistory(turn: HistoryTurn): Message {
