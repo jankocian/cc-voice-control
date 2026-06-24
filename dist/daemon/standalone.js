@@ -19344,7 +19344,6 @@ function runGit(args) {
 
 // src/daemon/openai.ts
 var OPENAI_BASE = "https://api.openai.com/v1";
-var MAX_TTS_INPUT_CHARS = 4096;
 var OPENAI_TIMEOUT_MS = 30000;
 async function openaiFetch(url2, init) {
   const controller = new AbortController;
@@ -19396,8 +19395,10 @@ async function transcribeAudio(config2, audio, mimeType) {
   }
   return (await response.text()).trim();
 }
-async function synthesizeChunk(config2, text, voiceOverride) {
-  const response = await openaiFetch(`${OPENAI_BASE}/audio/speech`, {
+async function synthesizeSpeechOpusStream(config2, text, voiceOverride, onBytes) {
+  if (!text.trim())
+    return Buffer.alloc(0);
+  const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${config2.openaiApiKey}`,
@@ -19407,7 +19408,7 @@ async function synthesizeChunk(config2, text, voiceOverride) {
       model: config2.ttsModel,
       voice: voiceOverride ?? config2.openaiVoice,
       input: text,
-      response_format: "mp3",
+      response_format: "opus",
       ...config2.ttsInstructions ? { instructions: config2.ttsInstructions } : {}
     })
   });
@@ -19415,78 +19416,19 @@ async function synthesizeChunk(config2, text, voiceOverride) {
     const body = await response.text().catch(() => "");
     throw openaiError("OpenAI text-to-speech", response.status, body);
   }
-  return Buffer.from(await response.arrayBuffer());
-}
-var TTS_TRAILING_SENTINEL = " …";
-async function synthesizeSpeech(config2, text, voiceOverride) {
-  if (!text.trim())
-    return { audioBase64: "", mimeType: "audio/mpeg" };
-  const chunks = splitForTts(text, MAX_TTS_INPUT_CHARS);
-  const last = chunks.length - 1;
-  if (last >= 0 && chunks[last].length + TTS_TRAILING_SENTINEL.length <= MAX_TTS_INPUT_CHARS) {
-    chunks[last] += TTS_TRAILING_SENTINEL;
-  }
-  if (chunks.length === 1) {
-    const buffer = await synthesizeChunk(config2, chunks[0], voiceOverride);
-    return { audioBase64: buffer.toString("base64"), mimeType: "audio/mpeg" };
-  }
+  if (!response.body)
+    throw new Error("OpenAI TTS: no response body");
   const parts = [];
-  for (const chunk of chunks) {
-    try {
-      parts.push(await synthesizeChunk(config2, chunk, voiceOverride));
-    } catch (error51) {
-      if (parts.length === 0)
-        throw error51;
-      break;
-    }
+  let seq = 0;
+  const reader = response.body.getReader();
+  let chunk = await reader.read();
+  while (!chunk.done) {
+    const buf = Buffer.from(chunk.value);
+    parts.push(buf);
+    onBytes(buf, seq++);
+    chunk = await reader.read();
   }
-  return { audioBase64: Buffer.concat(parts).toString("base64"), mimeType: "audio/mpeg" };
-}
-function splitForTts(text, limit = MAX_TTS_INPUT_CHARS) {
-  const trimmed = text.trim();
-  if (trimmed.length === 0)
-    return [];
-  if (trimmed.length <= limit)
-    return [trimmed];
-  const sentences = trimmed.match(/[\s\S]*?(?:[.!?]+["')\]]*\s+|\n+|$)/g)?.filter((s) => s.length > 0) ?? [trimmed];
-  const chunks = [];
-  let current = "";
-  for (const sentence of sentences) {
-    if (sentence.length > limit) {
-      if (current.length > 0) {
-        chunks.push(current);
-        current = "";
-      }
-      for (const piece of hardSplit(sentence, limit))
-        chunks.push(piece);
-      continue;
-    }
-    if (current.length + sentence.length > limit) {
-      chunks.push(current);
-      current = sentence;
-    } else {
-      current += sentence;
-    }
-  }
-  if (current.length > 0)
-    chunks.push(current);
-  return chunks.map((c) => c.trim()).filter((c) => c.length > 0);
-}
-function hardSplit(text, limit) {
-  const safeLimit = Math.max(1, limit);
-  const pieces = [];
-  let i = 0;
-  while (i < text.length) {
-    let end = Math.min(i + safeLimit, text.length);
-    if (end < text.length && end - 1 > i) {
-      const code = text.charCodeAt(end - 1);
-      if (code >= 55296 && code <= 56319)
-        end -= 1;
-    }
-    pieces.push(text.slice(i, end));
-    i = end;
-  }
-  return pieces;
+  return Buffer.concat(parts);
 }
 
 // src/daemon/qr.ts
@@ -20513,9 +20455,12 @@ class VoiceDaemon {
       if (turn) {
         this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "pending" });
         try {
-          const synth = await synthesizeSpeech(this.init.config, capForSpeech(turn.text));
-          if (synth.audioBase64)
-            audio = this.storeAudio(uuid3, { audioBase64: synth.audioBase64, mimeType: synth.mimeType });
+          const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capForSpeech(turn.text), undefined, () => {});
+          if (fullBuffer.length)
+            audio = this.storeAudio(uuid3, {
+              audioBase64: fullBuffer.toString("base64"),
+              mimeType: "audio/ogg"
+            });
         } catch {}
         if (!audio) {
           this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
@@ -20543,15 +20488,43 @@ class VoiceDaemon {
   }
   async speak(uuid3, text, replay = false) {
     this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "pending" });
+    const capped = capForSpeech(text);
+    if (!replay) {
+      await this.speakStreamingOpus(uuid3, capped);
+      return;
+    }
     try {
-      const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
-      if (!audioBase64)
+      const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capped, undefined, () => {});
+      if (!fullBuffer.length)
         return;
-      this.storeAudio(uuid3, { audioBase64, mimeType });
-      this.sendToBrowser({ type: "tts_audio", requestId: uuid3, audioBase64, mimeType, replay });
+      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/ogg" };
+      this.storeAudio(uuid3, speech);
+      this.sendToBrowser({ type: "tts_audio", requestId: uuid3, replay, ...speech });
     } catch (error51) {
       const message = errText(error51);
       console.error(`[tts] synthesis failed for ${uuid3}: ${message}`);
+      this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
+    }
+  }
+  async speakStreamingOpus(uuid3, text) {
+    try {
+      const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, text, undefined, (chunk, seq) => {
+        this.sendToBrowser({
+          type: "tts_audio_chunk",
+          requestId: uuid3,
+          seq,
+          audioBase64: chunk.toString("base64"),
+          mimeType: "audio/ogg"
+        });
+      });
+      if (!fullBuffer.length)
+        return;
+      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/ogg" };
+      this.storeAudio(uuid3, speech);
+      this.sendToBrowser({ type: "tts_audio", requestId: uuid3, replay: true, ...speech });
+    } catch (error51) {
+      const message = errText(error51);
+      console.error(`[tts] opus streaming failed for ${uuid3}: ${message}`);
       this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
     }
   }
