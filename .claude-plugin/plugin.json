@@ -1,6 +1,6 @@
 {
   "name": "voice-control",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "Phone voice remote for your interactive Claude Code session — types your speech into the cmux pane and speaks replies back.",
   "author": {
     "name": "Jan Kocián",
