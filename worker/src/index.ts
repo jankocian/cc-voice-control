@@ -3,7 +3,7 @@ import {
   parseBridgeClaimPath,
   parseBridgeWebSocketPath
 } from "../../src/shared/bridge-contract";
-import { renderSessionPage } from "./session-assets";
+import { renderLandingPage, renderSessionPage } from "./session-assets";
 import { type Env, VoiceSessionDurableObject } from "./voice-session-do";
 
 // wrangler binds the Durable Object by this exported class name (wrangler.toml class_name).
@@ -14,7 +14,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
-      return new Response("voice-control bridge", { status: 200 });
+      return renderLandingPage(env);
     }
     if (url.pathname === "/favicon.ico") {
       return new Response(null, { status: 204 });
