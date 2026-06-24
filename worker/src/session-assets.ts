@@ -38,6 +38,7 @@ const SESSION_CSP = [
   "img-src 'self' data:",
   "connect-src 'self'",
   "media-src 'self' blob: data:",
+  "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'"
 ].join("; ");
@@ -51,6 +52,7 @@ const LANDING_CSP = [
   "img-src 'self' data: https://i.ytimg.com https://i.vimeocdn.com",
   "connect-src 'self'",
   "frame-src https://www.youtube-nocookie.com https://player.vimeo.com",
+  "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'"
 ].join("; ");
@@ -101,6 +103,7 @@ ${styleLinks}
       "content-type": "text/html;charset=utf-8",
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
       "content-security-policy": opts.csp
     }
   });

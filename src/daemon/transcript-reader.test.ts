@@ -1,12 +1,11 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readRecords, TAIL_BYTES } from "./transcript-reader.js";
 
-// The point of the floor offset: the CURRENT turn is always read in full, even when it writes more than the
-// display tail between the prompt and its answer — a huge thinking block, an hour of tool output. "Answer
-// always at EOF" guarantees the answer is read; the floor guarantees the prompt is.
+// We read the last TAIL_BYTES — the phone's display window. The answer is the file's last record so it is
+// always read; older records beyond the tail scroll out (a display bound, not a correctness one).
 const line = (o: unknown) => `${JSON.stringify(o)}\n`;
 const userRec = (uuid: string, text: string) =>
   line({
@@ -31,44 +30,37 @@ const answerRec = (uuid: string) =>
     message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }
   });
 
-describe("readRecords — floor offset reads the whole turn, tail is a display window", () => {
+describe("readRecords — last-TAIL_BYTES window, answer always at EOF", () => {
   let dir: string;
   let path: string;
-  let promptOffset: number; // byte position where the prompt record begins
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "reader-test-"));
     path = join(dir, "t.jsonl");
-    // [prior turn] [PROMPT] [more-than-a-tail of tool output] [ANSWER]: the prompt is pushed past the tail.
-    const prior = userRec("PRIOR", "an earlier turn");
-    promptOffset = Buffer.byteLength(prior);
+    // [PROMPT] [more-than-a-tail of tool output] [ANSWER]: the prompt is pushed past the tail.
     writeFileSync(
       path,
-      prior + userRec("PROMPT", "do a huge thing") + fillerRec("FILL", TAIL_BYTES + 100_000) + answerRec("ANSWER")
+      userRec("PROMPT", "do a huge thing") + fillerRec("FILL", TAIL_BYTES + 100_000) + answerRec("ANSWER")
     );
   });
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("tail read drops a prompt that's beyond TAIL_BYTES (but always keeps the answer at EOF)", () => {
-    const uuids = readRecords(path).records.map((r) => r.uuid);
+  it("keeps the answer at EOF but drops records that scrolled past the tail", () => {
+    const uuids = readRecords(path).map((r) => r.uuid);
     expect(uuids).not.toContain("PROMPT"); // scrolled out of the display tail
     expect(uuids).toContain("ANSWER"); // last record → always read
   });
 
-  it("reading from the turn's floor offset includes the prompt, however large the turn", () => {
-    const uuids = readRecords(path, promptOffset).records.map((r) => r.uuid);
-    expect(uuids).toContain("PROMPT"); // the floor is what makes the identity match deterministic
-    expect(uuids).toContain("ANSWER");
+  it("drops the partial first line when it begins mid-file (no torn record)", () => {
+    // The tail starts inside the giant FILL record, so the first line read is a fragment and must be
+    // dropped — never surfaced as a torn/garbage record.
+    const records = readRecords(path);
+    expect(records.every((r) => typeof r.uuid === "string")).toBe(true);
+    expect(records[0]?.uuid).toBe("ANSWER");
   });
 
-  it("does not drop the prompt even though the floor sits exactly on its record boundary", () => {
-    // Regression for the off-by-one: lines.shift() must drop the boundary newline, not the prompt itself.
-    const first = readRecords(path, promptOffset).records[0];
-    expect(first?.uuid).toBe("PROMPT");
-  });
-
-  it("reports the file's eof so the daemon can capture the next turn's floor", () => {
-    expect(readRecords(path).eof).toBe(statSync(path).size);
+  it("returns [] for a missing file", () => {
+    expect(readRecords(join(dir, "nope.jsonl"))).toEqual([]);
   });
 });

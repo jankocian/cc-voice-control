@@ -347,10 +347,17 @@ export class VoiceSessionDurableObject extends DurableObject<Env> {
   private async anyDevicePaired(): Promise<boolean> {
     const now = Date.now();
     const entries = await this.ctx.storage.list<{ createdAt: number }>({ prefix: DEVICE_STORAGE_PREFIX });
-    for (const entry of entries.values()) {
-      if (deviceFresh(entry.createdAt, now)) return true;
+    // Sweep abandoned tokens (a phone that paired once and never came back) while we already hold the list.
+    // They can never authenticate — both this and deviceKnown gate on deviceFresh — but nothing else GCs
+    // them, so iterate fully (no early return) and batch-delete the stale, mirroring sendRoster's ghost-prune.
+    let paired = false;
+    const stale: string[] = [];
+    for (const [key, entry] of entries) {
+      if (deviceFresh(entry.createdAt, now)) paired = true;
+      else stale.push(key);
     }
-    return false;
+    if (stale.length > 0) await this.ctx.storage.delete(stale);
+    return paired;
   }
 
   // Open a pairing window and tell the daemons it's open (so the start/status skills say "scan to pair").
@@ -431,7 +438,12 @@ function send(socket: WebSocket, envelope: BridgeEnvelope): void {
 function jsonResponse(body: unknown, status: number, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", "cache-control": "no-store", ...extraHeaders }
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      ...extraHeaders
+    }
   });
 }
 

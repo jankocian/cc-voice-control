@@ -1,26 +1,5 @@
 import { useEffect, useState } from "react";
 
-// Counts elapsed seconds while `active` is true (resets to 0 each time it turns
-// on). Drives the "02:38" working timer. Pure UI — no backend dependency.
-export function useElapsed(active: boolean): number {
-  const [seconds, setSeconds] = useState(0);
-
-  useEffect(() => {
-    if (!active) {
-      setSeconds(0);
-      return;
-    }
-    const startedAt = Date.now();
-    setSeconds(0);
-    const id = window.setInterval(() => {
-      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [active]);
-
-  return seconds;
-}
-
 // A ticking wall clock (epoch ms) that re-renders every `intervalMs` while `active`,
 // so a pure status function can transition reconnecting→offline and refresh "X ago"
 // with no server message. Returns a single Date.now() and stops ticking when inactive

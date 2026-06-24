@@ -273,7 +273,7 @@ export function useVoiceControls({
   );
 
   const sendControl = useCallback(
-    (command: { type: "status_request" } | { type: "stop_task" }) => {
+    (command: { type: "stop_task" }) => {
       const threadId = activeThreadIdRef.current;
       if (!threadId || !sendDaemon(threadId, command)) {
         showFlash(bridgeReady(activeThreadIdRef.current) ? "Couldn't reach Claude Code" : "Not connected yet");
