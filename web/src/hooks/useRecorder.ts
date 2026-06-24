@@ -393,10 +393,10 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     // recording is live immediately; the waveform appears once the context is ready.
     // StatusVisual shows recording && !visualizerActive as a dim-pending visual in the gap.
     ensureAudioRunning()
-      .catch(() => {})
       .then(() => {
         if (recordingRef.current) startVisualizer();
-      });
+      })
+      .catch(() => {});
   }, [ensureMic, stopStream, clearIdleTimer, startVisualizer, submitRecording, armMediaSession]);
 
   const teardown = useCallback((): void => {
