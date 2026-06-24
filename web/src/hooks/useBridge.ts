@@ -37,7 +37,7 @@ export type BridgeContentEvent = Extract<
 export type DaemonCommand =
   // requestId is caller-minted (stable across retransmits) so the daemon's submit_ack/dedup can match it;
   // every other turn command's requestId is minted here in sendDaemon.
-  | { type: "submit_audio"; requestId: string; audioBase64: string; mimeType: string; mode: "queue" | "interrupt" }
+  | { type: "submit_audio"; requestId: string; audioBase64: string; mimeType: string; mode: "steer" | "interrupt" }
   | { type: "status_request" }
   | { type: "summary_request" }
   | { type: "stop_task" }

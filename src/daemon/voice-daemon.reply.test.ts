@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
-import { cmuxAnswerQuestion, cmuxSubmit } from "./cmux.js";
+import { cmuxAnswerQuestion, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
 import { synthesizeSpeech, transcribeAudio } from "./openai.js";
 import { TAIL_BYTES } from "./transcript-reader.js";
 import { VoiceDaemon } from "./voice-daemon.js";
@@ -477,11 +477,11 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     const port = JSON.parse(readFileSync(join(dataDir, "runtime", "SURF.json"), "utf8")).port as number;
     await post(port, "/turn-progress", { transcriptPath: transcript }); // floor anchor at end of "ready"
 
-    // Both utterances are transcribed + tracked (the daemon injects the first, queues the second).
+    // Both utterances are transcribed + steered straight into the pane (Claude merges them into one glued turn).
     vi.mocked(transcribeAudio).mockResolvedValueOnce("первая фраза").mockResolvedValueOnce("Mluvím česky");
-    await sendToDaemon?.({ type: "submit_audio", audioBase64: "AAA", mimeType: "audio/webm", mode: "queue" });
+    await sendToDaemon?.({ type: "submit_audio", audioBase64: "AAA", mimeType: "audio/webm", mode: "steer" });
     await sleep(120);
-    await sendToDaemon?.({ type: "submit_audio", audioBase64: "AAA", mimeType: "audio/webm", mode: "queue" });
+    await sendToDaemon?.({ type: "submit_audio", audioBase64: "AAA", mimeType: "audio/webm", mode: "steer" });
     await sleep(120);
 
     // The merge: orphan "A", then the glued "A.B" (same parent P), then the answer under A.B.
@@ -538,7 +538,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     expect(spoken.some((t) => t.includes("Which?"))).toBe(true);
 
     // The user speaks while the question is pending → the transcript goes into the picker's custom answer,
-    // NOT the inject queue (cmuxAnswerQuestion, never cmuxSubmit).
+    // NOT steered into the pane (cmuxAnswerQuestion, never cmuxSubmit).
     vi.mocked(cmuxAnswerQuestion).mockClear();
     vi.mocked(cmuxSubmit).mockClear();
     await sendToDaemon?.({
@@ -546,7 +546,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       requestId: "r",
       audioBase64: "QUFB",
       mimeType: "audio/webm",
-      mode: "queue"
+      mode: "steer"
     });
     for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestion).mock.calls.length === 0; i++) await sleep(50);
     expect(vi.mocked(cmuxAnswerQuestion)).toHaveBeenCalledWith("unused", "SURF"); // transcribeAudio mock → "unused"
@@ -558,7 +558,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     daemon.stop();
   }, 20000);
 
-  it("treats the answer as a normal prompt when the picker is already gone (no-picker → queue, never dropped)", async () => {
+  it("steers the answer into the pane when the picker is already gone (no-picker → never dropped)", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
     writeFileSync(transcript, "");
     const { daemon, port } = await driveUpToClose(transcript);
@@ -574,10 +574,59 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       requestId: "r",
       audioBase64: "QUFB",
       mimeType: "audio/webm",
-      mode: "queue"
+      mode: "steer"
     });
-    // Falls through to a normal prompt (queueVoice emits a "queued" prompt_status) — the words aren't lost.
-    expect(await waitForPromptStatus("unused", "queued")).toBe(true);
+    // Falls through to a steered prompt typed straight into the pane (accepted) — the words aren't lost.
+    expect(await waitForPromptStatus("unused", "accepted")).toBe(true);
+    expect(vi.mocked(cmuxSubmit)).toHaveBeenCalledWith("unused", expect.anything());
+
+    daemon.stop();
+  }, 20000);
+
+  it("steers a spoken message straight into the pane; interrupt types it THEN presses Esc to propagate it now", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, "");
+    const { daemon } = await driveUpToClose(transcript); // Claude is mid-turn (busy)
+
+    // STEER while busy: type into the pane (Claude Code queues it for the next boundary), no Esc.
+    vi.mocked(cmuxSubmit).mockClear();
+    vi.mocked(cmuxInterrupt).mockClear();
+    vi.mocked(transcribeAudio).mockResolvedValueOnce("also handle errors");
+    await sendToDaemon?.({
+      type: "submit_audio",
+      requestId: "s",
+      audioBase64: "AAA",
+      mimeType: "audio/webm",
+      mode: "steer"
+    });
+    for (let i = 0; i < 40 && vi.mocked(cmuxSubmit).mock.calls.length === 0; i++) await sleep(50);
+    expect(vi.mocked(cmuxSubmit)).toHaveBeenCalledWith("also handle errors", "SURF");
+    expect(vi.mocked(cmuxInterrupt)).not.toHaveBeenCalled();
+
+    // INTERRUPT: type+Enter queues the message, THEN Esc propagates that queued message into the stream now.
+    const order: string[] = [];
+    vi.mocked(cmuxInterrupt)
+      .mockClear()
+      .mockImplementationOnce(async () => {
+        order.push("esc");
+        return true;
+      });
+    vi.mocked(cmuxSubmit)
+      .mockClear()
+      .mockImplementationOnce(async () => {
+        order.push("submit");
+        return true;
+      });
+    vi.mocked(transcribeAudio).mockResolvedValueOnce("stop, do this instead");
+    await sendToDaemon?.({
+      type: "submit_audio",
+      requestId: "i",
+      audioBase64: "AAA",
+      mimeType: "audio/webm",
+      mode: "interrupt"
+    });
+    for (let i = 0; i < 40 && order.length < 2; i++) await sleep(50);
+    expect(order).toEqual(["submit", "esc"]); // type+Enter first, then Esc propagates it into the stream
 
     daemon.stop();
   }, 20000);
@@ -598,7 +647,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       requestId: "r",
       audioBase64: "QUFB",
       mimeType: "audio/webm",
-      mode: "queue"
+      mode: "steer"
     });
     await sleep(400);
     expect(vi.mocked(cmuxAnswerQuestion)).not.toHaveBeenCalled(); // never routed to the picker
