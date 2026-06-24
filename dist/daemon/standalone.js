@@ -19880,11 +19880,6 @@ class TurnCoordinator {
     this.deps.onStatusChange();
     this.pump();
   }
-  interruptWith(text) {
-    this.clearTurns();
-    this.queue.unshift(text);
-    this.pump();
-  }
   reset() {
     this.clearTurns();
     this.queue.length = 0;
@@ -20220,10 +20215,10 @@ class VoiceDaemon {
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
-        this.queueVoice("Give me a brief spoken status of what you're doing right now.", "queue");
+        this.queueVoice("Give me a brief spoken status of what you're doing right now.");
         return;
       case "summary_request":
-        this.queueVoice("Briefly summarize what you've done so far, for the phone.", "queue");
+        this.queueVoice("Briefly summarize what you've done so far, for the phone.");
         return;
       case "stop_task":
         await cmuxInterrupt(this.init.surface);
@@ -20337,9 +20332,26 @@ class VoiceDaemon {
       }
       this.pendingQuestionOverlay = undefined;
     }
-    if (mode === "interrupt")
+    await this.steerIntoPane(transcript, mode === "interrupt");
+  }
+  async steerIntoPane(text, interrupt) {
+    const ok = await cmuxSubmit(text, this.init.surface);
+    if (!ok) {
+      this.refreshCmuxHealth();
+      this.sendToBrowser({
+        type: "error",
+        message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
+      });
+      return;
+    }
+    if (interrupt)
       await cmuxInterrupt(this.init.surface);
-    this.queueVoice(transcript, mode);
+    if (!this.cmuxHealthy) {
+      this.cmuxHealthy = true;
+      this.emitStatus();
+    }
+    this.sendToBrowser({ type: "prompt_status", text, state: "accepted" });
+    this.syncFromTranscript();
   }
   pendingQuestion(turns) {
     for (let i = turns.length - 1;i >= 0; i--) {
@@ -20348,11 +20360,8 @@ class VoiceDaemon {
     }
     return;
   }
-  queueVoice(text, mode) {
-    if (mode === "interrupt")
-      this.turns.interruptWith(text);
-    else
-      this.turns.enqueueVoice(text);
+  queueVoice(text) {
+    this.turns.enqueueVoice(text);
     this.sendToBrowser({ type: "prompt_status", text, state: "queued" });
     this.syncFromTranscript();
   }
