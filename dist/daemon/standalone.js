@@ -19767,14 +19767,12 @@ function dropSessionAnnouncement(turns, sessionUrl) {
 // src/daemon/transcript-reader.ts
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 var TAIL_BYTES = 512 * 1024;
-function readRecords(path, floorOffset) {
+function readRecords(path) {
   let fd;
   try {
     fd = openSync(path, "r");
     const eof = fstatSync(fd).size;
-    const tailStart = Math.max(0, eof - TAIL_BYTES);
-    const floorStart = floorOffset === undefined ? undefined : Math.max(0, floorOffset - 1);
-    const start = floorStart === undefined ? tailStart : Math.min(tailStart, floorStart);
+    const start = Math.max(0, eof - TAIL_BYTES);
     const buf = Buffer.alloc(eof - start);
     const bytesRead = readSync(fd, buf, 0, buf.length, start);
     const lines = buf.toString("utf8", 0, bytesRead).split(`
@@ -19789,9 +19787,9 @@ function readRecords(path, floorOffset) {
         records.push(JSON.parse(line));
       } catch {}
     }
-    return { records, eof };
+    return records;
   } catch {
-    return { records: [], eof: 0 };
+    return [];
   } finally {
     if (fd !== undefined)
       try {
@@ -19799,9 +19797,8 @@ function readRecords(path, floorOffset) {
       } catch {}
   }
 }
-function projectTranscript(path, maxTurns, floorOffset) {
-  const { records, eof } = readRecords(path, floorOffset);
-  return { turns: projectTurns(records, maxTurns), eof };
+function projectTranscript(path, maxTurns) {
+  return projectTurns(readRecords(path), maxTurns);
 }
 
 // src/daemon/turn-coordinator.ts
@@ -20443,12 +20440,13 @@ class VoiceDaemon {
     this.reflect(this.projectedNow(), true);
   }
   reflect(turns, force) {
-    const sig = turns.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? t.question.answered ? "qa" : "q" : ""}`).join("|");
+    const shown = dropSessionAnnouncement(turns, this.init.browserUrl);
+    const sig = shown.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? t.question.answered ? "qa" : "q" : ""}`).join("|");
     if (force || sig !== this.lastHistorySig) {
       this.lastHistorySig = sig;
       this.sendToBrowser({
         type: "history",
-        turns: turns.map((t) => ({
+        turns: shown.map((t) => ({
           requestId: t.uuid,
           timestamp: t.timestamp,
           role: t.role,
@@ -20461,7 +20459,7 @@ class VoiceDaemon {
     }
     if (force || this.computeState(turns) !== this.lastState)
       this.emitStatus(turns);
-    this.synthesizeReplies(turns);
+    this.synthesizeReplies(shown);
   }
   setPendingQuestion(toolUseId, rawQuestions) {
     const questions = normalizeQuestions(rawQuestions);
@@ -20478,7 +20476,7 @@ class VoiceDaemon {
     };
   }
   projectedNow() {
-    const base = this.lastTranscriptPath ? dropSessionAnnouncement(projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).turns.filter((t) => t.timestamp >= this.floor), this.init.browserUrl) : [];
+    const base = this.lastTranscriptPath ? projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor) : [];
     const overlay = this.pendingQuestionOverlay;
     if (!overlay?.question)
       return base;
