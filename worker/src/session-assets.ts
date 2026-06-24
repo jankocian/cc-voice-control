@@ -29,11 +29,15 @@ function loadSpaAssets(env: Env): Promise<SpaAssets> {
 }
 
 // The phone SPA is served from 'self': mic via MediaRecorder, the only network target is the
-// same-origin bridge WebSocket (connect-src 'self'), TTS plays from blob: URLs, and `data:` in
-// media-src is the silent-WAV that unlocks iOS autoplay on first tap.
+// same-origin bridge WebSocket (connect-src 'self'), and `data:` in media-src is the silent-WAV
+// that unlocks iOS autoplay on first tap. TTS decodes OGG Opus on the main thread via
+// ogg-opus-decoder, which compiles a WASM module — so script-src needs 'wasm-unsafe-eval'
+// (permits WebAssembly.compile, NOT eval/new Function). The main-thread decoder is deliberate:
+// the worker variant runs in a blob: Worker that can't compile WASM under this CSP because blob:
+// workers don't inherit 'wasm-unsafe-eval' — so there is no worker here, and no worker-src needed.
 const SESSION_CSP = [
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self'",
   "img-src 'self' data:",
   "connect-src 'self'",

@@ -158,10 +158,11 @@ export function useThreadMessages({
           onSendAckedRef.current(event.requestId);
           return;
         case "tts_audio": {
-          // Only auto-play a fresh reply for the thread the user is looking at; a reply on a background
-          // thread waits for a tap. A replay is already gated to tap-to-play inside attachAudio.
+          // Autoplay only for the thread the user is looking at; a reply on a background thread waits
+          // for a tap. attachAudio also honours the daemon's `replay` flag (burst-suppressed / fetched
+          // history clips) — but NOT for a stream-completing clip, which it plays via its stream marker.
           const background = threadId !== activeThreadIdRef.current;
-          attachAudio(event.requestId, event.audioBase64, event.mimeType, event.replay === true || background);
+          attachAudio(event.requestId, event.audioBase64, event.mimeType, background, event.replay === true);
           // A genuinely-fresh reply on a background thread → let App auto-follow it (auto-follow setting);
           // a replay (a fetched history clip) is the user's own action, never a follow trigger.
           if (background && event.replay !== true) onBackgroundReplyRef.current(threadId);
