@@ -51,6 +51,8 @@ export function StatusVisual({
 }) {
   const { dataState, key } = status;
   const mini = size === "mini";
+  // recording=true but audio not flowing yet — mic/AudioContext setup still in progress.
+  const pendingRecording = recording && !visualizerActive;
   const connectingDots = !recording && (key === "connecting" || key === "waiting");
   const speaking = dataState === "speaking";
   const working = dataState === "working" || dataState === "sending";
@@ -66,7 +68,8 @@ export function StatusVisual({
   // shows the (red) equalizer for recording instead. So: hero → equalizer unless recording; mini →
   // equalizer for everything that isn't the travelling dots.
   const showCanvas = !mini;
-  const showEqualizer = !connectingDots && (mini || !recording);
+  // Also show equalizer during pending (recording=true, visualizerActive=false) — canvas has no data yet.
+  const showEqualizer = !connectingDots && (mini || !recording || pendingRecording);
   // "Ready / your turn" reuses the SAME equalizer elements but collapses them to uniform dots doing a
   // staggered appear-wave (awaiting input) instead of the breathing bars — so the row visibly morphs
   // bars↔dots as Claude goes idle/active. "Claude needs you" is also a your-turn moment (amber via `tone`).
@@ -133,12 +136,14 @@ export function StatusVisual({
                 mini ? "w-1" : "w-2",
                 // Ready → a uniform dot (square w/h, fully round); otherwise the bar's own height.
                 readyDots ? (mini ? "h-1" : "h-2") : mini ? bar.mini : bar.h,
-                recording && mini ? "bg-danger" : tone,
+                recording && mini ? "bg-danger" : pendingRecording ? "bg-danger" : tone,
                 active || (recording && mini)
                   ? cn("animate-bar", bar.delay)
-                  : readyDots
-                    ? cn("animate-dot-wave", bar.soft)
-                    : "scale-y-[0.35] opacity-50"
+                  : pendingRecording
+                    ? "scale-y-[0.5] opacity-40 animate-pulse"
+                    : readyDots
+                      ? cn("animate-dot-wave", bar.soft)
+                      : "scale-y-[0.35] opacity-50"
               )}
             />
           ))}
