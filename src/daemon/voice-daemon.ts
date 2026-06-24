@@ -34,7 +34,7 @@ import {
   type VoiceRemoteConfig
 } from "./config.js";
 import { computeLabel } from "./labels.js";
-import { synthesizeSpeech, transcribeAudio } from "./openai.js";
+import { synthesizeSpeechOpusStream, transcribeAudio } from "./openai.js";
 import { renderQr } from "./qr.js";
 import { buildClaudeSpawnCommand, PERMISSION_MODES } from "./spawn-command.js";
 import {
@@ -1016,9 +1016,17 @@ export class VoiceDaemon {
         // Re-synthesizing on demand (tap-to-play / retry) — show the loading indicator while we do.
         this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "pending" });
         try {
-          const synth = await synthesizeSpeech(this.init.config, capForSpeech(turn.text));
-          if (synth.audioBase64)
-            audio = this.storeAudio(uuid, { audioBase64: synth.audioBase64, mimeType: synth.mimeType });
+          const fullBuffer = await synthesizeSpeechOpusStream(
+            this.init.config,
+            capForSpeech(turn.text),
+            undefined,
+            () => {}
+          );
+          if (fullBuffer.length)
+            audio = this.storeAudio(uuid, {
+              audioBase64: fullBuffer.toString("base64"),
+              mimeType: "audio/ogg"
+            });
         } catch {
           // synth failed → mark the row retryable below
         }
@@ -1056,21 +1064,49 @@ export class VoiceDaemon {
   }
 
   // Synthesize a reply/step's audio, retain it (keyed by native uuid) for tap-to-play + reconnect, and push
-  // it to the phone. `replay=false` lets the phone auto-play it now (per its autoplay setting); `replay=true`
-  // caches it for tap-to-play without auto-playing (an older row caught in a burst, or a connect re-send).
+  // it to the phone. `replay=false` streams OGG Opus bytes in real-time so audio starts within ~1 s;
+  // `replay=true` synthesizes a fresh MP3 and sends it whole (tap-to-play fetches are always one-shot).
   private async speak(uuid: string, text: string, replay = false): Promise<void> {
-    // Tell the phone audio is on its way so the message shows a loading indicator until it lands.
     this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "pending" });
+    const capped = capForSpeech(text);
+    if (!replay) {
+      await this.speakStreamingOpus(uuid, capped);
+      return;
+    }
     try {
-      const { audioBase64, mimeType } = await synthesizeSpeech(this.init.config, capForSpeech(text));
-      if (!audioBase64) return; // nothing to synthesize (empty/whitespace reply)
-      this.storeAudio(uuid, { audioBase64, mimeType });
-      this.sendToBrowser({ type: "tts_audio", requestId: uuid, audioBase64, mimeType, replay });
+      const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capped, undefined, () => {});
+      if (!fullBuffer.length) return;
+      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/ogg" };
+      this.storeAudio(uuid, speech);
+      this.sendToBrowser({ type: "tts_audio", requestId: uuid, replay, ...speech });
     } catch (error) {
-      // The text reply already reached the phone; flag the row failed (the phone offers a retry) instead
-      // of a transient toast, so a config/model/rate-limit problem is recoverable rather than just lost.
       const message = errText(error);
       console.error(`[tts] synthesis failed for ${uuid}: ${message}`);
+      this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "failed" });
+    }
+  }
+
+  // Streams a single OpenAI TTS call (OGG Opus) byte-by-byte to the phone so audio starts playing
+  // before the full reply is synthesized. After all bytes arrive, caches the full OGG and signals
+  // end-of-stream via tts_audio(replay:true) so the phone can replay it with a tap.
+  private async speakStreamingOpus(uuid: string, text: string): Promise<void> {
+    try {
+      const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, text, undefined, (chunk, seq) => {
+        this.sendToBrowser({
+          type: "tts_audio_chunk",
+          requestId: uuid,
+          seq,
+          audioBase64: chunk.toString("base64"),
+          mimeType: "audio/ogg"
+        });
+      });
+      if (!fullBuffer.length) return;
+      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/ogg" };
+      this.storeAudio(uuid, speech);
+      this.sendToBrowser({ type: "tts_audio", requestId: uuid, replay: true, ...speech });
+    } catch (error) {
+      const message = errText(error);
+      console.error(`[tts] opus streaming failed for ${uuid}: ${message}`);
       this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "failed" });
     }
   }

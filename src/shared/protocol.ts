@@ -105,6 +105,12 @@ export type DaemonToBrowserEvent =
   // `replay` marks a reply re-sent on reconnect: the phone shows it for tap-to-play
   // instead of auto-playing it (a reply the user already missed should not start talking).
   | { type: "tts_audio"; requestId: string; audioBase64: string; mimeType: string; replay?: boolean }
+  // Streaming TTS: one chunk of a long reply, sent as each piece finishes so audio starts before
+  // all chunks are synthesized. `seq` is the 0-based chunk index (chunks arrive in order).
+  // The stream ends when `tts_audio` (replay:true) arrives for the same requestId — that caches
+  // the full audio for tap-to-play and signals no more chunks are coming. On synthesis failure
+  // mid-stream a `tts_status: failed` arrives instead and the phone aborts the stream.
+  | { type: "tts_audio_chunk"; requestId: string; seq: number; audioBase64: string; mimeType: string }
   // Audio lifecycle for a reply the daemon is voicing: "pending" while it synthesizes, "failed" if synth
   // errored. Lets the phone show a loading indicator on the message until `tts_audio` lands, and a retry
   // (re-request via get_audio) on failure. Not sent for replies the daemon never voices.

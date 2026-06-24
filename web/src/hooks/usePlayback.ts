@@ -1,5 +1,5 @@
+import { OggOpusDecoderWebWorker } from "ogg-opus-decoder";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { blobFromBase64 } from "../lib/audio";
 import { setAudioSessionType } from "../lib/audioSession";
 
 const SPEEDS = [1, 1.25, 1.5, 1.75, 2];
@@ -21,6 +21,17 @@ function formatRate(rate: number): string {
 }
 
 type CachedAudio = { audioBase64: string; mimeType: string };
+
+// State for an active foreground streaming TTS session (OGG Opus → WASM decode → Web Audio API).
+// Created on the first chunk of a foreground reply; removed when the last decoded audio finishes playing.
+// Background streams skip this entirely — they wait for tts_audio(replay:true) then tap-to-play.
+type StreamState = {
+  decoder: OggOpusDecoderWebWorker;
+  closed: boolean; // tts_audio(replay:true) received — all bytes sent by daemon
+  nextPlayTime: number; // AudioContext scheduling cursor (seconds)
+  pendingDecode: Promise<void>; // chain to serialize async decode calls in arrival order
+  source?: AudioBufferSourceNode; // most-recently-started node; stop()ed on abort to silence immediately
+};
 
 export type Playback = {
   // requestId of the entry currently rendered as "playing" (shows the pause icon),
@@ -44,6 +55,16 @@ export type Playback = {
   playbackRate: number;
   formattedRate: string;
   attachAudio: (requestId: string, audioBase64: string, mimeType: string, replay: boolean) => void;
+  // Attach one chunk of a long streaming reply. seq=0 auto-plays on foreground threads; later chunks
+  // are queued and played sequentially. Stream ends when tts_audio(replay:true) arrives for the same
+  // requestId; tts_status:failed aborts it. background=true suppresses auto-play.
+  attachAudioChunk: (
+    requestId: string,
+    seq: number,
+    audioBase64: string,
+    mimeType: string,
+    background: boolean
+  ) => void;
   // Record a daemon `tts_status` for a reply (drives the loading / retry indicator).
   noteAudioStatus: (requestId: string, state: "pending" | "failed") => void;
   // Mark replies the daemon still has audio for (from a `history` event) as playable, even
@@ -90,7 +111,6 @@ export function usePlayback({
 
   const audioByRequest = useRef(new Map<string, CachedAudio>());
   const currentPlayingIdRef = useRef<string | null>(null);
-  const currentUrlRef = useRef<string | null>(null);
 
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [loadedId, setLoadedId] = useState<string | null>(null);
@@ -110,6 +130,24 @@ export function usePlayback({
   }, []);
   const noteAudioStatus = useCallback((requestId: string, state: "pending" | "failed"): void => {
     if (!requestId) return;
+    if (state === "failed") {
+      // Abort any active stream for this requestId (daemon signalled mid-stream failure).
+      const stream = streamingRef.current.get(requestId);
+      if (stream) {
+        try {
+          stream.source?.stop();
+        } catch {}
+        stream.decoder.free().catch(() => {});
+        streamingRef.current.delete(requestId);
+        if (currentPlayingIdRef.current === requestId) {
+          currentPlayingIdRef.current = null;
+          setPlayingId(null);
+          setLoadedId(null);
+          setPosition(0);
+          setDuration(0);
+        }
+      }
+    }
     setAudioStatus((prev) => {
       if (prev.get(requestId) === state) return prev;
       const next = new Map(prev);
@@ -145,6 +183,11 @@ export function usePlayback({
   const pendingPlayIdRef = useRef<string | null>(null);
   const [pendingPlayId, setPendingPlayId] = useState<string | null>(null);
 
+  // Foreground streaming TTS state: one entry per requestId while WASM-decoding OGG chunks.
+  const streamingRef = useRef(new Map<string, StreamState>());
+  // Web Audio API context for streaming playback. Created + resumed on first user gesture (unlock()).
+  const audioContextRef = useRef<AudioContext | null>(null);
+
   player.playbackRate = playbackRate;
 
   // Reflect the audio element's actual play/pause into render state.
@@ -162,10 +205,6 @@ export function usePlayback({
       } catch {
         /* ignore */
       }
-      if (currentUrlRef.current) {
-        URL.revokeObjectURL(currentUrlRef.current);
-        currentUrlRef.current = null;
-      }
       currentPlayingIdRef.current = null;
       setPlayingId(null);
       setLoadedId(null);
@@ -176,9 +215,9 @@ export function usePlayback({
       setPlayingId(null);
     };
     // Natural end / load error → reset playback state; the row falls back to its replay control
-    // (still in playableIds), so a tap reloads it fresh. A natural end (however the clip was started —
-    // autoplay OR a manual tap) fires onAutoReplyFinished, the auto-respond hands-free trigger; App gates
-    // it to a real final reply + the setting. A load error never fires it.
+    // (still in playableIds), so a tap reloads it fresh. A natural end fires onAutoReplyFinished,
+    // the auto-respond hands-free trigger. Streaming replies manage their own end via AudioContext
+    // scheduling + setTimeout cleanup in attachAudioChunk/attachAudio, not through this handler.
     const onEnded = () => {
       const endedId = currentPlayingIdRef.current;
       unload();
@@ -205,7 +244,7 @@ export function usePlayback({
     };
   }, [player]);
 
-  // Release the object URL + pause on teardown.
+  // Pause the unlock element on teardown.
   useEffect(() => {
     return () => {
       try {
@@ -213,84 +252,139 @@ export function usePlayback({
       } catch {
         /* ignore */
       }
-      if (currentUrlRef.current) {
-        URL.revokeObjectURL(currentUrlRef.current);
-        currentUrlRef.current = null;
-      }
     };
   }, [player]);
 
-  const loadEntry = useCallback(
-    (requestId: string): boolean => {
-      const audio = audioByRequest.current.get(requestId);
-      if (!audio) return false;
-      if (currentPlayingIdRef.current !== requestId) {
-        player.pause();
-        currentPlayingIdRef.current = requestId;
-        setLoadedId(requestId);
-        setPosition(0);
-        setDuration(0);
-        if (currentUrlRef.current) URL.revokeObjectURL(currentUrlRef.current);
-        currentUrlRef.current = URL.createObjectURL(blobFromBase64(audio.audioBase64, audio.mimeType));
-        player.src = currentUrlRef.current;
-        player.playbackRate = playbackRate;
-      }
-      return true;
-    },
-    [player, playbackRate]
-  );
+  // Decode a complete OGG Opus clip (full base64 buffer) via WASM + Web Audio API and play it
+  // immediately. Reuses the same StreamState/cleanup path as live streaming so all TTS goes
+  // through one playback mechanism regardless of whether it arrived as chunks or a full buffer.
+  const playOggCached = useCallback((requestId: string, base64: string): void => {
+    const ctx = audioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
 
-  // Start (or resume) the loaded clip on the "ambient" (mixable) audio session so the reply plays
-  // OVER background music (Spotify) instead of pausing it: iOS WebKit can pause other audio but
-  // never reliably resumes it, so we never pause it. (Ambient respects the device mute switch — with
-  // music playing the switch is off, so the reply is audible and mixes in.)
-  const startPlayback = useCallback((): void => {
-    setAudioSessionType("ambient");
-    player.play().catch(() => {});
-  }, [player]);
+    // Stop any existing stream for this id (user tapped again while playing).
+    const existing = streamingRef.current.get(requestId);
+    if (existing) {
+      existing.decoder.free().catch(() => {});
+      streamingRef.current.delete(requestId);
+    }
+
+    const decoder = new OggOpusDecoderWebWorker();
+    const stream: StreamState = {
+      decoder,
+      closed: true, // full file — no more chunks expected
+      nextPlayTime: 0,
+      pendingDecode: Promise.resolve()
+    };
+    streamingRef.current.set(requestId, stream);
+    currentPlayingIdRef.current = requestId;
+    setPlayingId(requestId);
+    setLoadedId(requestId);
+
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const decoded = decoder.ready
+      .then(async () => {
+        if (!streamingRef.current.has(requestId)) return;
+        setAudioSessionType("ambient");
+        const { channelData, samplesDecoded } = await decoder.decodeFile(bytes);
+        if (samplesDecoded === 0 || channelData.length === 0) return;
+        if (!streamingRef.current.has(requestId)) return;
+        const buffer = ctx.createBuffer(channelData.length, samplesDecoded, 48000);
+        for (let i = 0; i < channelData.length; i++) buffer.copyToChannel(channelData[i], i);
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        const startAt = ctx.currentTime + 0.05;
+        source.start(startAt);
+        stream.source = source;
+        stream.nextPlayTime = startAt + buffer.duration;
+      })
+      .catch(() => {
+        const s = streamingRef.current.get(requestId);
+        if (s) {
+          try {
+            s.source?.stop();
+          } catch {}
+          s.decoder.free().catch(() => {});
+          streamingRef.current.delete(requestId);
+        }
+        if (currentPlayingIdRef.current === requestId) {
+          currentPlayingIdRef.current = null;
+          setPlayingId(null);
+          setLoadedId(null);
+        }
+      });
+
+    stream.pendingDecode = decoded;
+    decoded.then(() => {
+      const s = streamingRef.current.get(requestId);
+      if (!s) return;
+      const delay = Math.max(0, (s.nextPlayTime - ctx.currentTime) * 1000 + 150);
+      setTimeout(() => {
+        const current = streamingRef.current.get(requestId);
+        if (current) {
+          current.decoder.free().catch(() => {});
+          streamingRef.current.delete(requestId);
+        }
+        if (currentPlayingIdRef.current === requestId) {
+          currentPlayingIdRef.current = null;
+          setPlayingId(null);
+          setLoadedId(null);
+          setPosition(0);
+          setDuration(0);
+        }
+        onAutoReplyFinishedRef.current?.(requestId);
+      }, delay);
+    });
+  }, []);
 
   const playEntry = useCallback(
     (requestId: string): void => {
+      // Tap while playing → stop (Web Audio API can't pause; re-tap to restart).
       if (currentPlayingIdRef.current === requestId) {
-        if (player.paused) {
-          if (player.ended) player.currentTime = 0;
-          startPlayback();
-        } else {
-          player.pause();
+        const stream = streamingRef.current.get(requestId);
+        if (stream) {
+          try {
+            stream.source?.stop();
+          } catch {}
+          stream.decoder.free().catch(() => {});
+          streamingRef.current.delete(requestId);
         }
+        currentPlayingIdRef.current = null;
+        setPlayingId(null);
+        setLoadedId(null);
+        setPosition(0);
+        setDuration(0);
         return;
       }
-      if (loadEntry(requestId)) {
-        startPlayback();
+      const audio = audioByRequest.current.get(requestId);
+      if (audio && audioContextRef.current) {
+        playOggCached(requestId, audio.audioBase64);
         return;
       }
-      // No cached bytes. If this is a history reply the daemon still has, fetch it on
-      // demand: mark it pending so attachAudio plays it the moment it lands. (We're inside
-      // the tap gesture, so unlocking the element earlier keeps autoplay allowed.) The
-      // unlock already happened on first tap; pending playback resumes the iOS session in
-      // attachAudio → playEntry.
+      // No cached bytes: fetch on demand. We're inside a tap gesture so AudioContext is unlocked.
       pendingPlayIdRef.current = requestId;
       setPendingPlayId(requestId);
       onRequestAudioRef.current?.(requestId);
     },
-    [player, loadEntry, startPlayback]
+    [playOggCached]
   );
 
   const replayEntry = useCallback(
     (requestId: string): void => {
-      if (!loadEntry(requestId)) {
-        // No cached bytes yet (a history row). Fetch on demand; attachAudio plays it from
-        // the start since a freshly-loaded clip begins at 0.
+      const audio = audioByRequest.current.get(requestId);
+      if (!audio) {
         pendingPlayIdRef.current = requestId;
         setPendingPlayId(requestId);
         onRequestAudioRef.current?.(requestId);
         return;
       }
-      player.currentTime = 0;
-      player.playbackRate = playbackRate;
-      startPlayback();
+      if (audioContextRef.current) playOggCached(requestId, audio.audioBase64);
     },
-    [player, loadEntry, playbackRate, startPlayback]
+    [playOggCached]
   );
 
   const seekEntry = useCallback(
@@ -305,6 +399,23 @@ export function usePlayback({
   );
 
   const stopPlayback = useCallback((): void => {
+    // Stop any active WASM stream (Web Audio API audio isn't silenced by player.pause()).
+    const id = currentPlayingIdRef.current;
+    if (id) {
+      const stream = streamingRef.current.get(id);
+      if (stream) {
+        try {
+          stream.source?.stop();
+        } catch {}
+        stream.decoder.free().catch(() => {});
+        streamingRef.current.delete(id);
+      }
+      currentPlayingIdRef.current = null;
+      setPlayingId(null);
+      setLoadedId(null);
+      setPosition(0);
+      setDuration(0);
+    }
     try {
       player.pause();
     } catch {
@@ -323,21 +434,129 @@ export function usePlayback({
         next.add(requestId);
         return next;
       });
-      // A tap-to-play we fetched on demand: play it now (this is the user's intent), even
-      // though it arrives flagged `replay`. Clearing pending first so a later attach for the
-      // same id doesn't re-trigger.
+
+      // For a streaming reply, tts_audio(replay:true) is the end-of-stream signal from the daemon.
+      // Mark closed + schedule cleanup after all buffered audio finishes playing.
+      const stream = streamingRef.current.get(requestId);
+      if (stream) {
+        stream.closed = true;
+        // After all pending decode calls resolve, compute how long until the last scheduled audio
+        // ends and fire cleanup + onAutoReplyFinished at that point.
+        stream.pendingDecode.then(() => {
+          const s = streamingRef.current.get(requestId);
+          if (!s) return; // already cleaned up (e.g. dropAudio)
+          const ctx = audioContextRef.current;
+          const delay = ctx ? Math.max(0, (s.nextPlayTime - ctx.currentTime) * 1000 + 150) : 0;
+          setTimeout(() => {
+            const current = streamingRef.current.get(requestId);
+            if (current) {
+              current.decoder.free().catch(() => {});
+              streamingRef.current.delete(requestId);
+            }
+            if (currentPlayingIdRef.current === requestId) {
+              currentPlayingIdRef.current = null;
+              setPlayingId(null);
+              setLoadedId(null);
+              setPosition(0);
+              setDuration(0);
+            }
+            onAutoReplyFinishedRef.current?.(requestId);
+          }, delay);
+        });
+        // Full OGG now cached for tap-to-play. Skip normal auto-play — the stream is already playing.
+        return;
+      }
+
+      // A tap-to-play we fetched on demand: play it now (user's intent).
       if (pendingPlayIdRef.current === requestId) {
         pendingPlayIdRef.current = null;
         setPendingPlayId(null);
-        playEntry(requestId);
+        if (audioContextRef.current) playOggCached(requestId, audioBase64);
         return;
       }
-      // Otherwise: auto-play a fresh reply — but ONLY if autoplay is on. With autoplay off the audio is
-      // still cached + playable (above), it just waits for a tap. A missed (replayed) one also waits.
+      // Auto-play a fresh reply — only if autoplay is on. With autoplay off the clip is still cached +
+      // playable; it just waits for a tap. A replayed (missed) reply also just waits.
       const autoplayOn = getAutoplayRef.current ? getAutoplayRef.current() : true;
-      if (!getRecordingRef.current() && !replay && autoplayOn) playEntry(requestId);
+      if (!getRecordingRef.current() && !replay && autoplayOn && audioContextRef.current) {
+        playOggCached(requestId, audioBase64);
+      }
     },
-    [playEntry, clearAudioStatus]
+    [playOggCached, clearAudioStatus]
+  );
+
+  // Receive one OGG Opus byte chunk. Background threads skip decoding; foreground threads decode via
+  // WASM and schedule the resulting PCM through the Web Audio API so playback starts within ~1 s.
+  const attachAudioChunk = useCallback(
+    (requestId: string, seq: number, audioBase64: string, _mimeType: string, background: boolean): void => {
+      if (!requestId || !audioBase64) return;
+      if (seq === 0) clearAudioStatus(requestId);
+      if (background) return; // tts_audio(replay:true) will cache full clip; user taps to play
+
+      // Initialize WASM decoder on first chunk. decoder.ready is awaited inside pendingDecode.
+      if (!streamingRef.current.has(requestId)) {
+        const decoder = new OggOpusDecoderWebWorker();
+        streamingRef.current.set(requestId, {
+          decoder,
+          closed: false,
+          nextPlayTime: 0,
+          pendingDecode: decoder.ready
+        });
+        // Show playing indicator immediately so the UI reflects the stream starting.
+        currentPlayingIdRef.current = requestId;
+        setPlayingId(requestId);
+        setLoadedId(requestId);
+      }
+
+      const stream = streamingRef.current.get(requestId);
+      if (!stream) return;
+
+      const binary = atob(audioBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+      // Chain onto pendingDecode so chunks decode in arrival order regardless of WASM async timing.
+      stream.pendingDecode = stream.pendingDecode
+        .then(async () => {
+          if (!streamingRef.current.has(requestId)) return; // stream was dropped (dropAudio / failure)
+          const { channelData, samplesDecoded } = await stream.decoder.decode(bytes);
+          if (samplesDecoded === 0 || channelData.length === 0) return;
+
+          const ctx = audioContextRef.current;
+          if (!ctx || ctx.state === "closed") return;
+
+          setAudioSessionType("ambient");
+          const buffer = ctx.createBuffer(channelData.length, samplesDecoded, 48000 /* Opus always 48 kHz */);
+          for (let i = 0; i < channelData.length; i++) buffer.copyToChannel(channelData[i], i);
+
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(ctx.destination);
+
+          // Schedule: first chunk gets a small lead time to absorb any subsequent jitter.
+          if (stream.nextPlayTime === 0) stream.nextPlayTime = ctx.currentTime + 0.1;
+          const startAt = Math.max(ctx.currentTime, stream.nextPlayTime);
+          source.start(startAt);
+          stream.source = source;
+          stream.nextPlayTime = startAt + buffer.duration;
+        })
+        .catch(() => {
+          // Decode error: abort this stream silently (daemon will re-synthesize on get_audio).
+          const s = streamingRef.current.get(requestId);
+          if (s) {
+            try {
+              s.source?.stop();
+            } catch {}
+            s.decoder.free().catch(() => {});
+            streamingRef.current.delete(requestId);
+          }
+          if (currentPlayingIdRef.current === requestId) {
+            currentPlayingIdRef.current = null;
+            setPlayingId(null);
+            setLoadedId(null);
+          }
+        });
+    },
+    [clearAudioStatus]
   );
 
   // History rows (hasAudio) become playable before their bytes are fetched, so the inline
@@ -369,6 +588,10 @@ export function usePlayback({
 
   const unlockedRef = useRef(false);
   const unlock = useCallback((): void => {
+    // Create/resume the AudioContext for Web Audio API streaming (required within a user gesture on iOS).
+    if (!audioContextRef.current) audioContextRef.current = new AudioContext();
+    audioContextRef.current.resume().catch(() => {});
+
     if (unlockedRef.current) return;
     // Only unlock when idle (don't stomp an actively-loaded clip). Latch AFTER this guard — if the first
     // gesture lands while a clip is playing, we skip THIS time but stay un-latched so a later idle gesture
@@ -399,6 +622,16 @@ export function usePlayback({
 
   const dropAudio = useCallback(
     (requestId: string): void => {
+      // Free WASM decoder and clear stream state before anything else so pending decode
+      // callbacks see the entry gone and bail out without scheduling more audio.
+      const stream = streamingRef.current.get(requestId);
+      if (stream) {
+        try {
+          stream.source?.stop();
+        } catch {}
+        stream.decoder.free().catch(() => {});
+        streamingRef.current.delete(requestId);
+      }
       if (requestId === currentPlayingIdRef.current) {
         stopPlayback();
         currentPlayingIdRef.current = null;
@@ -439,6 +672,7 @@ export function usePlayback({
     playbackRate,
     formattedRate,
     attachAudio,
+    attachAudioChunk,
     noteAudioStatus,
     markPlayable,
     playEntry,

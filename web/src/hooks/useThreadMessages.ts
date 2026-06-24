@@ -67,7 +67,7 @@ export function useThreadMessages({
   // thread read "1" after a refresh).
   const seenNewestRef = useRef<Map<ThreadId, number>>(new Map());
 
-  const { dropAudio, attachAudio, markPlayable, noteAudioStatus } = playback;
+  const { dropAudio, attachAudio, attachAudioChunk, markPlayable, noteAudioStatus } = playback;
 
   // Mirror the App callbacks in refs so the stable content handler can call them without becoming a
   // dependency (App recreates them as its state changes).
@@ -167,6 +167,11 @@ export function useThreadMessages({
           if (background && event.replay !== true) onBackgroundReplyRef.current(threadId);
           return;
         }
+        case "tts_audio_chunk": {
+          const background = threadId !== activeThreadIdRef.current;
+          attachAudioChunk(event.requestId, event.seq, event.audioBase64, event.mimeType, background);
+          return;
+        }
         case "tts_status":
           // Loading / failed indicator for a reply's audio (cleared when its tts_audio lands).
           noteAudioStatus(event.requestId, event.state);
@@ -190,7 +195,17 @@ export function useThreadMessages({
           return;
       }
     },
-    [attachAudio, dropAudio, markPlayable, noteAudioStatus, showFlash, noteActivity, activeThreadIdRef, armSpawnFollow]
+    [
+      attachAudio,
+      attachAudioChunk,
+      dropAudio,
+      markPlayable,
+      noteAudioStatus,
+      showFlash,
+      noteActivity,
+      activeThreadIdRef,
+      armSpawnFollow
+    ]
   );
 
   // Release per-thread state for threads the roster fully dropped (a snapshot without them; a
