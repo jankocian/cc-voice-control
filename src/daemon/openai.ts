@@ -158,6 +158,54 @@ export async function synthesizeSpeech(
   return { audioBase64: Buffer.concat(parts).toString("base64"), mimeType: "audio/mpeg" };
 }
 
+/** Stream a single OpenAI TTS call as raw OGG Opus bytes. Calls `onBytes` for each ~4 KB
+ *  chunk as it arrives from OpenAI, so the caller can forward audio to the phone before
+ *  synthesis completes — cutting time-to-first-sound from ~15 s to ~1 s for long replies.
+ *
+ *  Returns the full concatenated buffer (for tap-to-play caching). Throws on any error. */
+export async function synthesizeSpeechOpusStream(
+  config: VoiceRemoteConfig,
+  text: string,
+  voiceOverride: string | undefined,
+  onBytes: (chunk: Buffer, seq: number) => void
+): Promise<Buffer> {
+  if (!text.trim()) return Buffer.alloc(0);
+
+  // No AbortController timeout: the stream completes naturally when OpenAI finishes synthesizing.
+  const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${config.openaiApiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: config.ttsModel,
+      voice: voiceOverride ?? config.openaiVoice,
+      input: text,
+      response_format: "opus",
+      ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {})
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw openaiError("OpenAI text-to-speech", response.status, body);
+  }
+  if (!response.body) throw new Error("OpenAI TTS: no response body");
+
+  const parts: Buffer[] = [];
+  let seq = 0;
+  const reader = response.body.getReader();
+  let chunk = await reader.read();
+  while (!chunk.done) {
+    const buf = Buffer.from(chunk.value);
+    parts.push(buf);
+    onBytes(buf, seq++);
+    chunk = await reader.read();
+  }
+  return Buffer.concat(parts);
+}
+
 /** Split `text` into chunks each at most `limit` characters, preferring sentence
  *  boundaries so speech breaks fall in natural places.
  *

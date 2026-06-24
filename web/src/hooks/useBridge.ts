@@ -22,6 +22,7 @@ import { buildWebSocketUrl, claimSession } from "../lib/session";
 export type BridgeContentEvent = Extract<
   DaemonToBrowserEvent,
   | { type: "tts_audio" }
+  | { type: "tts_audio_chunk" }
   | { type: "tts_status" }
   | { type: "history" }
   | { type: "prompt_status" }
