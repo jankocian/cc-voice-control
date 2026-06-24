@@ -198,6 +198,7 @@ export function useThreadMessages({
   // one entry per pane ever seen. Also releases each dropped thread's cached audio.
   useEffect(() => {
     const live = new Set(threadsList.map((t) => t.threadId));
+    for (const id of seenNewestRef.current.keys()) if (!live.has(id)) seenNewestRef.current.delete(id);
     setRuntimeByThread((prev) => pruneThreadMap(prev, live));
     setMessagesByThread((prev) =>
       pruneThreadMap(prev, live, (messages) => {

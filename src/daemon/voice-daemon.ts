@@ -902,7 +902,12 @@ export class VoiceDaemon {
   // each time would flood the wire). Idempotent: the `seen` guard means re-running never double-synthesizes,
   // and native uuids mean it never double-shows.
   private reflect(turns: ProjectedTurn[], force: boolean): void {
-    const sig = turns
+    // The start-skill's QR/URL announcement is a real terminal reply: it must settle the working lamp (so
+    // computeState below gets the FULL `turns`), but its QR/URL must never be shown or spoken — so it's
+    // dropped from the displayed + synthesized set ONLY. Dropping it from the lamp's input is what used to
+    // stick the lamp on "working": the concluding reply disappeared, so isPaneWorking never saw an answer.
+    const shown = dropSessionAnnouncement(turns, this.init.browserUrl);
+    const sig = shown
       .map(
         (t) =>
           `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? (t.question.answered ? "qa" : "q") : ""}`
@@ -912,7 +917,7 @@ export class VoiceDaemon {
       this.lastHistorySig = sig;
       this.sendToBrowser({
         type: "history",
-        turns: turns.map((t) => ({
+        turns: shown.map((t) => ({
           requestId: t.uuid,
           timestamp: t.timestamp,
           role: t.role,
@@ -926,7 +931,7 @@ export class VoiceDaemon {
     // Only refresh the lamp when it actually flips (or on a forced hook/sync) — the tail fires on every
     // write, and re-emitting an unchanged "working" status each time would spam the bridge for nothing.
     if (force || this.computeState(turns) !== this.lastState) this.emitStatus(turns);
-    this.synthesizeReplies(turns); // synthesize + send a just-landed reply (idempotent via `seen`)
+    this.synthesizeReplies(shown); // synthesize + send a just-landed reply (idempotent via `seen`)
   }
 
   // Record the pending interactive question handed to us by the PreToolUse hook (Claude doesn't flush the
@@ -947,17 +952,17 @@ export class VoiceDaemon {
   }
 
   // Project the recent transcript tail (the conversation the phone mirrors), oldest-first, hiding turns
-  // below the topic floor and the start-skill's QR/URL announcement (noise — never shown or spoken). Then
-  // inject the pending-question overlay (if any) so a question Claude is blocked on shows live, even though
-  // its record isn't in the transcript yet — yielding to the transcript once the same question flushes there.
+  // below the topic floor. Then inject the pending-question overlay (if any) so a question Claude is blocked
+  // on shows live, even though its record isn't in the transcript yet — yielding to the transcript once the
+  // same question flushes there.
+  //
+  // The start-skill's QR/URL announcement is NOT dropped here: it's a real terminal reply that must still
+  // settle the working lamp. reflect() drops it from the displayed/synthesized set only — never from the set
+  // the lamp is derived from. Dropping it here is what used to leave the lamp stuck "working" after
+  // /voice-control:start: the very turn that concluded the thread vanished before isPaneWorking could see it.
   private projectedNow(): ProjectedTurn[] {
     const base = this.lastTranscriptPath
-      ? dropSessionAnnouncement(
-          projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).turns.filter(
-            (t) => t.timestamp >= this.floor
-          ),
-          this.init.browserUrl
-        )
+      ? projectTranscript(this.lastTranscriptPath, MAX_PROJECTED_TURNS).filter((t) => t.timestamp >= this.floor)
       : [];
     const overlay = this.pendingQuestionOverlay;
     if (!overlay?.question) return base;

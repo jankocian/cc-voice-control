@@ -1,15 +1,16 @@
 {
   "name": "cc-voice-control",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "Voice remote for an interactive Claude Code session: phone push-to-talk, a Cloudflare bridge, and a local daemon that types transcripts into your cmux Claude pane and speaks replies back via OpenAI.",
   "type": "module",
   "scripts": {
     "build": "bun build src/daemon/standalone.ts --target=node --format=esm --outfile=dist/daemon/standalone.js --external=bufferutil --external=utf-8-validate",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
+    "typecheck:web": "cd web && bun install --frozen-lockfile && tsc --noEmit",
     "test": "vitest run",
     "lint": "biome ci .",
     "format": "biome check --write .",
-    "build:web": "cd web && bun install && vite build",
+    "build:web": "cd web && bun install --frozen-lockfile && vite build",
     "dev:web": "cd web && bun install && vite",
     "dev:worker": "bun run build:web && wrangler dev --config worker/wrangler.toml",
     "deploy:worker": "bun run build:web && wrangler deploy --config worker/wrangler.toml"

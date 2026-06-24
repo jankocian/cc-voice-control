@@ -27,7 +27,6 @@ export type StatusDataState = "offline" | "ready" | "recording" | "sending" | "s
 export type StatusView = {
   key: StatusKey;
   dataState: StatusDataState;
-  lampClass: string;
   title: string;
   detail: string;
   // Whether the user can act (speak / control). Mirrors `canAct = ready && listening`.
@@ -149,21 +148,9 @@ export function deriveStatus(inputs: StatusInputs): StatusView {
 
   if (flash) detail = flash;
 
-  const lampClass =
-    "lamp" +
-    (dataState === "ready"
-      ? " connected"
-      : dataState === "recording"
-        ? " recording"
-        : dataState === "speaking"
-          ? " speaking"
-          : dataState === "working" || dataState === "sending"
-            ? " working"
-            : "");
-
   const canAct = ready && listening;
 
-  return { key, dataState, lampClass, title, detail, canAct };
+  return { key, dataState, title, detail, canAct };
 }
 
 // The presence dot tone for one thread in the switcher (#7), graded with the SAME offline

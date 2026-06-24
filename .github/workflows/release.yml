@@ -40,12 +40,17 @@ jobs:
       - run: bun run test
       - run: bun run build
 
-      - name: Commit rebuilt bundle if it changed
+      - name: Sync plugin manifest version + commit rebuilt bundle if changed
         run: |
-          if [ -n "$(git status --porcelain dist)" ]; then
+          # Keep the installer-facing plugin.json version in lockstep with package.json (the single
+          # source of truth) so it can't drift; commit it alongside the rebuilt bundle.
+          VERSION="$(jq -r .version package.json)"
+          jq --arg v "$VERSION" '.version = $v' .claude-plugin/plugin.json > .claude-plugin/plugin.json.tmp
+          mv .claude-plugin/plugin.json.tmp .claude-plugin/plugin.json
+          if [ -n "$(git status --porcelain dist .claude-plugin/plugin.json)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add dist
+            git add dist .claude-plugin/plugin.json
             git commit -m "chore: rebuild plugin bundle [skip ci]"
             git push
           fi
