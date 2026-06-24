@@ -343,6 +343,20 @@ describe("dropSessionAnnouncement — hide the start-skill QR/URL reply", () => 
     const turns = [turn("a1", "claude", "anything")];
     expect(dropSessionAnnouncement(turns, "")).toEqual(turns);
   });
+
+  // Regression: a voice message that arrives during /voice-control:start, whose ONLY reply is the QR/URL
+  // announcement, must not leave the working lamp stuck. The lamp is derived from the FULL projection (the
+  // announcement is a real terminal reply → idle); the DISPLAY drops it. Feeding the dropped set to the lamp
+  // is precisely the bug — it erases the only answer and isPaneWorking sticks on "working" forever.
+  it("the announcement settles the lamp; only the display drops it (lamp must see the full set)", () => {
+    const turns = [
+      turn("u", "user", "So how about now?"),
+      turn("a", "claude", `The voice remote is live.\n\`\`\`\n[QR]\n\`\`\`\nLink: ${SESSION_URL}`)
+    ];
+    expect(isPaneWorking(turns)).toBe(false); // full set: terminal reply present → idle (correct wiring)
+    expect(isPaneWorking(dropSessionAnnouncement(turns, SESSION_URL))).toBe(true); // dropped set: the bug
+    expect(dropSessionAnnouncement(turns, SESSION_URL).map((t) => t.uuid)).toEqual(["u"]); // display hides it
+  });
 });
 
 describe("projectTurns — interactive AskUserQuestion", () => {

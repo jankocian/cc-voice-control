@@ -344,8 +344,10 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
  * (non-interim) reply after it yet — Claude is still answering. DERIVED, never counted: however many
  * UserPromptSubmit/Stop hooks fired (a merged prompt fires two opens but one close), the answer's
  * presence in the transcript is ground truth, so the working lamp can never stick. Interim steps don't
- * count as the answer (a turn mid-tool-call is still working). Pass the projected turns (already active-
- * branch-resolved + announcement-dropped) — the same set the phone is shown, so view and lamp agree.
+ * count as the answer (a turn mid-tool-call is still working). Pass the active-branch-resolved projection
+ * WITH the start-skill announcement still in it — that announcement is a real terminal reply, so the lamp
+ * must see it to settle; only the phone's DISPLAY drops it (see dropSessionAnnouncement). Feeding the
+ * dropped set here is the bug that left the lamp stuck "working" after /voice-control:start.
  */
 export function isPaneWorking(turns: ProjectedTurn[]): boolean {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -380,9 +382,10 @@ export function pendingQuestion(turns: ProjectedTurn[]): boolean {
  * Drop the start-skill announcement (the "voice remote is live" QR + URL reply) from a projection. We key
  * on the daemon's OWN session URL — a value the daemon minted and the skill always prints as the tap/copy
  * fallback — never on the surrounding prose, so reworded copy still filters and a normal reply can't match
- * (the URL carries the 128-bit session secret). Belt-and-suspenders against the QR being shown OR spoken;
- * applied to every projection so it works for a brand-new session and one that's been running for hours.
- * ponytail: substring match on the URL; if the skill ever stops printing the URL, also pass the secret.
+ * (the URL carries the 128-bit session secret). Belt-and-suspenders against the QR being shown OR spoken.
+ * Applied to the DISPLAY/SYNTHESIS set ONLY — never to the set the working lamp is derived from, since the
+ * announcement is a real terminal reply the lamp must see to settle (see isPaneWorking).
+ * ponytail: substring match on the URL; if the skill ever stops printing it, also pass the secret.
  */
 export function dropSessionAnnouncement(turns: ProjectedTurn[], sessionUrl: string): ProjectedTurn[] {
   if (!sessionUrl) return turns;
