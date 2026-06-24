@@ -33,6 +33,13 @@ type StreamState = {
   source?: AudioBufferSourceNode; // most-recently-started node; stop()ed on abort to silence immediately
 };
 
+function freeStream(stream: StreamState): void {
+  try {
+    stream.source?.stop();
+  } catch {}
+  stream.decoder.free().catch(() => {});
+}
+
 export type Playback = {
   // requestId of the entry currently rendered as "playing" (shows the pause icon),
   // i.e. the loaded clip that is actively playing. null when paused/stopped.
@@ -134,10 +141,7 @@ export function usePlayback({
       // Abort any active stream for this requestId (daemon signalled mid-stream failure).
       const stream = streamingRef.current.get(requestId);
       if (stream) {
-        try {
-          stream.source?.stop();
-        } catch {}
-        stream.decoder.free().catch(() => {});
+        freeStream(stream);
         streamingRef.current.delete(requestId);
         if (currentPlayingIdRef.current === requestId) {
           currentPlayingIdRef.current = null;
@@ -305,10 +309,7 @@ export function usePlayback({
       .catch(() => {
         const s = streamingRef.current.get(requestId);
         if (s) {
-          try {
-            s.source?.stop();
-          } catch {}
-          s.decoder.free().catch(() => {});
+          freeStream(s);
           streamingRef.current.delete(requestId);
         }
         if (currentPlayingIdRef.current === requestId) {
@@ -326,7 +327,7 @@ export function usePlayback({
       setTimeout(() => {
         const current = streamingRef.current.get(requestId);
         if (current) {
-          current.decoder.free().catch(() => {});
+          freeStream(current);
           streamingRef.current.delete(requestId);
         }
         if (currentPlayingIdRef.current === requestId) {
@@ -347,10 +348,7 @@ export function usePlayback({
       if (currentPlayingIdRef.current === requestId) {
         const stream = streamingRef.current.get(requestId);
         if (stream) {
-          try {
-            stream.source?.stop();
-          } catch {}
-          stream.decoder.free().catch(() => {});
+          freeStream(stream);
           streamingRef.current.delete(requestId);
         }
         currentPlayingIdRef.current = null;
@@ -404,10 +402,7 @@ export function usePlayback({
     if (id) {
       const stream = streamingRef.current.get(id);
       if (stream) {
-        try {
-          stream.source?.stop();
-        } catch {}
-        stream.decoder.free().catch(() => {});
+        freeStream(stream);
         streamingRef.current.delete(id);
       }
       currentPlayingIdRef.current = null;
@@ -450,7 +445,7 @@ export function usePlayback({
           setTimeout(() => {
             const current = streamingRef.current.get(requestId);
             if (current) {
-              current.decoder.free().catch(() => {});
+              freeStream(current);
               streamingRef.current.delete(requestId);
             }
             if (currentPlayingIdRef.current === requestId) {
@@ -543,10 +538,7 @@ export function usePlayback({
           // Decode error: abort this stream silently (daemon will re-synthesize on get_audio).
           const s = streamingRef.current.get(requestId);
           if (s) {
-            try {
-              s.source?.stop();
-            } catch {}
-            s.decoder.free().catch(() => {});
+            freeStream(s);
             streamingRef.current.delete(requestId);
           }
           if (currentPlayingIdRef.current === requestId) {
@@ -626,10 +618,7 @@ export function usePlayback({
       // callbacks see the entry gone and bail out without scheduling more audio.
       const stream = streamingRef.current.get(requestId);
       if (stream) {
-        try {
-          stream.source?.stop();
-        } catch {}
-        stream.decoder.free().catch(() => {});
+        freeStream(stream);
         streamingRef.current.delete(requestId);
       }
       if (requestId === currentPlayingIdRef.current) {
