@@ -9,11 +9,6 @@ function clampRate(rate: number): number {
   return SPEEDS.indexOf(rate) >= 0 ? rate : DEFAULT_RATE;
 }
 
-// A zero-length silent WAV. Played once inside a user gesture, it "unlocks" the
-// shared <audio> element so subsequent programmatic autoplay (TTS replies) is
-// allowed by the browser's autoplay policy (esp. iOS Safari).
-const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
-
 function formatRate(rate: number): string {
   return `${rate}x`;
 }
@@ -38,7 +33,9 @@ export type Playback = {
   speaking: boolean;
   playbackRate: number;
   formattedRate: string;
-  attachAudio: (requestId: string, audioBase64: string, mimeType: string, replay: boolean) => void;
+  // `background` = landed on a thread you're not viewing; `replay` = the daemon suppressed its autoplay
+  // (an older burst reply or a fetched history clip). Either one → cache it, don't auto-play.
+  attachAudio: (requestId: string, audioBase64: string, mimeType: string, background: boolean, replay: boolean) => void;
   // Attach one chunk of a live streaming reply. seq=0 auto-plays on foreground threads.
   // background=true suppresses decode — waits for tts_audio(replay:true) then tap-to-play.
   attachAudioChunk: (
@@ -86,10 +83,6 @@ export function usePlayback({
   onRequestAudio,
   onAutoReplyFinished
 }: UsePlaybackOptions): Playback {
-  const playerRef = useRef<HTMLAudioElement | null>(null);
-  if (!playerRef.current) playerRef.current = new Audio();
-  const player = playerRef.current;
-
   const audioByRequest = useRef(new Map<string, CachedAudio>());
 
   const [position, setPosition] = useState(0);
@@ -119,13 +112,14 @@ export function usePlayback({
   const pendingPlayIdRef = useRef<string | null>(null);
   const [pendingPlayId, setPendingPlayId] = useState<string | null>(null);
 
-  // OGG Opus player: decodes chunks via WASM + schedules PCM through Web Audio API.
+  // OGG Opus player: decodes to PCM via WASM, plays through an <audio> element (pitch-preserving speed).
   const {
     playingId,
     loadedId,
     duration,
     getPosition,
     seekTo,
+    setRate,
     playFile,
     attachChunk,
     endStream,
@@ -136,18 +130,11 @@ export function usePlayback({
     isStreaming
   } = useOggOpusPlayer(onAutoReplyFinished);
 
-  player.playbackRate = playbackRate;
-
-  // Pause the unlock element on teardown.
+  // Push the playback speed into the OGG engine (the actual TTS path). Runs on mount (applies the
+  // stored rate) and on every cycleSpeed change (live-adjusts the clip currently playing).
   useEffect(() => {
-    return () => {
-      try {
-        player.pause();
-      } catch {
-        /* ignore */
-      }
-    };
-  }, [player]);
+    setRate(playbackRate);
+  }, [playbackRate, setRate]);
 
   // Update position every 200ms while playing. Resets to 0 when idle.
   useEffect(() => {
@@ -184,16 +171,11 @@ export function usePlayback({
 
   const stopPlayback = useCallback((): void => {
     stopWasm();
-    try {
-      player.pause();
-    } catch {
-      /* ignore */
-    }
-  }, [player, stopWasm]);
+  }, [stopWasm]);
 
   const playEntry = useCallback(
     (requestId: string): void => {
-      // Tap while playing → stop (Web Audio API can't pause; re-tap to restart).
+      // Tap the entry that's already playing → stop it (re-tap restarts from the top).
       if (playingId === requestId) {
         stopWasm(requestId);
         return;
@@ -237,7 +219,7 @@ export function usePlayback({
   );
 
   const attachAudio = useCallback(
-    (requestId: string, audioBase64: string, mimeType: string, replay: boolean): void => {
+    (requestId: string, audioBase64: string, mimeType: string, background: boolean, replay: boolean): void => {
       if (!requestId || !audioBase64) return;
       audioByRequest.current.set(requestId, { audioBase64, mimeType });
       clearAudioStatus(requestId);
@@ -248,23 +230,36 @@ export function usePlayback({
         return next;
       });
 
-      // For a streaming reply, tts_audio(replay:true) is the end-of-stream signal.
-      if (isStreaming(requestId)) {
-        endStream(requestId);
-        return;
-      }
-      // Pending tap-to-play: audio arrived, play immediately.
+      // An explicit tap-to-play wins over everything: play as soon as the audio lands — even mid-stream
+      // (the bubble is tappable from history while still synthesizing) and even with autoplay off. Clear
+      // the stream marker so a later duplicate (the stream-completing clip, or the get_audio response we
+      // requested) doesn't re-handle it.
       if (pendingPlayIdRef.current === requestId) {
         pendingPlayIdRef.current = null;
         setPendingPlayId(null);
+        endStream(requestId);
         if (hasContext()) playFile(requestId, audioBase64);
         return;
       }
-      // Auto-play a fresh reply when autoplay is on and not recording.
+
+      // Autoplay requires the LIVE foreground state (a reply on a thread you're not viewing waits for
+      // a tap), plus not recording and autoplay on.
       const autoplayOn = getAutoplayRef.current?.() ?? true;
-      if (!getRecordingRef.current() && !replay && autoplayOn && hasContext()) {
-        playFile(requestId, audioBase64);
+      const shouldAutoplay = !background && !getRecordingRef.current() && autoplayOn && hasContext();
+
+      // A streaming reply: its chunks were only a "synthesizing" signal (we don't play chunks — that
+      // needs pitch-shifting Web Audio). The full clip is here now. This is the just-spoken reply, so
+      // play it whenever it's foreground — even though the daemon flags the stream-completing clip
+      // replay=true (that flag must NOT suppress it here).
+      if (isStreaming(requestId)) {
+        endStream(requestId);
+        if (shouldAutoplay) playFile(requestId, audioBase64);
+        return;
       }
+      // Fall-through: a non-streamed full clip. `replay` here means the daemon deliberately suppressed
+      // its autoplay — an OLDER reply in a burst (only the newest is meant to speak), or a fetched
+      // history clip. Honour that: cache it (tap-to-play), don't read it aloud.
+      if (!replay && shouldAutoplay) playFile(requestId, audioBase64);
     },
     [clearAudioStatus, isStreaming, endStream, hasContext, playFile]
   );
@@ -274,7 +269,7 @@ export function usePlayback({
       if (!requestId || !audioBase64) return;
       if (seq === 0) clearAudioStatus(requestId);
       if (background) return; // tts_audio(replay:true) will cache full clip; user taps to play
-      attachChunk(requestId, audioBase64);
+      attachChunk(requestId);
     },
     [clearAudioStatus, attachChunk]
   );
@@ -294,7 +289,6 @@ export function usePlayback({
   const cycleSpeed = useCallback((): void => {
     setPlaybackRate((prev) => {
       const next = SPEEDS[(SPEEDS.indexOf(prev) + 1) % SPEEDS.length];
-      player.playbackRate = next;
       try {
         localStorage.setItem(RATE_KEY, String(next));
       } catch {
@@ -302,36 +296,12 @@ export function usePlayback({
       }
       return next;
     });
-  }, [player]);
+  }, []);
 
-  const unlockedRef = useRef(false);
   const unlock = useCallback((): void => {
-    // Create/resume the AudioContext — must be called within a user gesture on iOS.
+    // Bless the <audio> element within this user gesture so later autoplay isn't blocked (iOS).
     unlockContext();
-    // Skip if already unlocked, or a clip is playing (don't stomp it; stay unlatched for a later idle tap).
-    if (unlockedRef.current || playingId) return;
-    unlockedRef.current = true;
-    try {
-      player.muted = true;
-      player.src = SILENT_WAV;
-      const result = player.play();
-      const settle = () => {
-        player.pause();
-        player.currentTime = 0;
-        player.muted = false;
-        player.removeAttribute("src");
-      };
-      if (result && typeof result.then === "function") {
-        result.then(settle).catch(() => {
-          player.muted = false;
-        });
-      } else {
-        settle();
-      }
-    } catch {
-      player.muted = false;
-    }
-  }, [player, unlockContext, playingId]);
+  }, [unlockContext]);
 
   const dropAudio = useCallback(
     (requestId: string): void => {

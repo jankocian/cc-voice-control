@@ -1,61 +1,102 @@
-import { OggOpusDecoderWebWorker } from "ogg-opus-decoder";
+import { OggOpusDecoder } from "ogg-opus-decoder";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { bytesFromBase64 } from "../lib/audio";
 import { setAudioSessionType } from "../lib/audioSession";
 
-type StreamState = {
-  decoder: OggOpusDecoderWebWorker;
-  closed: boolean;
-  nextPlayTime: number;
-  pendingDecode: Promise<void>;
-  source?: AudioBufferSourceNode;
-};
+// A zero-length silent WAV. Played once inside a user gesture, it "unlocks" the shared <audio>
+// element so later programmatic playback (autoplayed replies) is allowed by the browser's autoplay
+// policy (esp. iOS Safari).
+const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
 
-function freeStream(stream: StreamState): void {
-  try {
-    stream.source?.stop();
-  } catch {}
-  stream.decoder.free().catch(() => {});
-}
-
-function b64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+// Encode decoded PCM (Float32 channels @ 48 kHz from the Opus decoder) into a 16-bit PCM WAV blob.
+// We play through an <audio> element rather than Web Audio because HTMLMediaElement.playbackRate
+// preserves pitch (preservesPitch) — AudioBufferSourceNode.playbackRate does not (it chipmunks).
+// iOS Safari can't decode OGG Opus in <audio> natively, so we decode to PCM (main-thread WASM, which
+// the page CSP allows) and hand the element a universally-supported WAV.
+function pcmToWavBlob(channels: Float32Array[], frames: number, sampleRate: number): Blob {
+  const numCh = Math.max(1, channels.length);
+  const blockAlign = numCh * 2; // 16-bit
+  const dataSize = frames * blockAlign;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buf);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true); // PCM fmt chunk size
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numCh, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+  let off = 44;
+  for (let f = 0; f < frames; f++) {
+    for (let c = 0; c < numCh; c++) {
+      let s = channels[c]?.[f] ?? 0;
+      s = s < -1 ? -1 : s > 1 ? 1 : s;
+      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([buf], { type: "audio/wav" });
 }
 
 export type OggOpusPlayer = {
   playingId: string | null;
   loadedId: string | null;
-  // Total clip duration in seconds. 0 during live streaming (unknown) or when idle.
+  // Total clip duration in seconds (from the <audio> element). 0 when idle / not yet loaded.
   duration: number;
-  // Returns live playhead position in seconds (reads AudioContext.currentTime).
+  // Live playhead position in seconds (reads the <audio> element's currentTime).
   getPosition: () => number;
-  // Seek within the currently loaded clip. Only works when duration > 0 (full file decoded).
+  // Seek within the currently loaded clip.
   seekTo: (offsetSeconds: number) => void;
-  // Play a complete OGG Opus file (tap-to-play / auto-play of cached clip).
+  // Set playback speed. Pitch is preserved (HTMLMediaElement.preservesPitch). Applies live + to the
+  // next clip.
+  setRate: (rate: number) => void;
+  // Play a complete OGG Opus clip (tap-to-play / autoplay of a fresh reply / replay).
   playFile: (requestId: string, base64: string) => void;
-  // Process one incremental OGG Opus chunk from a live stream.
-  attachChunk: (requestId: string, base64: string) => void;
-  // Signal end of live stream; schedules cleanup after all buffered audio plays out.
+  // Note that a live stream's chunks are arriving for this reply. We don't play the chunks (that
+  // would need pitch-shifting Web Audio); we just mark it streaming so the full clip auto-plays when
+  // it lands (see usePlayback.attachAudio). seq is unused but kept for call-site symmetry.
+  attachChunk: (requestId: string) => void;
+  // Clear the streaming marker for a reply (its full clip has arrived / it was dropped).
   endStream: (requestId: string) => void;
   // Stop active playback (optionally targeting a specific requestId).
   stop: (requestId?: string) => void;
-  // Drop a specific stream without stopping others (used by dropAudio).
+  // Drop a specific reply (stop if it's playing, forget its streaming marker).
   drop: (requestId: string) => void;
-  // Create/resume AudioContext — must be called within a user gesture.
+  // Bless the <audio> element within a user gesture so later autoplay isn't blocked.
   unlockContext: () => void;
   hasContext: () => boolean;
   isStreaming: (requestId: string) => boolean;
 };
 
-// Manages OGG Opus decoding via WASM + Web Audio API scheduling.
-// Owns the streaming lifecycle: chunk-by-chunk live decoding and full-file replay
-// both go through the same StreamState, so all cleanup paths are shared.
+// Plays OGG Opus TTS through a single <audio> element: decode to PCM via the main-thread WASM
+// decoder, wrap as WAV, and let the element play it. Speed changes go through playbackRate with
+// preservesPitch, so "1.5x" is faster WITHOUT the chipmunk pitch shift.
 export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggOpusPlayer {
-  const streamingRef = useRef(new Map<string, StreamState>());
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  if (!audioElRef.current) {
+    const a = new Audio();
+    a.preload = "auto";
+    audioElRef.current = a;
+  }
+  const audioEl = audioElRef.current;
+
+  const currentUrlRef = useRef<string | null>(null);
   const currentPlayingIdRef = useRef<string | null>(null);
+  // Replies whose live stream is in flight; their full clip auto-plays when it lands.
+  const streamingRef = useRef(new Set<string>());
+  const rateRef = useRef<number>(1);
+  // Bumped on every playFile/stop so a slow decode that's been superseded discards its result.
+  const decodeTokenRef = useRef(0);
+  const unlockedRef = useRef(false);
   const onFinishedRef = useRef(onFinished);
   onFinishedRef.current = onFinished;
 
@@ -63,285 +104,200 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
   const [loadedId, setLoadedId] = useState<string | null>(null);
   const [duration, setDuration] = useState<number>(0);
 
-  // Seek/position tracking — only populated by playFile, cleared on stop.
-  const decodedBufferRef = useRef<AudioBuffer | null>(null);
-  const playStartCtxTimeRef = useRef<number>(0);
-  const playStartOffsetRef = useRef<number>(0);
-
-  // Free all active WASM decoders on unmount to avoid WebAssembly memory leaks.
-  useEffect(() => {
-    const streaming = streamingRef.current;
-    return () => {
-      for (const s of streaming.values()) freeStream(s);
-      streaming.clear();
-    };
+  const revokeUrl = useCallback((): void => {
+    if (currentUrlRef.current) {
+      URL.revokeObjectURL(currentUrlRef.current);
+      currentUrlRef.current = null;
+    }
   }, []);
 
-  // Reset playing state if requestId is the current player.
-  const clearCurrent = useCallback((requestId: string): void => {
-    if (currentPlayingIdRef.current !== requestId) return;
-    currentPlayingIdRef.current = null;
-    decodedBufferRef.current = null;
-    playStartCtxTimeRef.current = 0;
-    playStartOffsetRef.current = 0;
-    setPlayingId(null);
-    setLoadedId(null);
-    setDuration(0);
-  }, []);
-
-  // Schedule decoder teardown + onFinished after all audio has played out.
-  const scheduleCleanup = useCallback(
-    (requestId: string): void => {
-      const s = streamingRef.current.get(requestId);
-      if (!s) return;
-      const ctx = audioContextRef.current;
-      const delay = ctx ? Math.max(0, (s.nextPlayTime - ctx.currentTime) * 1000 + 150) : 0;
-      setTimeout(() => {
-        const current = streamingRef.current.get(requestId);
-        if (current) {
-          freeStream(current);
-          streamingRef.current.delete(requestId);
-        }
-        clearCurrent(requestId);
-        onFinishedRef.current?.(requestId);
-      }, delay);
+  // Tear down playback state. fireFinished=true notifies onFinished (a clip ended naturally).
+  const finish = useCallback(
+    (fireFinished: boolean): void => {
+      const endedId = currentPlayingIdRef.current;
+      try {
+        audioEl.pause();
+      } catch {
+        /* ignore */
+      }
+      revokeUrl();
+      currentPlayingIdRef.current = null;
+      setPlayingId(null);
+      setLoadedId(null);
+      setDuration(0);
+      if (fireFinished && endedId) onFinishedRef.current?.(endedId);
     },
-    [clearCurrent]
+    [audioEl, revokeUrl]
   );
+
+  // Wire the element's lifecycle events once. We share this element with the silent-WAV unlock, so
+  // only react to ended/error of the REAL clip (currentSrc matches the blob we're playing) — never to
+  // the unlock blessing's events, which would otherwise tear down a clip mid-decode.
+  useEffect(() => {
+    const a = audioEl;
+    const isCurrentClip = () => currentUrlRef.current !== null && a.currentSrc === currentUrlRef.current;
+    const onEnded = () => {
+      if (isCurrentClip()) finish(true);
+    };
+    const onError = () => {
+      if (isCurrentClip()) finish(false);
+    };
+    const onDuration = () => {
+      if (Number.isFinite(a.duration) && a.duration > 0) setDuration(a.duration);
+    };
+    a.addEventListener("ended", onEnded);
+    a.addEventListener("error", onError);
+    a.addEventListener("loadedmetadata", onDuration);
+    a.addEventListener("durationchange", onDuration);
+    return () => {
+      a.removeEventListener("ended", onEnded);
+      a.removeEventListener("error", onError);
+      a.removeEventListener("loadedmetadata", onDuration);
+      a.removeEventListener("durationchange", onDuration);
+      decodeTokenRef.current++; // invalidate any in-flight decode
+      try {
+        a.pause();
+      } catch {
+        /* ignore */
+      }
+      revokeUrl();
+    };
+  }, [audioEl, finish, revokeUrl]);
 
   const playFile = useCallback(
     (requestId: string, base64: string): void => {
-      const ctx = audioContextRef.current;
-      if (!ctx || ctx.state === "closed") return;
-
-      // Silence any other active stream — only one voice at a time.
-      const active = currentPlayingIdRef.current;
-      if (active && active !== requestId) {
-        const activeStream = streamingRef.current.get(active);
-        if (activeStream) {
-          freeStream(activeStream);
-          streamingRef.current.delete(active);
-        }
+      const token = ++decodeTokenRef.current;
+      // Supersede whatever is playing and show this reply as active immediately.
+      streamingRef.current.delete(requestId);
+      try {
+        audioEl.pause();
+      } catch {
+        /* ignore */
       }
-      const existing = streamingRef.current.get(requestId);
-      if (existing) {
-        freeStream(existing);
-        streamingRef.current.delete(requestId);
-      }
-
-      decodedBufferRef.current = null;
-      playStartCtxTimeRef.current = 0;
-      playStartOffsetRef.current = 0;
-      setDuration(0);
-
-      const decoder = new OggOpusDecoderWebWorker();
-      const stream: StreamState = { decoder, closed: true, nextPlayTime: 0, pendingDecode: Promise.resolve() };
-      streamingRef.current.set(requestId, stream);
+      revokeUrl();
       currentPlayingIdRef.current = requestId;
       setPlayingId(requestId);
       setLoadedId(requestId);
+      setDuration(0);
 
-      const bytes = b64ToBytes(base64);
-      const pending = decoder.ready
-        .then(async () => {
-          if (!streamingRef.current.has(requestId)) return;
+      void (async () => {
+        const decoder = new OggOpusDecoder();
+        try {
+          await decoder.ready;
+          if (token !== decodeTokenRef.current) return;
+          const { channelData, samplesDecoded } = await decoder.decodeFile(bytesFromBase64(base64));
+          if (token !== decodeTokenRef.current) return;
+          if (!samplesDecoded || channelData.length === 0) {
+            if (currentPlayingIdRef.current === requestId) finish(false);
+            return;
+          }
+          const url = URL.createObjectURL(pcmToWavBlob(channelData, samplesDecoded, 48000));
+          currentUrlRef.current = url;
           setAudioSessionType("ambient");
-          const { channelData, samplesDecoded } = await decoder.decodeFile(bytes);
-          if (samplesDecoded === 0 || channelData.length === 0) return;
-          if (!streamingRef.current.has(requestId)) return;
-          const buffer = ctx.createBuffer(channelData.length, samplesDecoded, 48000);
-          // @ts-expect-error Float32Array<ArrayBufferLike> vs Float32Array<ArrayBuffer> in lib types
-          for (let i = 0; i < channelData.length; i++) buffer.copyToChannel(channelData[i], i);
-          const source = ctx.createBufferSource();
-          source.buffer = buffer;
-          source.connect(ctx.destination);
-          const startAt = ctx.currentTime + 0.05;
-          // Set stream.source and position refs BEFORE start() so seekTo() sees them immediately.
-          stream.source = source;
-          stream.nextPlayTime = startAt + buffer.duration;
-          decodedBufferRef.current = buffer;
-          playStartCtxTimeRef.current = startAt;
-          playStartOffsetRef.current = 0;
-          setDuration(buffer.duration);
-          // onended identity check: if seekTo() replaces stream.source, the old source's
-          // onended sees source !== stream.source and skips cleanup — only the newest fires.
-          source.onended = () => {
-            const current = streamingRef.current.get(requestId);
-            if (current?.source !== source) return;
-            freeStream(current);
-            streamingRef.current.delete(requestId);
-            clearCurrent(requestId);
-            onFinishedRef.current?.(requestId);
-          };
-          source.start(startAt);
-        })
-        .catch(() => {
-          const s = streamingRef.current.get(requestId);
-          if (s) {
-            freeStream(s);
-            streamingRef.current.delete(requestId);
-          }
-          clearCurrent(requestId);
-        });
-
-      stream.pendingDecode = pending;
-    },
-    [clearCurrent]
-  );
-
-  const attachChunk = useCallback(
-    (requestId: string, base64: string): void => {
-      if (!streamingRef.current.has(requestId)) {
-        // Silence any other active stream before starting a new live one.
-        const active = currentPlayingIdRef.current;
-        if (active && active !== requestId) {
-          const activeStream = streamingRef.current.get(active);
-          if (activeStream) {
-            freeStream(activeStream);
-            streamingRef.current.delete(active);
-          }
+          const a = audioEl;
+          a.muted = false; // in case an unlock blessing left it muted (race on the very first tap)
+          a.src = url;
+          a.preservesPitch = true;
+          a.playbackRate = rateRef.current;
+          await a.play().catch(() => {
+            // Autoplay blocked (not unlocked yet) or interrupted — drop back to idle.
+            if (token === decodeTokenRef.current) finish(false);
+          });
+        } catch {
+          if (token === decodeTokenRef.current && currentPlayingIdRef.current === requestId) finish(false);
+        } finally {
+          decoder.free();
         }
-        const decoder = new OggOpusDecoderWebWorker();
-        streamingRef.current.set(requestId, {
-          decoder,
-          closed: false,
-          nextPlayTime: 0,
-          pendingDecode: decoder.ready
-        });
-        currentPlayingIdRef.current = requestId;
-        setPlayingId(requestId);
-        setLoadedId(requestId);
-      }
-
-      const stream = streamingRef.current.get(requestId);
-      if (!stream) return;
-      const bytes = b64ToBytes(base64);
-
-      stream.pendingDecode = stream.pendingDecode
-        .then(async () => {
-          if (!streamingRef.current.has(requestId)) return;
-          const { channelData, samplesDecoded } = await stream.decoder.decode(bytes);
-          if (samplesDecoded === 0 || channelData.length === 0) return;
-          const ctx = audioContextRef.current;
-          if (!ctx || ctx.state === "closed") return;
-          setAudioSessionType("ambient");
-          const buffer = ctx.createBuffer(channelData.length, samplesDecoded, 48000);
-          // @ts-expect-error Float32Array<ArrayBufferLike> vs Float32Array<ArrayBuffer> in lib types
-          for (let i = 0; i < channelData.length; i++) buffer.copyToChannel(channelData[i], i);
-          const source = ctx.createBufferSource();
-          source.buffer = buffer;
-          source.connect(ctx.destination);
-          if (stream.nextPlayTime === 0) stream.nextPlayTime = ctx.currentTime + 0.1;
-          const startAt = Math.max(ctx.currentTime, stream.nextPlayTime);
-          source.start(startAt);
-          stream.source = source;
-          stream.nextPlayTime = startAt + buffer.duration;
-        })
-        .catch(() => {
-          const s = streamingRef.current.get(requestId);
-          if (s) {
-            freeStream(s);
-            streamingRef.current.delete(requestId);
-          }
-          clearCurrent(requestId);
-        });
+      })();
     },
-    [clearCurrent]
+    [audioEl, finish, revokeUrl]
   );
 
-  const endStream = useCallback(
-    (requestId: string): void => {
-      const stream = streamingRef.current.get(requestId);
-      if (!stream) return;
-      stream.closed = true;
-      stream.pendingDecode.then(() => scheduleCleanup(requestId));
-    },
-    [scheduleCleanup]
-  );
+  const attachChunk = useCallback((requestId: string): void => {
+    // The full clip auto-plays on arrival; here we only remember a stream is in flight.
+    streamingRef.current.add(requestId);
+  }, []);
+
+  const endStream = useCallback((requestId: string): void => {
+    streamingRef.current.delete(requestId);
+  }, []);
 
   const stop = useCallback(
     (requestId?: string): void => {
       const id = requestId ?? currentPlayingIdRef.current;
       if (!id) return;
-      const stream = streamingRef.current.get(id);
-      if (stream) {
-        freeStream(stream);
-        streamingRef.current.delete(id);
+      streamingRef.current.delete(id);
+      if (currentPlayingIdRef.current === id) {
+        decodeTokenRef.current++; // cancel any in-flight decode for this id
+        finish(false);
       }
-      clearCurrent(id);
     },
-    [clearCurrent]
+    [finish]
   );
 
   const drop = useCallback(
     (requestId: string): void => {
-      const stream = streamingRef.current.get(requestId);
-      if (stream) {
-        freeStream(stream);
-        streamingRef.current.delete(requestId);
+      streamingRef.current.delete(requestId);
+      if (currentPlayingIdRef.current === requestId) {
+        decodeTokenRef.current++;
+        finish(false);
       }
-      clearCurrent(requestId);
     },
-    [clearCurrent]
+    [finish]
   );
 
   const getPosition = useCallback((): number => {
-    const ctx = audioContextRef.current;
-    if (!ctx || playStartCtxTimeRef.current === 0) return playStartOffsetRef.current;
-    const pos = playStartOffsetRef.current + (ctx.currentTime - playStartCtxTimeRef.current);
-    const dur = decodedBufferRef.current?.duration ?? 0;
-    return dur > 0 ? Math.min(Math.max(0, pos), dur) : Math.max(0, pos);
-  }, []);
+    const t = audioEl.currentTime;
+    return Number.isFinite(t) ? t : 0;
+  }, [audioEl]);
 
   const seekTo = useCallback(
     (offsetSeconds: number): void => {
-      const ctx = audioContextRef.current;
-      const buffer = decodedBufferRef.current;
-      const requestId = currentPlayingIdRef.current;
-      if (!ctx || !buffer || !requestId) return;
-      const stream = streamingRef.current.get(requestId);
-      if (!stream) return;
-
-      const clamped = Math.min(Math.max(0, offsetSeconds), buffer.duration);
-      const oldSource = stream.source;
-
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
-
-      // Update stream.source BEFORE stopping oldSource so its onended identity check fails.
-      stream.source = source;
-      playStartCtxTimeRef.current = ctx.currentTime;
-      playStartOffsetRef.current = clamped;
-
-      try {
-        oldSource?.stop();
-      } catch {
-        /* ignore */
-      }
-
-      source.onended = () => {
-        const current = streamingRef.current.get(requestId);
-        if (current?.source !== source) return;
-        freeStream(current);
-        streamingRef.current.delete(requestId);
-        clearCurrent(requestId);
-        onFinishedRef.current?.(requestId);
-      };
-      source.start(ctx.currentTime, clamped);
+      const dur = audioEl.duration;
+      const max = Number.isFinite(dur) && dur > 0 ? dur : offsetSeconds;
+      audioEl.currentTime = Math.min(Math.max(0, offsetSeconds), max);
     },
-    [clearCurrent]
+    [audioEl]
+  );
+
+  const setRate = useCallback(
+    (rate: number): void => {
+      rateRef.current = rate;
+      audioEl.preservesPitch = true;
+      audioEl.playbackRate = rate;
+    },
+    [audioEl]
   );
 
   const unlockContext = useCallback((): void => {
-    if (!audioContextRef.current) audioContextRef.current = new AudioContext();
-    audioContextRef.current.resume().catch(() => {});
-  }, []);
+    if (unlockedRef.current || currentPlayingIdRef.current) return;
+    unlockedRef.current = true;
+    const a = audioEl;
+    try {
+      a.muted = true;
+      a.src = SILENT_WAV;
+      // Runs on both resolve and reject. If a real clip's playFile took over the element in the same
+      // gesture (currentPlayingIdRef set), leave its playback alone — don't pause/unset/unmute it.
+      const settle = () => {
+        if (currentPlayingIdRef.current) return;
+        a.pause();
+        try {
+          a.currentTime = 0;
+        } catch {
+          /* ignore */
+        }
+        a.muted = false;
+        a.removeAttribute("src");
+      };
+      const result = a.play();
+      if (result && typeof result.then === "function") result.then(settle, settle);
+      else settle();
+    } catch {
+      a.muted = false;
+    }
+  }, [audioEl]);
 
-  const hasContext = useCallback(
-    (): boolean => audioContextRef.current !== null && audioContextRef.current.state !== "closed",
-    []
-  );
+  const hasContext = useCallback((): boolean => unlockedRef.current, []);
 
   const isStreaming = useCallback((requestId: string): boolean => streamingRef.current.has(requestId), []);
 
@@ -351,6 +307,7 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
     duration,
     getPosition,
     seekTo,
+    setRate,
     playFile,
     attachChunk,
     endStream,
