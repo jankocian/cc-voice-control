@@ -590,10 +590,10 @@ export class VoiceDaemon {
         await this.handleAudio(event.audioBase64, event.mimeType, event.mode);
         return;
       case "status_request":
-        this.queueVoice("Give me a brief spoken status of what you're doing right now.", "queue");
+        this.queueVoice("Give me a brief spoken status of what you're doing right now.");
         return;
       case "summary_request":
-        this.queueVoice("Briefly summarize what you've done so far, for the phone.", "queue");
+        this.queueVoice("Briefly summarize what you've done so far, for the phone.");
         return;
       case "stop_task":
         // Esc the running turn → Claude goes idle; the coordinator drops every open turn and drains
@@ -747,8 +747,32 @@ export class VoiceDaemon {
       // them as a normal prompt.
       this.pendingQuestionOverlay = undefined;
     }
-    if (mode === "interrupt") await cmuxInterrupt(this.init.surface); // Esc the running turn, run this next
-    this.queueVoice(transcript, mode);
+    await this.steerIntoPane(transcript, mode === "interrupt");
+  }
+
+  // Steer: type the spoken message STRAIGHT into the pane, even while Claude is working — Claude Code queues
+  // it and ingests it at the next tool boundary, no daemon-side idle-wait (that wait was the regression that
+  // left a steered message stuck on one check, never reaching the pane). For "interrupt", press Esc AFTER the
+  // text: type+Enter queues the message, then Esc propagates that queued message straight into the stream so
+  // Claude runs it NOW instead of waiting for the next boundary. The message shows now (one check) and gets
+  // the native two-check once Claude logs it to the transcript.
+  private async steerIntoPane(text: string, interrupt: boolean): Promise<void> {
+    const ok = await cmuxSubmit(text, this.init.surface);
+    if (!ok) {
+      void this.refreshCmuxHealth();
+      this.sendToBrowser({
+        type: "error",
+        message: "Couldn't reach the Claude Code pane (is it still open in cmux?)."
+      });
+      return;
+    }
+    if (interrupt) await cmuxInterrupt(this.init.surface);
+    if (!this.cmuxHealthy) {
+      this.cmuxHealthy = true; // a successful send proves the pane is alive → self-heal a stale "not listening"
+      this.emitStatus();
+    }
+    this.sendToBrowser({ type: "prompt_status", text, state: "accepted" });
+    this.syncFromTranscript();
   }
 
   // The interactive question currently awaiting an answer (the picker is up): the LATEST question turn, iff
@@ -761,13 +785,12 @@ export class VoiceDaemon {
     return undefined;
   }
 
-  // Queue a spoken prompt into the injection queue. The conversation itself is projected from the
-  // transcript; we've just transcribed the words, so echo them to the phone as a "queued" row (clock): the
-  // spoken message shows before it's even injected, and upgrades to one check on UserPromptSubmit
-  // (emitPromptAccepted) then the native two-check once it's in the transcript.
-  private queueVoice(text: string, mode: InjectMode): void {
-    if (mode === "interrupt") this.turns.interruptWith(text);
-    else this.turns.enqueueVoice(text);
+  // Queue an AUTO prompt (the status/summary requests) behind the running turn — these shouldn't barge into
+  // Claude's work, so they inject only once it's idle (the coordinator's idle-gate). Spoken user messages do
+  // NOT come here; they steer straight into the pane (see steerIntoPane). Echo a "queued" row (clock) so it
+  // shows before it's injected; it upgrades to the native two-check once it lands in the transcript.
+  private queueVoice(text: string): void {
+    this.turns.enqueueVoice(text);
     this.sendToBrowser({ type: "prompt_status", text, state: "queued" });
     this.syncFromTranscript();
   }

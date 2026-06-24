@@ -24,9 +24,11 @@ export type SessionState = {
   state: SessionRuntimeState;
 };
 
-// How a spoken message reaches the pane: queue behind the running turn, or interrupt
-// the running turn (Esc) and run immediately.
-export type InjectMode = "queue" | "interrupt";
+// How a spoken message reaches the pane. Both type the message straight in (Claude Code itself queues it
+// while busy and ingests it at the next tool boundary — real steering). "interrupt" then presses Esc AFTER
+// the text — type+Enter queues it, then Esc propagates that queued message into the stream so Claude runs it
+// NOW instead of at the next boundary.
+export type InjectMode = "steer" | "interrupt";
 
 // What the daemon auto-plays on a voice turn: nothing, just the final reply, or every step too.
 export type SpeakMode = "off" | "final" | "all";

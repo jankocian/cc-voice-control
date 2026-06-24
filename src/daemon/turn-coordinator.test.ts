@@ -100,15 +100,6 @@ describe("TurnCoordinator (voice injection queue + idle-gate)", () => {
     expect(h.injected).toEqual(["after"]);
   });
 
-  it("interruptWith jumps the queue", async () => {
-    const h = harness();
-    h.coord.turnOpened("running");
-    h.coord.enqueueVoice("queued");
-    h.coord.interruptWith("urgent");
-    await h.tick();
-    expect(h.injected).toEqual(["urgent"]);
-  });
-
   it("reset drops everything (in-flight, queued, open)", async () => {
     const h = harness();
     h.coord.enqueueVoice("a");

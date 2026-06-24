@@ -136,13 +136,6 @@ export class TurnCoordinator {
     void this.pump();
   }
 
-  /** Esc + run `text` next, ahead of anything already queued. */
-  interruptWith(text: string): void {
-    this.clearTurns();
-    this.queue.unshift(text);
-    void this.pump(); // re-injects immediately → emits "working"
-  }
-
   /** /clear or /compact: end the topic — drop every in-flight/queued/open turn. */
   reset(): void {
     this.clearTurns();

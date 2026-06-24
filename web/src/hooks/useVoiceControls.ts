@@ -47,12 +47,12 @@ export function useVoiceControls({
   stopPlayback,
   showFlash
 }: Deps) {
-  const nextModeRef = useRef<"queue" | "interrupt">("queue");
+  const nextModeRef = useRef<"steer" | "interrupt">("steer");
   // The last clip the user recorded (clip + mode), retained so the "Resend" toast can start a fresh
   // delivery round after automatic retries are exhausted. A "resend" calls sendAudio via a ref (defined below).
-  const lastSendRef = useRef<{ clip: RecordedClip; mode: "queue" | "interrupt" } | null>(null);
+  const lastSendRef = useRef<{ clip: RecordedClip; mode: "steer" | "interrupt" } | null>(null);
   const resendToastRef = useRef<string | null>(null);
-  const sendAudioRef = useRef<(clip: RecordedClip, mode: "queue" | "interrupt") => void>(() => {});
+  const sendAudioRef = useRef<(clip: RecordedClip, mode: "steer" | "interrupt") => void>(() => {});
 
   // The in-flight voice send + its retransmit watchdog. submit_audio can be silently dropped at the relay
   // during a brief network blip (the daemon never sees it — see submit_ack in the protocol), so we re-send
@@ -60,7 +60,7 @@ export function useVoiceControls({
   // duplicates the prompt. `acked` stops the loop (the turn then lands via the usual prompt_status/history).
   const inflightRef = useRef<{
     clip: RecordedClip;
-    mode: "queue" | "interrupt";
+    mode: "steer" | "interrupt";
     threadId: ThreadId;
     requestId: string;
     attempt: number; // 0-based; indexes ACK_WAIT_MS
@@ -146,7 +146,7 @@ export function useVoiceControls({
   }, [sendOnce, clearRetryTimer, giveUp]);
 
   const sendAudio = useCallback(
-    (clip: RecordedClip, mode: "queue" | "interrupt") => {
+    (clip: RecordedClip, mode: "steer" | "interrupt") => {
       lastSendRef.current = { clip, mode };
       const threadId = activeThreadIdRef.current;
       if (!threadId) {
@@ -215,7 +215,7 @@ export function useVoiceControls({
     (clip: RecordedClip) => {
       clearResendToast(); // a new recording supersedes any stale failed send
       sendAudio(clip, nextModeRef.current);
-      nextModeRef.current = "queue";
+      nextModeRef.current = "steer";
     },
     [sendAudio, clearResendToast]
   );
@@ -253,7 +253,7 @@ export function useVoiceControls({
   recordingRef.current = recording;
 
   const startRecording = useCallback(
-    (mode: "queue" | "interrupt") => {
+    (mode: "steer" | "interrupt") => {
       if (transcribing) return;
       // The mic is shared: one voice turn in flight at a time. `transcribing` only blocks the ACTIVE thread,
       // so guard here too against an un-acked send still being delivered to ANOTHER thread (switching threads
@@ -303,8 +303,8 @@ export function useVoiceControls({
     onSendSettled,
     retryInflightNow,
     onConnectionLost,
-    onMic: useCallback(() => startRecording("queue"), [startRecording]),
-    onSteer: useCallback(() => startRecording("queue"), [startRecording]),
+    onMic: useCallback(() => startRecording("steer"), [startRecording]),
+    onSteer: useCallback(() => startRecording("steer"), [startRecording]),
     onInterrupt: useCallback(() => startRecording("interrupt"), [startRecording]),
     onStopRecording: useCallback(() => stop(), [stop]),
     onCancel: useCallback(() => cancel(), [cancel]),
