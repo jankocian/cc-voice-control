@@ -151,7 +151,10 @@ export function usePlayback({
 
   // Update position every 200ms while playing. Resets to 0 when idle.
   useEffect(() => {
-    if (!playingId) { setPosition(0); return; }
+    if (!playingId) {
+      setPosition(0);
+      return;
+    }
     const id = setInterval(() => setPosition(getPosition()), 200);
     return () => clearInterval(id);
   }, [playingId, getPosition]);

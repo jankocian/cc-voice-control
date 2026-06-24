@@ -118,10 +118,16 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
       const active = currentPlayingIdRef.current;
       if (active && active !== requestId) {
         const activeStream = streamingRef.current.get(active);
-        if (activeStream) { freeStream(activeStream); streamingRef.current.delete(active); }
+        if (activeStream) {
+          freeStream(activeStream);
+          streamingRef.current.delete(active);
+        }
       }
       const existing = streamingRef.current.get(requestId);
-      if (existing) { freeStream(existing); streamingRef.current.delete(requestId); }
+      if (existing) {
+        freeStream(existing);
+        streamingRef.current.delete(requestId);
+      }
 
       decodedBufferRef.current = null;
       playStartCtxTimeRef.current = 0;
@@ -171,7 +177,10 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
         })
         .catch(() => {
           const s = streamingRef.current.get(requestId);
-          if (s) { freeStream(s); streamingRef.current.delete(requestId); }
+          if (s) {
+            freeStream(s);
+            streamingRef.current.delete(requestId);
+          }
           clearCurrent(requestId);
         });
 
@@ -187,7 +196,10 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
         const active = currentPlayingIdRef.current;
         if (active && active !== requestId) {
           const activeStream = streamingRef.current.get(active);
-          if (activeStream) { freeStream(activeStream); streamingRef.current.delete(active); }
+          if (activeStream) {
+            freeStream(activeStream);
+            streamingRef.current.delete(active);
+          }
         }
         const decoder = new OggOpusDecoderWebWorker();
         streamingRef.current.set(requestId, {
@@ -302,7 +314,11 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
       playStartCtxTimeRef.current = ctx.currentTime;
       playStartOffsetRef.current = clamped;
 
-      try { oldSource?.stop(); } catch {}
+      try {
+        oldSource?.stop();
+      } catch {
+        /* ignore */
+      }
 
       source.onended = () => {
         const current = streamingRef.current.get(requestId);
@@ -329,5 +345,19 @@ export function useOggOpusPlayer(onFinished?: (requestId: string) => void): OggO
 
   const isStreaming = useCallback((requestId: string): boolean => streamingRef.current.has(requestId), []);
 
-  return { playingId, loadedId, duration, getPosition, seekTo, playFile, attachChunk, endStream, stop, drop, unlockContext, hasContext, isStreaming };
+  return {
+    playingId,
+    loadedId,
+    duration,
+    getPosition,
+    seekTo,
+    playFile,
+    attachChunk,
+    endStream,
+    stop,
+    drop,
+    unlockContext,
+    hasContext,
+    isStreaming
+  };
 }
