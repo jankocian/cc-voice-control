@@ -24,7 +24,7 @@ export function StepRow({
       type="button"
       onClick={onPlay}
       aria-label={label}
-      className="flex w-full items-start gap-2 rounded-lg px-1 py-0.5 text-ink-faint transition-colors hover:bg-violet/5 active:bg-violet/10"
+      className="flex w-full items-start gap-2 rounded-lg px-1 py-0.5 text-left text-ink-faint transition-colors hover:bg-violet/5 active:bg-violet/10"
     >
       <span className="mt-1 grid size-5 shrink-0 place-items-center rounded-full text-ink-faint/80">
         {loading ? (

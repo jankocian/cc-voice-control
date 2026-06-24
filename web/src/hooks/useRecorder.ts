@@ -356,13 +356,6 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     // Session spec ends the mic track on the next interruption; setting it here is what
     // lets recording survive (and recover after) a screen lock. No-op off iOS.
     setAudioSessionType("play-and-record");
-    // Resume the shared context inside this tap gesture so the visualiser isn't a flat
-    // line after returning from a lock (a backgrounded context comes back suspended).
-    try {
-      await ensureAudioRunning();
-    } catch {
-      /* visualiser is decorative; recording proceeds regardless */
-    }
     // Reset the idle release: we're recording now, so don't let go of the stream.
     clearIdleTimer();
     let stream: MediaStream;
@@ -393,8 +386,17 @@ export function useRecorder({ canvasRef, onClip, onError, onStart }: UseRecorder
     recorder.start(250);
     recordingRef.current = true;
     setRecording(true);
-    startVisualizer();
     armMediaSession(); // headphone / lock-screen play-pause → stop + send
+    // ensureAudioRunning is only needed for the visualizer (createMediaStreamSource), NOT
+    // for the recorder itself. After TTS, the AudioContext can be suspended for ~0.5–1s.
+    // Running it here (after the recorder starts) keeps that delay off the critical path:
+    // recording is live immediately; the waveform appears once the context is ready.
+    // StatusVisual shows recording && !visualizerActive as a dim-pending visual in the gap.
+    ensureAudioRunning()
+      .then(() => {
+        if (recordingRef.current) startVisualizer();
+      })
+      .catch(() => {});
   }, [ensureMic, stopStream, clearIdleTimer, startVisualizer, submitRecording, armMediaSession]);
 
   const teardown = useCallback((): void => {
