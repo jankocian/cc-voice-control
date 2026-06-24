@@ -14,6 +14,10 @@ if (root) {
   const isStyleGuide =
     window.location.pathname.endsWith("/style-guide") || new URLSearchParams(window.location.search).has("style-guide");
 
+  // The marketing landing page lives at the Worker root ("/"). The Worker serves the SPA
+  // shell there (with a video-friendly CSP); this single bundled SPA owns the route.
+  const isLanding = window.location.pathname === "/";
+
   // `?demo=<state>` is a presentation-only harness for the visual-verification
   // loop (no bridge/mic). Dev-only path; ignored by the production daemon flow.
   const demoState = new URLSearchParams(window.location.search).get("demo");
@@ -23,6 +27,14 @@ if (root) {
       createRoot(root).render(
         <StrictMode>
           <StyleGuide />
+        </StrictMode>
+      );
+    });
+  } else if (isLanding) {
+    void import("./Landing").then(({ Landing }) => {
+      createRoot(root).render(
+        <StrictMode>
+          <Landing />
         </StrictMode>
       );
     });
