@@ -19119,11 +19119,6 @@ function fromBase64(value) {
   return out;
 }
 
-// src/shared/protocol.ts
-function isVoiceAnswerable(q) {
-  return q.questions.length === 1 && q.questions.every((x) => !x.multiSelect);
-}
-
 // src/shared/serialize.ts
 function createSerializer() {
   let tail = Promise.resolve();
@@ -19226,17 +19221,50 @@ async function cmuxInterrupt(surface) {
   const r = await runCmux(["send-key", ...cmuxTarget(surface), "escape"]);
   return r.ok;
 }
-async function cmuxAnswerQuestion(text, surface) {
-  const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
-  if (!screen.ok)
+var delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var PICKER_POLLS = 6;
+var PICKER_POLL_MS = 120;
+async function waitForPicker(surface) {
+  for (let attempt = 0;attempt < PICKER_POLLS; attempt++) {
+    const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
+    if (!screen.ok)
+      return "error";
+    if (/type something/i.test(screen.stdout))
+      return "up";
+    await delay(PICKER_POLL_MS);
+  }
+  return "no-picker";
+}
+async function submitReview(surface) {
+  for (let attempt = 0;attempt < PICKER_POLLS; attempt++) {
+    const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
+    if (!screen.ok)
+      return false;
+    if (/submit answers|ready to submit/i.test(screen.stdout))
+      return (await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok;
+    await delay(PICKER_POLL_MS);
+  }
+  return false;
+}
+async function cmuxAnswerQuestions(answers, surface) {
+  if (answers.length === 0)
     return "error";
-  if (!/type something/i.test(screen.stdout))
-    return "no-picker";
-  if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok)
-    return "error";
-  if (!(await runCmux(["send", ...cmuxTarget(surface), "--", text])).ok)
-    return "error";
-  return (await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok ? "sent" : "error";
+  for (let i = 0;i < answers.length; i++) {
+    const up = await waitForPicker(surface);
+    if (up === "error")
+      return "error";
+    if (up === "no-picker")
+      return i === 0 ? "no-picker" : "error";
+    if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok)
+      return "error";
+    if (!(await runCmux(["send", ...cmuxTarget(surface), "--", answers[i]])).ok)
+      return "error";
+    if (!(await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok)
+      return "error";
+  }
+  if (answers.length === 1)
+    return "sent";
+  return await submitReview(surface) ? "sent" : "error";
 }
 async function cmuxSurfaceTitle(surface) {
   if (!surface)
@@ -19566,21 +19594,32 @@ function extractQuestionAnswer(r) {
   const values = Object.values(answers).filter((v) => typeof v === "string" && v.trim().length > 0);
   return values.length > 0 ? values.join(", ") : undefined;
 }
-function answeredToolUseIds(records) {
-  const ids = new Set;
+function toolResultKinds(records) {
+  const resulted = new Set;
+  const withAnswers = new Set;
   for (const r of records) {
     const c = r.message?.content;
     if (!Array.isArray(c))
       continue;
+    const a = r.toolUseResult?.answers;
+    const hasAnswers = !!a && typeof a === "object" && !Array.isArray(a) && Object.values(a).some((v) => typeof v === "string" && v.trim().length > 0);
     for (const b of c) {
       if (b && b.type === "tool_result") {
         const tid = b.tool_use_id;
-        if (typeof tid === "string")
-          ids.add(tid);
+        if (typeof tid === "string") {
+          resulted.add(tid);
+          if (hasAnswers)
+            withAnswers.add(tid);
+        }
       }
     }
   }
-  return ids;
+  return { resulted, withAnswers };
+}
+function questionSpeechOne(q) {
+  const lead = q.header ? `${q.header}. ${q.question}` : q.question;
+  const opts = q.options.map((o) => o.description ? `${o.label}, ${o.description}` : o.label).join(". ");
+  return opts ? `${lead}. ${opts}.` : lead;
 }
 function questionSpeech(questions) {
   const one = (q) => {
@@ -19636,7 +19675,7 @@ function selectActiveBranch(records) {
 function projectTurns(records, maxTurns = 40) {
   const turns = [];
   const branch = selectActiveBranch(records);
-  const answered = answeredToolUseIds(branch);
+  const { resulted, withAnswers } = toolResultKinds(branch);
   for (const r of branch) {
     if (!r.uuid)
       continue;
@@ -19667,7 +19706,12 @@ function projectTurns(records, maxTurns = 40) {
           role: "claude",
           text: lead ? `${lead} ${questionSpeech(q.questions)}` : questionSpeech(q.questions),
           interim: false,
-          question: { toolUseId: q.toolUseId, questions: q.questions, answered: answered.has(q.toolUseId) }
+          question: {
+            toolUseId: q.toolUseId,
+            questions: q.questions,
+            answered: resulted.has(q.toolUseId),
+            ...resulted.has(q.toolUseId) && !withAnswers.has(q.toolUseId) ? { aborted: true } : {}
+          }
         });
         continue;
       }
@@ -19684,7 +19728,7 @@ function isPaneWorking(turns) {
     if (turns[i].role !== "user")
       continue;
     for (let j = i + 1;j < turns.length; j++) {
-      if (turns[j].role === "claude" && !turns[j].interim && !turns[j].question)
+      if (turns[j].role === "claude" && !turns[j].interim && (!turns[j].question || turns[j].question?.aborted))
         return false;
     }
     return true;
@@ -19923,6 +19967,8 @@ class VoiceDaemon {
   lastHistorySig = "";
   answeringQuestion = false;
   pendingQuestionOverlay;
+  lastReconciledAbort;
+  submittedToolUseId;
   speakMode = "final";
   inheritedPermissionMode;
   pendingSpawnId = process.env.VOICE_SPAWN_ID;
@@ -20185,6 +20231,12 @@ class VoiceDaemon {
         }
         return;
       }
+      case "confirm_question":
+        await this.confirmQuestion(event.toolUseId);
+        return;
+      case "redo_answer":
+        this.redoAnswer(event.toolUseId);
+        return;
       default:
         return;
     }
@@ -20238,38 +20290,8 @@ class VoiceDaemon {
     }
     const pending = this.pendingQuestion(this.projectedNow());
     if (pending?.question) {
-      const payload = pending.question;
-      if (!isVoiceAnswerable(payload)) {
-        this.sendToBrowser({
-          type: "error",
-          message: "This is a multi-part question — please answer it in the terminal."
-        });
-        return;
-      }
-      if (this.answeringQuestion) {
-        this.sendToBrowser({ type: "error", message: "Still sending your previous answer…" });
-        return;
-      }
-      this.answeringQuestion = true;
-      let result;
-      try {
-        result = await cmuxAnswerQuestion(transcript, this.init.surface);
-      } finally {
-        this.answeringQuestion = false;
-      }
-      if (result === "sent") {
-        this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
-        this.syncFromTranscript();
-        return;
-      }
-      if (result === "error") {
-        this.sendToBrowser({
-          type: "error",
-          message: "Couldn't send your answer — answer the question in the terminal."
-        });
-        return;
-      }
-      this.pendingQuestionOverlay = undefined;
+      this.collectQuestionAnswer(transcript);
+      return;
     }
     await this.steerIntoPane(transcript, mode === "interrupt");
   }
@@ -20298,6 +20320,71 @@ class VoiceDaemon {
         return turns[i].question?.answered ? undefined : turns[i];
     }
     return;
+  }
+  reconcileAbort(turns) {
+    let aborted2;
+    for (let i = turns.length - 1;i >= 0; i--) {
+      const q = turns[i].question;
+      if (!q)
+        continue;
+      if (q.aborted)
+        aborted2 = q.toolUseId;
+      break;
+    }
+    if (!aborted2 || aborted2 === this.lastReconciledAbort)
+      return;
+    this.lastReconciledAbort = aborted2;
+    this.turns.turnClosed();
+  }
+  collectQuestionAnswer(transcript) {
+    const q = this.pendingQuestionOverlay?.question;
+    if (!q) {
+      this.steerIntoPane(transcript, false);
+      return;
+    }
+    if (!q.answers)
+      q.answers = [];
+    const answers = q.answers;
+    if (answers.length < q.questions.length)
+      answers.push(transcript);
+    else
+      answers[answers.length - 1] = transcript;
+    this.syncFromTranscript();
+  }
+  async confirmQuestion(toolUseId) {
+    const q = this.pendingQuestionOverlay?.question;
+    if (!q || q.toolUseId !== toolUseId)
+      return;
+    if (toolUseId === this.submittedToolUseId)
+      return;
+    const answers = q.answers ?? [];
+    if (answers.length < q.questions.length || this.answeringQuestion)
+      return;
+    this.answeringQuestion = true;
+    let result;
+    try {
+      result = await cmuxAnswerQuestions(answers, this.init.surface);
+    } finally {
+      this.answeringQuestion = false;
+    }
+    if (result === "sent") {
+      this.submittedToolUseId = toolUseId;
+      this.syncFromTranscript();
+      return;
+    }
+    this.sendToBrowser({
+      type: "error",
+      message: result === "no-picker" ? "That question is no longer open — it may have been answered already." : "Couldn't submit your answers — finish the question in the terminal."
+    });
+  }
+  redoAnswer(toolUseId) {
+    const overlay = this.pendingQuestionOverlay;
+    const q = overlay?.question;
+    if (!overlay || !q || q.toolUseId !== toolUseId || !q.answers?.length)
+      return;
+    q.answers.pop();
+    this.seen.delete(`${overlay.uuid}#${q.answers.length}`);
+    this.syncFromTranscript();
   }
   queueVoice(text) {
     this.turns.enqueueVoice(text);
@@ -20382,6 +20469,7 @@ class VoiceDaemon {
     this.reflect(this.projectedNow(), true);
   }
   reflect(turns, force) {
+    this.reconcileAbort(turns);
     const shown = dropSessionAnnouncement(turns, this.init.browserUrl);
     const sig = shown.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? t.question.answered ? "qa" : "q" : ""}`).join("|");
     if (force || sig !== this.lastHistorySig) {
@@ -20407,14 +20495,15 @@ class VoiceDaemon {
     const questions = normalizeQuestions(rawQuestions);
     if (questions.length === 0)
       return;
+    this.submittedToolUseId = undefined;
     const sig = questionContentSig(questions);
     this.pendingQuestionOverlay = {
-      uuid: `pending-question:${sig}`,
+      uuid: `pending-question:${hashSig(sig)}`,
       timestamp: Date.now(),
       role: "claude",
       text: questionSpeech(questions),
       interim: false,
-      question: { toolUseId: toolUseId || `pending:${sig}`, questions, answered: false }
+      question: { toolUseId: toolUseId || `pending:${sig}`, questions, answered: false, answers: [] }
     };
   }
   projectedNow() {
@@ -20427,48 +20516,77 @@ class VoiceDaemon {
     return inTranscript ? base : [...base, overlay];
   }
   synthesizeReplies(turns) {
+    const currentIndex = (t) => t.question?.answers?.length ?? 0;
+    const unitKey = (t) => t.question && !t.question.answered && !t.question.aborted ? `${t.uuid}#${currentIndex(t)}` : t.uuid;
     if (!this.seeded) {
       this.seeded = true;
       for (const t of turns)
         if (t.role === "claude")
-          this.remember(this.seen, t.uuid, SEEN_UUID_CAP);
+          this.remember(this.seen, unitKey(t), SEEN_UUID_CAP);
       return;
     }
     const fresh = [];
     for (const t of turns) {
-      if (t.role !== "claude" || this.seen.has(t.uuid))
+      if (t.role !== "claude")
         continue;
-      this.remember(this.seen, t.uuid, SEEN_UUID_CAP);
+      const key = unitKey(t);
+      if (this.seen.has(key))
+        continue;
+      this.remember(this.seen, key, SEEN_UUID_CAP);
       if (t.interim && this.speakMode !== "all")
         continue;
       if (t.question?.answered)
         continue;
-      fresh.push(t);
+      if (t.question) {
+        const idx = currentIndex(t);
+        if (idx >= t.question.questions.length)
+          continue;
+        fresh.push({ key, text: questionSpeechOne(t.question.questions[idx]) });
+        continue;
+      }
+      fresh.push({ key, text: t.text });
     }
     const newest = fresh.length - 1;
-    fresh.forEach((t, i) => void this.speak(t.uuid, t.text, i !== newest));
+    fresh.forEach((u, i) => void this.speak(u.key, u.text, i !== newest));
   }
-  async serveAudio(uuid3) {
-    let audio = this.audio.get(uuid3);
+  audioTextFor(requestId) {
+    const hash2 = requestId.lastIndexOf("#");
+    if (hash2 >= 0 && /^\d+$/.test(requestId.slice(hash2 + 1))) {
+      const uuid3 = requestId.slice(0, hash2);
+      const idx = Number.parseInt(requestId.slice(hash2 + 1), 10);
+      const q2 = this.projectedNow().find((t) => t.uuid === uuid3)?.question?.questions[idx];
+      return q2 ? questionSpeechOne(q2) : undefined;
+    }
+    const turn = this.projectedNow().find((t) => t.uuid === requestId);
+    const q = turn?.question;
+    if (q && !q.answered && !q.aborted) {
+      const idx = q.answers?.length ?? 0;
+      if (idx < q.questions.length)
+        return questionSpeechOne(q.questions[idx]);
+    }
+    return turn?.text;
+  }
+  async serveAudio(requestId) {
+    let audio = this.audio.get(requestId);
     if (!audio) {
-      const turn = this.projectedNow().find((t) => t.uuid === uuid3);
-      if (turn) {
-        this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "pending" });
+      const text = this.audioTextFor(requestId);
+      if (text !== undefined) {
+        this.sendToBrowser({ type: "tts_status", requestId, state: "pending" });
         try {
-          const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capForSpeech(turn.text), undefined, () => {});
+          const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capForSpeech(text), undefined, () => {});
           if (fullBuffer.length)
-            audio = this.storeAudio(uuid3, {
+            audio = this.storeAudio(requestId, {
               audioBase64: fullBuffer.toString("base64"),
               mimeType: "audio/ogg"
             });
         } catch {}
         if (!audio) {
-          this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
+          this.sendToBrowser({ type: "tts_status", requestId, state: "failed" });
           return;
         }
       }
     }
-    this.sendToBrowser(audio ? { type: "tts_audio", requestId: uuid3, replay: true, ...audio } : { type: "error", requestId: uuid3, message: "Audio for that reply is no longer available." });
+    this.sendToBrowser(audio ? { type: "tts_audio", requestId, replay: true, ...audio } : { type: "error", requestId, message: "Audio for that reply is no longer available." });
   }
   emitPromptAccepted(prompt) {
     const text = prompt.trim();
@@ -20636,6 +20754,14 @@ function capForSpeech(text) {
 }
 function errText(error51) {
   return error51 instanceof Error ? error51.message : String(error51);
+}
+function hashSig(s) {
+  let h = 2166136261;
+  for (let i = 0;i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
 }
 function rememberBounded(seen, id, cap) {
   if (seen.has(id))
