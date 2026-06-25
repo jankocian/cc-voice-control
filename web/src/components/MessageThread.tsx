@@ -10,6 +10,8 @@ export type ThreadPlayback = {
   loadedId: string | null;
   position: number;
   duration: number;
+  // True when the active entry is paused (show the play icon instead of pause).
+  paused: boolean;
   playableIds: ReadonlySet<string>;
   // Per-reply audio lifecycle (pending = synthesizing, failed = retryable) for the loading/retry indicator.
   audioStatus: ReadonlyMap<string, "pending" | "failed">;
@@ -92,7 +94,7 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
             <QuestionCard
               key={message.id}
               question={message.question}
-              playing={playback.playingId === message.requestId}
+              playing={playback.playingId === message.requestId && !playback.paused}
               onPlay={() => playback.onPlay(message.requestId)}
             />
           );
@@ -105,7 +107,7 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
             <StepRow
               key={message.id}
               body={message.body}
-              playing={playback.playingId === message.requestId}
+              playing={playback.playingId === message.requestId && !playback.paused}
               loading={playback.pendingPlayId === message.requestId || stepStatus === "pending"}
               failed={stepStatus === "failed"}
               onPlay={() => playback.onPlay(message.requestId)}
@@ -127,7 +129,7 @@ export function MessageThread({ messages, playback }: { messages: Message[]; pla
             <AudioPendingPlayer />
           ) : playable && requestId ? (
             <InlineAudioPlayer
-              playing={playback.playingId === requestId}
+              playing={playback.playingId === requestId && !playback.paused}
               loaded={loaded}
               position={loaded ? playback.position : 0}
               duration={loaded ? playback.duration : 0}

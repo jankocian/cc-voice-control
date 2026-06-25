@@ -12,13 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
 import { cmuxAnswerQuestion, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
-import { synthesizeSpeechOpusStream, transcribeAudio } from "./openai.js";
+import { synthesizeSpeechAacStream, transcribeAudio } from "./openai.js";
 import { TAIL_BYTES } from "./transcript-reader.js";
 import { VoiceDaemon } from "./voice-daemon.js";
 
 // Stub OpenAI so no network/key is needed; record exactly which text gets synthesized.
 vi.mock("./openai.js", () => ({
-  synthesizeSpeechOpusStream: vi.fn(
+  synthesizeSpeechAacStream: vi.fn(
     async (_config: unknown, _text: string, _voice: unknown, onBytes: (chunk: Buffer, seq: number) => void) => {
       onBytes(Buffer.from("QUFB", "base64"), 0);
       return Buffer.from("QUFB", "base64");
@@ -153,7 +153,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     prevDataDir = process.env.CLAUDE_PLUGIN_DATA;
     dataDir = mkdtempSync(join(tmpdir(), "voice-reply-test-"));
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
-    vi.mocked(synthesizeSpeechOpusStream).mockClear();
+    vi.mocked(synthesizeSpeechAacStream).mockClear();
     // Reset transcribeAudio to its default so a prior test's queued mockResolvedValueOnce (e.g. the glued-
     // prompt case) can't leak its transcript into the next test's submit_audio.
     vi.mocked(transcribeAudio).mockReset().mockResolvedValue("unused");
@@ -236,8 +236,8 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
   }
 
   async function waitForSpeak(): Promise<string[]> {
-    for (let i = 0; i < 60 && vi.mocked(synthesizeSpeechOpusStream).mock.calls.length === 0; i++) await sleep(100);
-    return vi.mocked(synthesizeSpeechOpusStream).mock.calls.map((c) => c[1]);
+    for (let i = 0; i < 60 && vi.mocked(synthesizeSpeechAacStream).mock.calls.length === 0; i++) await sleep(100);
+    return vi.mocked(synthesizeSpeechAacStream).mock.calls.map((c) => c[1]);
   }
 
   // Poll for the tts_audio envelope on the wire: speak() finishes synthesizing (recorded in mock.calls)
@@ -364,7 +364,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     expect(await waitForHistoryQuestion()).toBe(true);
     await sleep(60);
     const spokeQuestion = () =>
-      vi.mocked(synthesizeSpeechOpusStream).mock.calls.filter((c) => c[1].includes("Which?")).length;
+      vi.mocked(synthesizeSpeechAacStream).mock.calls.filter((c) => c[1].includes("Which?")).length;
     expect(spokeQuestion()).toBe(1);
 
     // Claude answers → the record (same content) finally flushes to the transcript, now answered. The overlay
@@ -386,7 +386,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     // The Stop hook fires BEFORE the answer text has flushed (the thinking block went out first).
     await post(port, "/turn-close", { transcriptPath: transcript });
     await sleep(500);
-    expect(vi.mocked(synthesizeSpeechOpusStream)).not.toHaveBeenCalled(); // correctly waiting, not grabbing a step
+    expect(vi.mocked(synthesizeSpeechAacStream)).not.toHaveBeenCalled(); // correctly waiting, not grabbing a step
 
     // The answer finally flushes — the file write wakes the watch and the answer is spoken.
     appendFileSync(transcript, answerRec("ANSWER", "2026-06-22T13:55:49.298Z", ANSWER));

@@ -161,6 +161,7 @@ function PagerDemo() {
     loadedId: null,
     position: 0,
     duration: 0,
+    paused: false,
     playableIds: new Set<string>(),
     audioStatus: new Map<string, "pending" | "failed">(),
     pendingPlayId: null,
