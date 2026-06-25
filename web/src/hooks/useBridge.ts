@@ -34,7 +34,8 @@ export type BridgeContentEvent = Extract<
 
 // Everything the daemon would need a requestId for, minus the requestId itself (the hook mints
 // it). `get_audio` (the reply being fetched) and `submit_audio` (stable across retransmits) already
-// carry their own, so the hook leaves those untouched. `spawn_thread` and `set_speak_mode` carry none.
+// carry their own, so the hook leaves those untouched. `spawn_thread`, `set_speak_mode`, and the
+// question-wizard actions (`confirm_question` / `redo_answer`) carry none.
 export type DaemonCommand =
   // requestId is caller-minted (stable across retransmits) so the daemon's submit_ack/dedup can match it;
   // every other turn command's requestId is minted here in sendDaemon.
@@ -45,7 +46,10 @@ export type DaemonCommand =
   | { type: "sync" }
   | { type: "get_audio"; requestId: string }
   | { type: "set_speak_mode"; mode: SpeakMode }
-  | { type: "spawn_thread"; cwd?: string };
+  | { type: "spawn_thread"; cwd?: string }
+  // Sequential question wizard: submit every collected answer (confirm), or step back one sub-question.
+  | { type: "confirm_question"; toolUseId: string }
+  | { type: "redo_answer"; toolUseId: string };
 
 export type BridgeRuntime = {
   state: SessionRuntimeState;
@@ -163,9 +167,12 @@ export function useBridge(options: UseBridgeOptions): Bridge {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return false;
       if (!connectedThreadsRef.current.has(threadId)) return false;
-      // spawn_thread + set_speak_mode are actions/settings, not turns — they carry no requestId.
+      // spawn_thread / set_speak_mode / the question-wizard actions are actions, not turns — no requestId.
       const event = (
-        command.type === "spawn_thread" || command.type === "set_speak_mode"
+        command.type === "spawn_thread" ||
+        command.type === "set_speak_mode" ||
+        command.type === "confirm_question" ||
+        command.type === "redo_answer"
           ? command
           : { requestId: crypto.randomUUID(), ...command }
       ) as BrowserToDaemonEvent;

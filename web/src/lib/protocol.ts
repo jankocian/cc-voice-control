@@ -26,4 +26,3 @@ export type {
   WireRosterEvent,
   WireRosterThread
 } from "../../../src/shared/protocol";
-export { isVoiceAnswerable } from "../../../src/shared/protocol";
