@@ -181,26 +181,50 @@ function extractQuestionAnswer(r: TranscriptRecord): string | undefined {
   return values.length > 0 ? values.join(", ") : undefined;
 }
 
-// tool_use_ids that already have a tool_result anywhere in the records — i.e. questions the user answered.
-function answeredToolUseIds(records: TranscriptRecord[]): Set<string> {
-  const ids = new Set<string>();
+// For every tool_use_id that has a tool_result anywhere in the records: `resulted` is the id (the question
+// got SOME landing → answered: card dims, pending lamp clears); `withAnswers` is the subset whose result
+// carried a usable `answers` map (a real AskUserQuestion answer). A question in `resulted` but NOT in
+// `withAnswers` was REJECTED/aborted — Esc in the terminal writes a tool_result whose `toolUseResult` is the
+// plain string "User rejected tool use" (no answers) — so the turn ended with no reply coming.
+function toolResultKinds(records: TranscriptRecord[]): { resulted: Set<string>; withAnswers: Set<string> } {
+  const resulted = new Set<string>();
+  const withAnswers = new Set<string>();
   for (const r of records) {
     const c = r.message?.content;
     if (!Array.isArray(c)) continue;
+    const a = r.toolUseResult?.answers;
+    const hasAnswers =
+      !!a &&
+      typeof a === "object" &&
+      !Array.isArray(a) &&
+      Object.values(a).some((v) => typeof v === "string" && v.trim().length > 0);
     for (const b of c) {
       if (b && (b as { type?: unknown }).type === "tool_result") {
         const tid = (b as { tool_use_id?: unknown }).tool_use_id;
-        if (typeof tid === "string") ids.add(tid);
+        if (typeof tid === "string") {
+          resulted.add(tid);
+          if (hasAnswers) withAnswers.add(tid);
+        }
       }
     }
   }
-  return ids;
+  return { resulted, withAnswers };
 }
 
 // A spoken/displayed rendering of an interactive question, for TTS and the non-card text fallback. Options
 // are lettered (A, B, …) — we read them out; the user answers freely (their transcript becomes the custom
 // answer). Claude Code appends its own "Type something"/"Chat about this" rows at render time; those aren't
 // in the transcript, so we never read them.
+// A spoken rendering of ONE sub-question for the sequential wizard — the question (with its header for
+// context) then each option, read plainly. Deliberately CHROME-FREE: no "Claude is asking", no "Question N",
+// no "Options" — only the content Claude wrote, so it reads in whatever language the conversation is in (the
+// wizard adds nothing of its own to translate). The card shows the lettered options; the user answers freely.
+export function questionSpeechOne(q: Question): string {
+  const lead = q.header ? `${q.header}. ${q.question}` : q.question;
+  const opts = q.options.map((o) => (o.description ? `${o.label}, ${o.description}` : o.label)).join(". ");
+  return opts ? `${lead}. ${opts}.` : lead;
+}
+
 export function questionSpeech(questions: Question[]): string {
   const one = (q: Question) => {
     // Read each option's label AND its description (when present) — the user usually can't see the screen, so
@@ -292,7 +316,7 @@ export function selectActiveBranch(records: TranscriptRecord[]): TranscriptRecor
 export function projectTurns(records: TranscriptRecord[], maxTurns = 40): ProjectedTurn[] {
   const turns: ProjectedTurn[] = [];
   const branch = selectActiveBranch(records);
-  const answered = answeredToolUseIds(branch);
+  const { resulted, withAnswers } = toolResultKinds(branch);
   for (const r of branch) {
     if (!r.uuid) continue;
     const ts = toEpoch(r.timestamp);
@@ -325,7 +349,13 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
           role: "claude",
           text: lead ? `${lead} ${questionSpeech(q.questions)}` : questionSpeech(q.questions),
           interim: false,
-          question: { toolUseId: q.toolUseId, questions: q.questions, answered: answered.has(q.toolUseId) }
+          question: {
+            toolUseId: q.toolUseId,
+            questions: q.questions,
+            answered: resulted.has(q.toolUseId),
+            // A landing with no answers map = a terminal Esc rejection; mark it so the lamp settles to idle.
+            ...(resulted.has(q.toolUseId) && !withAnswers.has(q.toolUseId) ? { aborted: true } : {})
+          }
         });
         continue;
       }
@@ -353,9 +383,12 @@ export function isPaneWorking(turns: ProjectedTurn[]): boolean {
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role !== "user") continue;
     for (let j = i + 1; j < turns.length; j++) {
-      // A question is NOT the final reply: the pane is still working (awaiting the answer, then the
-      // conclusion), so skip it — else the working poll would stop and a late conclusion could be missed.
-      if (turns[j].role === "claude" && !turns[j].interim && !turns[j].question) return false; // answered → idle
+      // A non-interim claude turn after the user turn ends the working state — UNLESS it's an unanswered/
+      // answered (not aborted) question: that's not the final reply (Claude is awaiting the answer, then the
+      // conclusion), so skip it, else the poll would stop and a late conclusion could be missed. An ABORTED
+      // question (Esc in the terminal) IS terminal: no reply is coming, so it concludes the turn → idle.
+      if (turns[j].role === "claude" && !turns[j].interim && (!turns[j].question || turns[j].question?.aborted))
+        return false; // a real reply, or an aborted question → idle
     }
     return true; // newest user turn still awaiting its final reply → working
   }

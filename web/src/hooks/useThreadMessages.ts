@@ -66,6 +66,11 @@ export function useThreadMessages({
   // not for the full-thread restore each thread gets on (re)connect (which used to make every background
   // thread read "1" after a refresh).
   const seenNewestRef = useRef<Map<ThreadId, number>>(new Map());
+  // Per-thread signature of the pending question's collected answers, last seen. Lets the wizard mic-spinner
+  // clear fire ONLY when an answer was genuinely collected — a push OR a replace (re-speaking the last answer
+  // at the review step) both CHANGE this — and never on a reconnect `sync` that replays the SAME pending
+  // answers while a send is still in flight (signature unchanged → no clear).
+  const questionAnswersRef = useRef<Map<ThreadId, string>>(new Map());
 
   const { dropAudio, attachAudio, attachAudioChunk, markPlayable, noteAudioStatus } = playback;
 
@@ -100,6 +105,22 @@ export function useThreadMessages({
           // fetches the audio on demand (get_audio → the daemon synthesizes from the same projection). So
           // a reply can never show as text with no way to hear it — audio follows the one source of truth.
           markPlayable(event.turns.filter((t) => t.role === "claude").map((t) => t.requestId));
+          // A pending question's CURRENT sub-question has its own on-demand audio (composite `uuid#index`
+          // key) — mark it playable so the wizard renders the same player as a message (tap fetches it; the
+          // daemon also auto-pushes it as the wizard advances).
+          markPlayable(
+            event.turns.flatMap((t) => {
+              if (!t.question || t.question.answered) return [];
+              const i = t.question.answers?.length ?? 0;
+              return i < t.question.questions.length ? [`${t.requestId}#${i}`] : [];
+            })
+          );
+          // Track the pending question's collected answers (as a signature) so the wizard spinner clears only
+          // on a real collection (the answers CHANGED — push or replace), never on a reconnect replay.
+          const pendingQ = event.turns.find((t) => t.question && !t.question.answered);
+          const answersSig = pendingQ ? JSON.stringify(pendingQ.question?.answers ?? []) : "";
+          const prevAnswersSig = questionAnswersRef.current.get(threadId) ?? "";
+          questionAnswersRef.current.set(threadId, answersSig);
           // The mic turn lands when the user's spoken message appears as the newest row: clear the
           // "transcribing…" indicator + confirm it reached Claude. A terminal-typed turn (we weren't
           // transcribing) or an incoming reply (newest row is Claude's) correctly does neither.
@@ -109,6 +130,12 @@ export function useThreadMessages({
               setTranscribingThreadId(null);
               onSendOutcomeRef.current(true); // the spoken turn landed → clear any pending "Resend"
               showFlash("Sent to Claude Code ✓");
+            } else if (pendingQ && answersSig !== prevAnswersSig) {
+              // A spoken WIZARD answer was just COLLECTED (the pending question's answers changed — push or
+              // a re-spoken replace). Clear the mic spinner, but NO "you" row + NO "Sent ✓" flash — the
+              // answer shows in the wizard card itself, and only flushes to the transcript on the final confirm.
+              setTranscribingThreadId(null);
+              onSendOutcomeRef.current(true);
             }
           }
           // Keep any optimistic prompt rows whose native row hasn't landed yet (still in flight), so the
@@ -215,6 +242,7 @@ export function useThreadMessages({
   useEffect(() => {
     const live = new Set(threadsList.map((t) => t.threadId));
     for (const id of seenNewestRef.current.keys()) if (!live.has(id)) seenNewestRef.current.delete(id);
+    for (const id of questionAnswersRef.current.keys()) if (!live.has(id)) questionAnswersRef.current.delete(id);
     setRuntimeByThread((prev) => pruneThreadMap(prev, live));
     setMessagesByThread((prev) =>
       pruneThreadMap(prev, live, (messages) => {

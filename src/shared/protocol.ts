@@ -42,16 +42,22 @@ export type QuestionOption = { label: string; description?: string };
 export type Question = { header?: string; question: string; multiSelect?: boolean; options: QuestionOption[] };
 
 // An interactive AskUserQuestion turn projected from the transcript. `toolUseId` ties it to the tool call
-// (and its eventual answer); `answered` flips once the user's selection lands. NOT a final reply: a question
-// never ends the working state (isPaneWorking skips it) so Claude's later conclusion is still spoken.
-export type QuestionPayload = { toolUseId: string; questions: Question[]; answered: boolean };
-
-// Can a single spoken transcript answer this question through the picker? Only a SINGLE single-select question
-// (one custom answer → Enter submits); multi-part or multi-select must be answered in the terminal. Shared by
-// the daemon (route to the picker vs fail loud) and the card (the hint shown), so the two can never drift.
-export function isVoiceAnswerable(q: QuestionPayload): boolean {
-  return q.questions.length === 1 && q.questions.every((x) => !x.multiSelect);
-}
+// (and its eventual answer); `answered` flips once the user's selection (or rejection) lands. `aborted` is
+// true when that landing was a REJECTION — Esc in the terminal writes a tool_result with no answers map — so
+// the turn ended with NO reply coming and the lamp must settle to idle (isPaneWorking treats an aborted
+// question as the concluding turn). Otherwise NOT a final reply: an unanswered question never ends working
+// (isPaneWorking skips it) so Claude's later conclusion is still spoken.
+export type QuestionPayload = {
+  toolUseId: string;
+  questions: Question[];
+  answered: boolean;
+  aborted?: boolean;
+  // Answers collected so far for the SEQUENTIAL wizard, daemon-side, while the question is still pending
+  // (one per sub-question, in order). The phone presents question[answers.length] next; once it equals
+  // questions.length the phone shows the review + CONFIRM. Only meaningful on the pending overlay — a
+  // submitted/answered question carries its answer as a separate "you" turn, never here.
+  answers?: string[];
+};
 
 // One conversational turn projected from Claude Code's transcript (see transcript-projection.ts). The
 // transcript is the source of truth, so a turn IS a native record: `requestId` is its native `uuid`
@@ -73,10 +79,10 @@ export type HistoryTurn = {
   // user turn or a FINAL reply. The phone shows steps dimmer and never auto-plays them unless the user
   // opted into "read every step" (set_speak_mode "all"). Absent/false for user turns and final replies.
   interim?: boolean;
-  // Present iff this turn is Claude's interactive AskUserQuestion prompt — rendered as a question card
-  // (the question + lettered options) instead of a text bubble, read aloud while unanswered, and answered by
-  // VOICE (the spoken transcript becomes the picker's custom answer; there is no tap-to-select, by design).
-  // `text` carries a flattened spoken/displayed rendering for TTS and any non-card fallback.
+  // Present iff this turn is Claude's interactive AskUserQuestion prompt — rendered as a SEQUENTIAL wizard
+  // (one sub-question at a time, each read aloud), answered by VOICE (each spoken transcript becomes that
+  // sub-question's picker custom answer; there is no tap-to-select, by design), then a final CONFIRM submits
+  // them all. `text` carries a flattened spoken/displayed rendering for any non-card fallback.
   question?: QuestionPayload;
 };
 
@@ -98,7 +104,13 @@ export type BrowserToDaemonEvent =
   // Open a NEW cmux workspace running Claude + /voice-control:start, so it joins this same
   // session as a new thread (same QR). Routed to the ACTIVE thread's daemon, which has the
   // cmux trust to spawn for its machine. `cwd` defaults to the spawning daemon's cwd.
-  | { type: "spawn_thread"; cwd?: string };
+  | { type: "spawn_thread"; cwd?: string }
+  // The phone's sequential question wizard: the user has spoken an answer for every sub-question (collected
+  // daemon-side as `question.answers`) and tapped CONFIRM → drive the picker with all of them, in order.
+  // `toolUseId` guards against a stale question (ignored if it doesn't match the one currently pending).
+  | { type: "confirm_question"; toolUseId: string }
+  // Step the wizard BACK one sub-question (drop the last collected answer) so the user can re-speak it.
+  | { type: "redo_answer"; toolUseId: string };
 
 export type DaemonToBrowserEvent =
   | { type: "session_status"; state: SessionState; memory: { currentTask?: string } }

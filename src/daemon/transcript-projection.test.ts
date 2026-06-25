@@ -407,7 +407,7 @@ describe("projectTurns — interactive AskUserQuestion", () => {
     expect(turns[1]).toMatchObject({ role: "user", text: "Mixing", interim: false }); // logged → two checks, floored by /clear
   });
 
-  it("does NOT project a rejected/clarified question as an answer (no answers map)", () => {
+  it("does NOT project a rejected/clarified question as an answer (no answers map), and marks it aborted", () => {
     const turns = projectTurns([
       askRec("q1", "2026-06-21T15:00:00.000Z", "tu_1", Q),
       // a rejection: tool_result present (flips answered) but toolUseResult is a string, not an answers map
@@ -417,6 +417,31 @@ describe("projectTurns — interactive AskUserQuestion", () => {
     ]);
     expect(turns).toHaveLength(1); // only the question card — no phantom "you" answer bubble
     expect(turns.some((t) => t.role === "user")).toBe(false);
+    expect(turns[0].question?.answered).toBe(true); // the tool_result landed → not still pending
+    expect(turns[0].question?.aborted).toBe(true); // …but it was a rejection, not an answer
+  });
+
+  it("an aborted question (Esc in the terminal) concludes the turn → idle, even with no reply after it", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-21T15:00:00.000Z", "which one?", { promptSource: "typed" }),
+      askRec("q1", "2026-06-21T15:00:05.000Z", "tu_1", Q),
+      // Esc: tool_result with no answers map and nothing after it. Pre-fix this stuck the lamp on "working".
+      user("r1", "2026-06-21T15:00:30.000Z", [{ type: "tool_result", tool_use_id: "tu_1", content: "rejected" }], {
+        toolUseResult: "User rejected tool use"
+      })
+    ]);
+    expect(pendingQuestion(turns)).toBe(false); // the question got a landing → not awaiting
+    expect(isPaneWorking(turns)).toBe(false); // aborted question is terminal → no reply coming → idle
+  });
+
+  it("a normally answered question stays working until the conclusion (NOT aborted)", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-21T15:00:00.000Z", "which one?", { promptSource: "typed" }),
+      askRec("q1", "2026-06-21T15:00:05.000Z", "tu_1", Q),
+      answerRec("r1", "2026-06-21T15:00:30.000Z", "tu_1", "Mixing")
+    ]);
+    expect(turns[0].question?.aborted).toBeUndefined(); // a real answer is not an abort
+    expect(isPaneWorking(turns)).toBe(true); // still working — the conclusion hasn't landed yet
   });
 
   it("a question does NOT end the working state — the pane stays working until the real conclusion lands", () => {

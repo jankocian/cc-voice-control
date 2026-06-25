@@ -19,10 +19,9 @@ import type {
   ThreadInfo,
   WireThreadInfo
 } from "../shared/protocol.js";
-import { isVoiceAnswerable } from "../shared/protocol.js";
 import { createSerializer } from "../shared/serialize.js";
 import { startBridgeHeartbeat } from "./bridge-heartbeat.js";
-import { cmuxAnswerQuestion, cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
+import { cmuxAnswerQuestions, cmuxHealth, cmuxInterrupt, cmuxSubmit, spawnWorkspace } from "./cmux.js";
 import {
   loadOrCreateSession,
   qrPath,
@@ -44,7 +43,8 @@ import {
   type ProjectedTurn,
   pendingQuestion,
   questionContentSig,
-  questionSpeech
+  questionSpeech,
+  questionSpeechOne
 } from "./transcript-projection.js";
 import { projectTranscript } from "./transcript-reader.js";
 import { TurnCoordinator } from "./turn-coordinator.js";
@@ -206,15 +206,22 @@ export class VoiceDaemon {
   private syncDebounce?: ReturnType<typeof setTimeout>;
   private rearmTimer?: ReturnType<typeof setTimeout>;
   private lastHistorySig = "";
-  // True while a spoken answer is being typed into an AskUserQuestion picker, so a second utterance arriving
-  // during the STT+send window can't re-type into the same picker (the answered state derives from the
-  // transcript, which may not have flushed when the first send completes).
+  // True while the wizard's collected answers are being driven into the AskUserQuestion picker (CONFIRM), so
+  // a second confirm tap can't re-drive the picker before the answer flushes to the transcript. Per-answer
+  // collection does NOT take this latch — only confirmQuestion does.
   private answeringQuestion = false;
   // The PENDING interactive question, surfaced from the PreToolUse hook because Claude does NOT write the
   // AskUserQuestion record to the transcript until it's answered — so the projection alone can't show it while
   // the user still needs to answer. projectedNow() injects this synthetic turn until the same question (by
   // content) appears in the transcript, then yields. Cleared on a new turn / reset / once the answer is sent.
   private pendingQuestionOverlay?: ProjectedTurn;
+  // The toolUseId of the last ABORTED question we reconciled the coordinator for (see reconcileAbort). When
+  // the user Escs a question in the TERMINAL (not via the phone's stop_task), the daemon never ran the Esc,
+  // so the inject-gate's `isBusy` can stay set; this lets us clear it exactly once when the abort flushes.
+  private lastReconciledAbort?: string;
+  // The toolUseId of a question whose answers we just submitted to the picker, but whose answer hasn't
+  // flushed to the transcript yet — so a repeat confirm in that window is ignored (see confirmQuestion).
+  private submittedToolUseId?: string;
   // The phone's autoplay preference for VOICE turns: "off" speaks nothing, "final" speaks just the final
   // reply (default — the prior behaviour), "all" also speaks each interim step. Tap-to-play works in every
   // mode. Set via set_speak_mode.
@@ -632,6 +639,14 @@ export class VoiceDaemon {
         }
         return;
       }
+      case "confirm_question":
+        // The phone tapped CONFIRM at the end of the wizard → drive the picker with every collected answer.
+        await this.confirmQuestion(event.toolUseId);
+        return;
+      case "redo_answer":
+        // The phone tapped BACK → drop the last collected answer so the user can re-speak that sub-question.
+        this.redoAnswer(event.toolUseId);
+        return;
       default:
         return;
     }
@@ -698,54 +713,13 @@ export class VoiceDaemon {
       this.sendToBrowser({ type: "error", message: "No speech detected — try again." });
       return;
     }
-    // If Claude is paused on an interactive question, the spoken answer IS the picker's custom answer — not a
-    // new prompt. Route it into the picker; the answer lands as a tool_result → the card flips to answered.
+    // If Claude is paused on an interactive question, the spoken transcript is an ANSWER to the wizard's
+    // CURRENT sub-question — collect it (the picker is driven only on the final CONFIRM, see confirmQuestion),
+    // not a new prompt. The overlay holds the growing answers; the phone advances to the next sub-question.
     const pending = this.pendingQuestion(this.projectedNow());
     if (pending?.question) {
-      const payload = pending.question;
-      // Only a SINGLE single-select question can be driven via the picker (one custom answer → Enter submits);
-      // multi-part / multi-select needs per-sub-question stepping we deliberately don't do — answer those in
-      // the terminal (fail loud, never half-answer).
-      if (!isVoiceAnswerable(payload)) {
-        this.sendToBrowser({
-          type: "error",
-          message: "This is a multi-part question — please answer it in the terminal."
-        });
-        return;
-      }
-      // Coalesce concurrent utterances: a second answer must not re-type into the picker while the first is
-      // still being sent (the answered state isn't flushed yet).
-      if (this.answeringQuestion) {
-        this.sendToBrowser({ type: "error", message: "Still sending your previous answer…" });
-        return;
-      }
-      this.answeringQuestion = true;
-      let result: "sent" | "no-picker" | "error";
-      try {
-        result = await cmuxAnswerQuestion(transcript, this.init.surface);
-      } finally {
-        this.answeringQuestion = false;
-      }
-      if (result === "sent") {
-        // The answer lands as a tool_result, not a user row or a UserPromptSubmit, so the phone's "sent ✓"
-        // path never fires — echo an accepted prompt_status with the answer text so the mic spinner clears
-        // (and the answer shows as a "you" row, reconciled to the logged answer the transcript projects). The
-        // "awaiting" lamp clears on its own once the transcript flushes the answer (the overlay yields).
-        this.sendToBrowser({ type: "prompt_status", text: transcript, state: "accepted" });
-        this.syncFromTranscript();
-        return;
-      }
-      if (result === "error") {
-        this.sendToBrowser({
-          type: "error",
-          message: "Couldn't send your answer — answer the question in the terminal."
-        });
-        return;
-      }
-      // result === "no-picker": the question still showed as unanswered but the picker is already gone (a
-      // stale/dismissed question). Clear the stale overlay and don't drop the words — fall through and treat
-      // them as a normal prompt.
-      this.pendingQuestionOverlay = undefined;
+      this.collectQuestionAnswer(transcript);
+      return;
     }
     await this.steerIntoPane(transcript, mode === "interrupt");
   }
@@ -783,6 +757,89 @@ export class VoiceDaemon {
       if (turns[i].question) return turns[i].question?.answered ? undefined : turns[i];
     }
     return undefined;
+  }
+
+  // When a question is Esc'd in the TERMINAL, Claude flushes an aborted question (a tool_result with no
+  // answers map → `aborted`) and the turn ends with no reply coming. isPaneWorking already treats that as
+  // idle, but the inject-gate's `isBusy` can still be set (the daemon never ran that Esc, so no Stop reached
+  // turnClosed — or it raced). Close the turn on the gate too, exactly once per aborted toolUseId, so the
+  // working floor can't pin the lamp. A phone-driven Esc already cleared the gate via interrupt(); this only
+  // fires for the terminal path. Idempotent with a real Stop (turnClosed just re-floors to idle).
+  private reconcileAbort(turns: ProjectedTurn[]): void {
+    let aborted: string | undefined;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const q = turns[i].question;
+      if (!q) continue;
+      if (q.aborted) aborted = q.toolUseId;
+      break; // only the newest question matters — an older aborted one is already-resolved history
+    }
+    if (!aborted || aborted === this.lastReconciledAbort) return;
+    this.lastReconciledAbort = aborted;
+    this.turns.turnClosed();
+  }
+
+  // Collect one spoken answer for the SEQUENTIAL question wizard. The daemon holds the growing answers on the
+  // pending overlay; the picker is driven only on CONFIRM (atomically, from a known fresh state). Pushes the
+  // next answer, or — once every sub-question already has one — REPLACES the last (a spoken re-do of the
+  // final/only answer before confirming). Re-projects so the phone advances and clears its mic spinner from
+  // the fresh snapshot. If the overlay vanished in a race, don't drop the words — treat them as a prompt.
+  private collectQuestionAnswer(transcript: string): void {
+    const q = this.pendingQuestionOverlay?.question;
+    if (!q) {
+      void this.steerIntoPane(transcript, false);
+      return;
+    }
+    if (!q.answers) q.answers = [];
+    const answers = q.answers;
+    if (answers.length < q.questions.length) answers.push(transcript);
+    else answers[answers.length - 1] = transcript;
+    this.syncFromTranscript();
+  }
+
+  // The phone tapped CONFIRM: drive the picker with every collected answer, in order. Guarded by toolUseId (a
+  // stale confirm is ignored) and the answeringQuestion latch (a double-tap can't double-type). On success the
+  // answer flushes to the transcript and the overlay yields; on a picker miss/failure we surface it so the
+  // user can finish in the terminal, leaving the question up.
+  private async confirmQuestion(toolUseId: string): Promise<void> {
+    const q = this.pendingQuestionOverlay?.question;
+    if (!q || q.toolUseId !== toolUseId) return; // stale / no pending question
+    // A second confirm in the gap between a successful submit and the answer flushing to the transcript (the
+    // overlay is still up) must NOT re-drive the now-closed picker (which would surface a spurious "no longer
+    // open" error). Latch on the submitted toolUseId until a different question supersedes it.
+    if (toolUseId === this.submittedToolUseId) return;
+    const answers = q.answers ?? [];
+    if (answers.length < q.questions.length || this.answeringQuestion) return; // not all answered, or in flight
+    this.answeringQuestion = true;
+    let result: "sent" | "no-picker" | "error";
+    try {
+      result = await cmuxAnswerQuestions(answers, this.init.surface);
+    } finally {
+      this.answeringQuestion = false;
+    }
+    if (result === "sent") {
+      this.submittedToolUseId = toolUseId; // ignore any repeat confirm until the overlay yields to the answer
+      this.syncFromTranscript(); // the answer flushes → the card flips to answered, the overlay yields
+      return;
+    }
+    this.sendToBrowser({
+      type: "error",
+      message:
+        result === "no-picker"
+          ? "That question is no longer open — it may have been answered already."
+          : "Couldn't submit your answers — finish the question in the terminal."
+    });
+  }
+
+  // Step the wizard BACK one sub-question (drop the last collected answer) so the user can re-speak it.
+  private redoAnswer(toolUseId: string): void {
+    const overlay = this.pendingQuestionOverlay;
+    const q = overlay?.question;
+    if (!overlay || !q || q.toolUseId !== toolUseId || !q.answers?.length) return;
+    q.answers.pop();
+    // Forget the now-current sub-question's audio so synthesizeReplies re-reads it aloud on the back-step
+    // (its composite key was marked seen when we first advanced past it).
+    this.seen.delete(`${overlay.uuid}#${q.answers.length}`);
+    this.syncFromTranscript();
   }
 
   // Queue an AUTO prompt (the status/summary requests) behind the running turn — these shouldn't barge into
@@ -902,6 +959,9 @@ export class VoiceDaemon {
   // each time would flood the wire). Idempotent: the `seen` guard means re-running never double-synthesizes,
   // and native uuids mean it never double-shows.
   private reflect(turns: ProjectedTurn[], force: boolean): void {
+    // A question Esc'd in the TERMINAL flushes as an aborted question; release the inject-gate (the daemon
+    // didn't run that Esc, so isBusy can be stuck) BEFORE computing state, so the lamp settles to idle.
+    this.reconcileAbort(turns);
     // The start-skill's QR/URL announcement is a real terminal reply: it must settle the working lamp (so
     // computeState below gets the FULL `turns`), but its QR/URL must never be shown or spoken — so it's
     // dropped from the displayed + synthesized set ONLY. Dropping it from the lamp's input is what used to
@@ -940,14 +1000,19 @@ export class VoiceDaemon {
   private setPendingQuestion(toolUseId: string, rawQuestions: unknown): void {
     const questions = normalizeQuestions(rawQuestions);
     if (questions.length === 0) return; // malformed/empty → leave the projection untouched, never break it
+    this.submittedToolUseId = undefined; // a fresh question always allows a confirm (clear the submit latch)
     const sig = questionContentSig(questions);
     this.pendingQuestionOverlay = {
-      uuid: `pending-question:${sig}`,
+      // HASH the content sig for the uuid (not the sig itself): Claude's question text can contain '#', and
+      // the uuid is the base of the per-sub-question audio key `${uuid}#${index}` — a raw '#' in it would make
+      // that key ambiguous to parse (see audioTextFor). The hash is content-derived (stable, unique per
+      // content) and '#'-free. A hash collision just aliases two byte-identical questions — harmless.
+      uuid: `pending-question:${hashSig(sig)}`,
       timestamp: Date.now(),
       role: "claude",
       text: questionSpeech(questions),
       interim: false,
-      question: { toolUseId: toolUseId || `pending:${sig}`, questions, answered: false }
+      question: { toolUseId: toolUseId || `pending:${sig}`, questions, answered: false, answers: [] }
     };
   }
 
@@ -986,44 +1051,84 @@ export class VoiceDaemon {
   //    plays by itself or waits for a tap. Of the rows synthesized this pass, only the NEWEST is sent to
   //    auto-play (replay=false); any older ones (a burst caught in one read) are cached without auto-play.
   private synthesizeReplies(turns: ProjectedTurn[]): void {
+    // The fresh-unit KEY for a PENDING wizard question is per-current-sub-question (`uuid#index`), so each
+    // sub-question reads aloud as the wizard advances; every other claude turn keys on its native uuid.
+    const currentIndex = (t: ProjectedTurn): number => t.question?.answers?.length ?? 0;
+    const unitKey = (t: ProjectedTurn): string =>
+      t.question && !t.question.answered && !t.question.aborted ? `${t.uuid}#${currentIndex(t)}` : t.uuid;
     if (!this.seeded) {
       this.seeded = true;
-      for (const t of turns) if (t.role === "claude") this.remember(this.seen, t.uuid, SEEN_UUID_CAP);
+      for (const t of turns) if (t.role === "claude") this.remember(this.seen, unitKey(t), SEEN_UUID_CAP);
       return; // baseline only — the tail shown on connect is tap-to-play, never auto-synthesized
     }
-    const fresh: ProjectedTurn[] = [];
+    const fresh: { key: string; text: string }[] = [];
     for (const t of turns) {
-      if (t.role !== "claude" || this.seen.has(t.uuid)) continue;
-      this.remember(this.seen, t.uuid, SEEN_UUID_CAP); // seen once, never reconsidered
+      if (t.role !== "claude") continue;
+      const key = unitKey(t);
+      if (this.seen.has(key)) continue;
+      this.remember(this.seen, key, SEEN_UUID_CAP); // seen once, never reconsidered
       if (t.interim && this.speakMode !== "all") continue; // steps auto-read only under "all"
-      // Never read an ANSWERED question aloud: the pending overlay already spoke it, and the transcript's
-      // answered version (a different uuid) flushes only on answer — speaking it would double-read.
+      // Never read an ANSWERED/aborted question aloud: the overlay already spoke each sub-question, and the
+      // transcript's answered version (a different uuid) flushes only on submit — speaking it would double-read.
       if (t.question?.answered) continue;
-      fresh.push(t);
+      if (t.question) {
+        // A pending wizard question: read ONLY the current sub-question (chrome-free), not the flat blob.
+        // Past the last sub-question the phone shows the confirm review — nothing left to read.
+        const idx = currentIndex(t);
+        if (idx >= t.question.questions.length) continue;
+        fresh.push({ key, text: questionSpeechOne(t.question.questions[idx]) });
+        continue;
+      }
+      fresh.push({ key, text: t.text });
     }
     const newest = fresh.length - 1;
-    fresh.forEach((t, i) => void this.speak(t.uuid, t.text, i !== newest));
+    fresh.forEach((u, i) => void this.speak(u.key, u.text, i !== newest));
   }
 
-  // Serve a row's audio to the phone: from the store, else synthesize it on demand (a step isn't
-  // pre-synthesized) by looking its text up in the current projection. A miss (row gone from the tail)
-  // returns a graceful error.
-  private async serveAudio(uuid: string): Promise<void> {
-    let audio = this.audio.get(uuid);
+  // The text to synthesize for a tap-to-play / replay requestId. A plain native uuid → that turn's text; a
+  // composite `uuid#index` → that wizard sub-question's chrome-free speech (the phone fetches each
+  // sub-question's audio by this key). Undefined if the row / sub-question is gone from the current tail.
+  private audioTextFor(requestId: string): string | undefined {
+    // The wizard's per-sub-question key is `${uuid}#${index}` with a NUMERIC suffix. Split on the LAST '#'
+    // and require a digit tail: the overlay uuid is a hash (no '#') and a native uuid has none, so this is
+    // unambiguous even if a sub-question's text/options contain '#'.
+    const hash = requestId.lastIndexOf("#");
+    if (hash >= 0 && /^\d+$/.test(requestId.slice(hash + 1))) {
+      const uuid = requestId.slice(0, hash);
+      const idx = Number.parseInt(requestId.slice(hash + 1), 10);
+      const q = this.projectedNow().find((t) => t.uuid === uuid)?.question?.questions[idx];
+      return q ? questionSpeechOne(q) : undefined;
+    }
+    // A bare uuid. A PENDING wizard question reads ONLY its current sub-question (chrome-free) — never the
+    // flattened all-at-once `.text` blob — so a play-on-land / tap on the bare turn matches the wizard.
+    const turn = this.projectedNow().find((t) => t.uuid === requestId);
+    const q = turn?.question;
+    if (q && !q.answered && !q.aborted) {
+      const idx = q.answers?.length ?? 0;
+      if (idx < q.questions.length) return questionSpeechOne(q.questions[idx]);
+    }
+    return turn?.text;
+  }
+
+  // Serve a row's audio to the phone: from the store, else synthesize it on demand (a step / a wizard
+  // sub-question isn't pre-synthesized) by looking its text up in the current projection. A miss (row gone
+  // from the tail) returns a graceful error.
+  private async serveAudio(requestId: string): Promise<void> {
+    let audio = this.audio.get(requestId);
     if (!audio) {
-      const turn = this.projectedNow().find((t) => t.uuid === uuid);
-      if (turn) {
+      const text = this.audioTextFor(requestId);
+      if (text !== undefined) {
         // Re-synthesizing on demand (tap-to-play / retry) — show the loading indicator while we do.
-        this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "pending" });
+        this.sendToBrowser({ type: "tts_status", requestId, state: "pending" });
         try {
           const fullBuffer = await synthesizeSpeechOpusStream(
             this.init.config,
-            capForSpeech(turn.text),
+            capForSpeech(text),
             undefined,
             () => {}
           );
           if (fullBuffer.length)
-            audio = this.storeAudio(uuid, {
+            audio = this.storeAudio(requestId, {
               audioBase64: fullBuffer.toString("base64"),
               mimeType: "audio/ogg"
             });
@@ -1031,15 +1136,15 @@ export class VoiceDaemon {
           // synth failed → mark the row retryable below
         }
         if (!audio) {
-          this.sendToBrowser({ type: "tts_status", requestId: uuid, state: "failed" });
+          this.sendToBrowser({ type: "tts_status", requestId, state: "failed" });
           return;
         }
       }
     }
     this.sendToBrowser(
       audio
-        ? { type: "tts_audio", requestId: uuid, replay: true, ...audio }
-        : { type: "error", requestId: uuid, message: "Audio for that reply is no longer available." }
+        ? { type: "tts_audio", requestId, replay: true, ...audio }
+        : { type: "error", requestId, message: "Audio for that reply is no longer available." }
     );
   }
 
@@ -1263,6 +1368,18 @@ function capForSpeech(text: string): string {
 
 function errText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// A short, stable, '#'-free id derived from a string (FNV-1a → base36). Used for the pending-question
+// overlay uuid so the per-sub-question audio key `${uuid}#${index}` stays unambiguous even when the question
+// text contains '#'. Deterministic, so the same content yields the same uuid across re-projections.
+function hashSig(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
 }
 
 // Add `id` to a bounded, insertion-ordered set; return true iff it was NEW (not already present). Past
