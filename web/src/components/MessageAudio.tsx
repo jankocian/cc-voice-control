@@ -9,6 +9,8 @@ export type AudioControls = {
   loadedId: string | null;
   position: number;
   duration: number;
+  // True when the active entry is paused (show the play icon instead of pause).
+  paused: boolean;
   playableIds: ReadonlySet<string>;
   // Per-reply audio lifecycle (pending = synthesizing, failed = retryable) for the loading/retry indicator.
   audioStatus: ReadonlyMap<string, "pending" | "failed">;
@@ -66,7 +68,7 @@ export function MessageAudio({ controls, requestId }: { controls: AudioControls;
   if (controls.playableIds.has(requestId)) {
     return (
       <InlineAudioPlayer
-        playing={controls.playingId === requestId}
+        playing={controls.playingId === requestId && !controls.paused}
         loaded={loaded}
         position={loaded ? controls.position : 0}
         duration={loaded ? controls.duration : 0}

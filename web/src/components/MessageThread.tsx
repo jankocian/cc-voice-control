@@ -73,7 +73,7 @@ export function MessageThread({
             <StepRow
               key={message.id}
               body={message.body}
-              playing={playback.playingId === message.requestId}
+              playing={playback.playingId === message.requestId && !playback.paused}
               loading={playback.pendingPlayId === message.requestId || stepStatus === "pending"}
               failed={stepStatus === "failed"}
               onPlay={() => playback.onPlay(message.requestId)}

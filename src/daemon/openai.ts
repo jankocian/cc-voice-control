@@ -158,12 +158,15 @@ export async function synthesizeSpeech(
   return { audioBase64: Buffer.concat(parts).toString("base64"), mimeType: "audio/mpeg" };
 }
 
-/** Stream a single OpenAI TTS call as raw OGG Opus bytes. Calls `onBytes` for each ~4 KB
+/** Stream a single OpenAI TTS call as raw AAC (ADTS) bytes. Calls `onBytes` for each ~4 KB
  *  chunk as it arrives from OpenAI, so the caller can forward audio to the phone before
  *  synthesis completes — cutting time-to-first-sound from ~15 s to ~1 s for long replies.
  *
+ *  AAC (not Opus) so the phone can play it through a native <audio> element via ManagedMediaSource:
+ *  iOS Safari MSE only accepts AAC, and the native element gives high-quality pitch-preserving speed.
+ *
  *  Returns the full concatenated buffer (for tap-to-play caching). Throws on any error. */
-export async function synthesizeSpeechOpusStream(
+export async function synthesizeSpeechAacStream(
   config: VoiceRemoteConfig,
   text: string,
   voiceOverride: string | undefined,
@@ -182,7 +185,7 @@ export async function synthesizeSpeechOpusStream(
       model: config.ttsModel,
       voice: voiceOverride ?? config.openaiVoice,
       input: text,
-      response_format: "opus",
+      response_format: "aac",
       ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {})
     })
   });

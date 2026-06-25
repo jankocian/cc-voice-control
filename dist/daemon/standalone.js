@@ -19423,7 +19423,7 @@ async function transcribeAudio(config2, audio, mimeType) {
   }
   return (await response.text()).trim();
 }
-async function synthesizeSpeechOpusStream(config2, text, voiceOverride, onBytes) {
+async function synthesizeSpeechAacStream(config2, text, voiceOverride, onBytes) {
   if (!text.trim())
     return Buffer.alloc(0);
   const response = await fetch(`${OPENAI_BASE}/audio/speech`, {
@@ -19436,7 +19436,7 @@ async function synthesizeSpeechOpusStream(config2, text, voiceOverride, onBytes)
       model: config2.ttsModel,
       voice: voiceOverride ?? config2.openaiVoice,
       input: text,
-      response_format: "opus",
+      response_format: "aac",
       ...config2.ttsInstructions ? { instructions: config2.ttsInstructions } : {}
     })
   });
@@ -20573,11 +20573,11 @@ class VoiceDaemon {
       if (text !== undefined) {
         this.sendToBrowser({ type: "tts_status", requestId, state: "pending" });
         try {
-          const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capForSpeech(text), undefined, () => {});
+          const fullBuffer = await synthesizeSpeechAacStream(this.init.config, capForSpeech(text), undefined, () => {});
           if (fullBuffer.length)
             audio = this.storeAudio(requestId, {
               audioBase64: fullBuffer.toString("base64"),
-              mimeType: "audio/ogg"
+              mimeType: "audio/aac"
             });
         } catch {}
         if (!audio) {
@@ -20608,14 +20608,14 @@ class VoiceDaemon {
     this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "pending" });
     const capped = capForSpeech(text);
     if (!replay) {
-      await this.speakStreamingOpus(uuid3, capped);
+      await this.speakStreamingAac(uuid3, capped);
       return;
     }
     try {
-      const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, capped, undefined, () => {});
+      const fullBuffer = await synthesizeSpeechAacStream(this.init.config, capped, undefined, () => {});
       if (!fullBuffer.length)
         return;
-      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/ogg" };
+      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/aac" };
       this.storeAudio(uuid3, speech);
       this.sendToBrowser({ type: "tts_audio", requestId: uuid3, replay, ...speech });
     } catch (error51) {
@@ -20624,25 +20624,25 @@ class VoiceDaemon {
       this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
     }
   }
-  async speakStreamingOpus(uuid3, text) {
+  async speakStreamingAac(uuid3, text) {
     try {
-      const fullBuffer = await synthesizeSpeechOpusStream(this.init.config, text, undefined, (chunk, seq) => {
+      const fullBuffer = await synthesizeSpeechAacStream(this.init.config, text, undefined, (chunk, seq) => {
         this.sendToBrowser({
           type: "tts_audio_chunk",
           requestId: uuid3,
           seq,
           audioBase64: chunk.toString("base64"),
-          mimeType: "audio/ogg"
+          mimeType: "audio/aac"
         });
       });
       if (!fullBuffer.length)
         return;
-      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/ogg" };
+      const speech = { audioBase64: fullBuffer.toString("base64"), mimeType: "audio/aac" };
       this.storeAudio(uuid3, speech);
       this.sendToBrowser({ type: "tts_audio", requestId: uuid3, replay: true, ...speech });
     } catch (error51) {
       const message = errText(error51);
-      console.error(`[tts] opus streaming failed for ${uuid3}: ${message}`);
+      console.error(`[tts] aac streaming failed for ${uuid3}: ${message}`);
       this.sendToBrowser({ type: "tts_status", requestId: uuid3, state: "failed" });
     }
   }
