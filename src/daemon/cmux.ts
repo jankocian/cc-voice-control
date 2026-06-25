@@ -125,24 +125,76 @@ export async function cmuxInterrupt(surface?: string): Promise<boolean> {
   return r.ok;
 }
 
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The picker's "type something" custom-answer row re-renders for EACH sub-question, a beat after the previous
+// Enter. Poll read-screen for it. "up" = found; "no-picker" = never appeared (dismissed/closed); "error" =
+// the pane can't be read. ponytail: fixed poll budget (~0.7 s); a slower render just reads as no-picker.
+const PICKER_POLLS = 6;
+const PICKER_POLL_MS = 120;
+async function waitForPicker(surface?: string): Promise<"up" | "no-picker" | "error"> {
+  for (let attempt = 0; attempt < PICKER_POLLS; attempt++) {
+    const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
+    if (!screen.ok) return "error";
+    if (/type something/i.test(screen.stdout)) return "up";
+    await delay(PICKER_POLL_MS);
+  }
+  return "no-picker";
+}
+
+// After the LAST sub-question's Enter, a MULTI-question picker lands on a "Submit answers" review screen
+// needing one more Enter ("Submit answers" is the default highlight) — verified live against the real picker.
+// Poll for that review and press Enter; return true once submitted. We KEEP polling through the brief
+// transition gap (the old question row clears a beat before the review renders) rather than giving up — a
+// premature return there would leave the answers un-submitted while the caller reports success. Returns false
+// only if the review never appears within the budget (then the caller fails loud, not a false "sent").
+async function submitReview(surface?: string): Promise<boolean> {
+  for (let attempt = 0; attempt < PICKER_POLLS; attempt++) {
+    const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
+    if (!screen.ok) return false; // can't read the pane — can't confirm the submit
+    if (/submit answers|ready to submit/i.test(screen.stdout))
+      return (await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok;
+    await delay(PICKER_POLL_MS); // still rendering toward the review — wait a beat, never give up early
+  }
+  return false; // the review never appeared
+}
+
 /**
- * Answer the interactive AskUserQuestion picker currently up in the pane with the user's spoken transcript as
- * the free-text CUSTOM answer. The picker focuses its "type something" free-text field when you press UP from
- * the default top selection (the list wraps, so UP lands on the custom-answer row), so the whole interaction
- * is just: UP → type → Enter. Deliberately LAYOUT-BLIND — no glyph parsing or row counting — which makes it
- * bulletproof regardless of how many options the question has or where the highlight sits. We first confirm
- * the picker is actually up (its "type something" row is on screen) so a stale call can never type into a
- * normal prompt. Returns: "sent" on success; "no-picker" when the picker ISN'T up (the transcript still shows
- * an unanswered question but it's already been dismissed) — the caller then treats the words as a normal
- * prompt, never losing them; "error" when the pane is unreachable or a keystroke fails.
+ * Answer the interactive AskUserQuestion picker with the user's spoken answers — ONE per sub-question, in
+ * order. The picker is a TAB BAR (one tab per sub-question + a Submit tab — verified live). For each question:
+ * pressing UP from the default selection focuses the "type something" free-text row (the option list wraps, so
+ * UP lands on it), where we type the custom answer; Enter ADVANCES to the next question's tab. After the last
+ * question, Enter lands on the "Submit answers" review, which submitReview() confirms with one final Enter (a
+ * SINGLE-question picker has no review — its one Enter submits). Deliberately LAYOUT-BLIND for the per-question
+ * steps — no glyph parsing or row counting — so it's robust to option counts and highlight position; between
+ * steps we re-confirm the "type something" row is back on screen (it re-renders per question), and we confirm
+ * the picker is up before the first keystroke so a stale call can never type into a normal prompt.
+ *
+ * Returns: "sent" once EVERY answer is delivered and submitted; "no-picker" when the picker isn't up at all
+ * (the question is already dismissed → the caller treats the words as a normal prompt, never losing them);
+ * "error" when the pane is unreachable, a keystroke fails, or the picker vanishes mid-way (a partial answer —
+ * surfaced loudly, never silently half-answered).
  */
-export async function cmuxAnswerQuestion(text: string, surface?: string): Promise<"sent" | "no-picker" | "error"> {
-  const screen = await runCmux(["read-screen", ...cmuxTarget(surface), "--lines", "40"]);
-  if (!screen.ok) return "error"; // couldn't read the pane — can't tell, don't gamble
-  if (!/type something/i.test(screen.stdout)) return "no-picker"; // picker isn't up → caller falls through to a prompt
-  if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok) return "error"; // UP selects the custom-answer field
-  if (!(await runCmux(["send", ...cmuxTarget(surface), "--", text])).ok) return "error";
-  return (await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok ? "sent" : "error";
+export async function cmuxAnswerQuestions(
+  answers: string[],
+  surface?: string
+): Promise<"sent" | "no-picker" | "error"> {
+  if (answers.length === 0) return "error";
+  for (let i = 0; i < answers.length; i++) {
+    const up = await waitForPicker(surface);
+    if (up === "error") return "error";
+    // Gone before the first answer → a stale/dismissed question (caller re-routes the words). Gone mid-way →
+    // a partial answer we can't complete: fail loud so the user finishes in the terminal, never half-submit.
+    if (up === "no-picker") return i === 0 ? "no-picker" : "error";
+    if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok) return "error"; // UP → custom-answer field
+    if (!(await runCmux(["send", ...cmuxTarget(surface), "--", answers[i]])).ok) return "error";
+    if (!(await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok) return "error"; // answers; advances tab
+  }
+  // A single-question picker submits on its own Enter (no review). A multi-question picker lands on the
+  // "Submit answers" review — drive that final Enter, and fail loud if we can't confirm it (so the caller
+  // never reports a false "sent" that would then be swallowed by the confirm idempotency latch).
+  if (answers.length === 1) return "sent";
+  return (await submitReview(surface)) ? "sent" : "error";
 }
 
 /**

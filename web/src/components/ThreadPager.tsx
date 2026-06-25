@@ -167,7 +167,7 @@ export function ThreadPager({
                   aria-hidden="true"
                   className="h-px w-full shrink-0"
                 />
-                <MessageThread messages={messages} playback={playback} />
+                <MessageThread messages={messages} playback={playback} live={isActive} />
               </div>
             </div>
           );

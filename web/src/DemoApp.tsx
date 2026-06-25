@@ -167,7 +167,9 @@ function PagerDemo() {
     pendingPlayId: null,
     onPlay: noop,
     onReplay: noop,
-    onSeek: noop
+    onSeek: noop,
+    onQuestionConfirm: noop,
+    onQuestionRedo: noop
   };
   return (
     <div className="flex h-full flex-col bg-canvas px-safe">

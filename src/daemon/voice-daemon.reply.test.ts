@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { aad, deriveKey, type EncBlob, openJson, sealJson } from "../shared/e2e.js";
-import { cmuxAnswerQuestion, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
+import { cmuxAnswerQuestions, cmuxInterrupt, cmuxSubmit } from "./cmux.js";
 import { synthesizeSpeechAacStream, transcribeAudio } from "./openai.js";
 import { TAIL_BYTES } from "./transcript-reader.js";
 import { VoiceDaemon } from "./voice-daemon.js";
@@ -32,7 +32,7 @@ vi.mock("./openai.js", () => ({
 vi.mock("./cmux.js", () => ({
   cmuxSubmit: vi.fn(async () => true),
   cmuxInterrupt: vi.fn(async () => true),
-  cmuxAnswerQuestion: vi.fn(async () => "sent"),
+  cmuxAnswerQuestions: vi.fn(async () => "sent"),
   cmuxHealth: vi.fn(async () => ({ socketUp: true, surfaceAlive: true })),
   cmuxSurfaceTitle: vi.fn(async () => undefined), // labels.ts imports this from the same module
   spawnWorkspace: vi.fn(async () => "surface:1")
@@ -84,8 +84,8 @@ const fillerRec = (uuid: string, bytes: number) =>
     timestamp: "2026-06-22T13:52:00.000Z",
     message: { role: "user", content: [{ type: "tool_result", content: "x".repeat(bytes) }] }
   });
-// An interactive AskUserQuestion turn (assistant record whose content is the tool_use). `opts.multiSelect`
-// makes it a question that can't be voice-answered (must be answered in the terminal).
+// An interactive AskUserQuestion turn (assistant record whose content is the tool_use), as it flushes to the
+// transcript once answered. While PENDING it lives only in the PreToolUse hook payload (the overlay).
 const questionRec = (uuid: string, ts: string, opts: { multiSelect?: boolean } = {}) =>
   rec({
     type: "assistant",
@@ -292,6 +292,21 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       await sleep(50);
     }
     return false;
+  }
+
+  // The most recent runtime state the daemon emitted in a session_status (idle / working / awaiting).
+  async function latestState(): Promise<string | undefined> {
+    let state: string | undefined;
+    for (const env of daemonOut as { channel?: string; threadId?: string; enc?: EncBlob }[]) {
+      if (env.channel !== "browser" || !env.enc) continue;
+      const event = await openJson<{ type?: string; state?: { state?: string } }>(
+        key,
+        env.enc,
+        aad("browser", env.threadId ?? "SURF")
+      );
+      if (event.type === "session_status" && event.state?.state) state = event.state.state;
+    }
+    return state;
   }
 
   it("surfaces an interactive question LIVE via the live watch, with NO further hook (picker blocks the pane)", async () => {
@@ -528,20 +543,24 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     daemon.stop();
   }, 20000);
 
-  it("reads an interactive question aloud and routes a spoken answer into the picker (not a new prompt)", async () => {
+  it("reads the question aloud, COLLECTS a spoken answer (no picker drive), then drives the picker on CONFIRM", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
-    writeFileSync(transcript, "");
-    const { daemon, port } = await driveUpToClose(transcript);
+    writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
+    const { daemon, port } = await startDaemon();
+    await post(port, "/turn-open", { transcriptPath: transcript, prompt: CANNED, permissionMode: "default" });
+    await sleep(80);
 
-    // Claude asks an interactive question → it's synthesized at once (a question is read like a final reply).
-    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
-    await post(port, "/turn-progress", { transcriptPath: transcript });
+    // The PENDING question arrives via the PreToolUse hook payload (the overlay) — it's read aloud at once.
+    const questions = [
+      { question: "Which?", header: "H", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }
+    ];
+    await post(port, "/turn-progress", { transcriptPath: transcript, question: { toolUseId: "q1", questions } });
     const spoken = await waitForSpeak();
     expect(spoken.some((t) => t.includes("Which?"))).toBe(true);
 
-    // The user speaks while the question is pending → the transcript goes into the picker's custom answer,
-    // NOT steered into the pane (cmuxAnswerQuestion, never cmuxSubmit).
-    vi.mocked(cmuxAnswerQuestion).mockClear();
+    // The user speaks while the question is pending → the answer is COLLECTED for the wizard, NOT typed into
+    // the picker yet and NOT steered as a prompt. The picker is driven only on CONFIRM.
+    vi.mocked(cmuxAnswerQuestions).mockClear();
     vi.mocked(cmuxSubmit).mockClear();
     await sendToDaemon?.({
       type: "submit_audio",
@@ -550,27 +569,29 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       mimeType: "audio/webm",
       mode: "steer"
     });
-    for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestion).mock.calls.length === 0; i++) await sleep(50);
-    expect(vi.mocked(cmuxAnswerQuestion)).toHaveBeenCalledWith("unused", "SURF"); // transcribeAudio mock → "unused"
-    expect(vi.mocked(cmuxSubmit)).not.toHaveBeenCalled();
-    // The answer lands as a tool_result (no user row), so the mic spinner is cleared by an accepted
-    // prompt_status carrying the answer text — else the mic stays locked.
-    expect(await waitForPromptStatus("unused", "accepted")).toBe(true);
+    await sleep(250);
+    expect(vi.mocked(cmuxAnswerQuestions)).not.toHaveBeenCalled(); // collected, not submitted
+    expect(vi.mocked(cmuxSubmit)).not.toHaveBeenCalled(); // not steered as a prompt either
+
+    // CONFIRM → the picker is driven with every collected answer ("unused" = the transcribeAudio mock).
+    await sendToDaemon?.({ type: "confirm_question", toolUseId: "q1" });
+    for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestions).mock.calls.length === 0; i++) await sleep(50);
+    expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(["unused"], "SURF");
 
     daemon.stop();
   }, 20000);
 
-  it("steers the answer into the pane when the picker is already gone (no-picker → never dropped)", async () => {
+  it("doesn't lose the words if the pending question vanished — a spoken answer with no overlay is steered", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
     writeFileSync(transcript, "");
     const { daemon, port } = await driveUpToClose(transcript);
 
-    // The transcript still shows an unanswered question, but the picker has already been dismissed.
+    // The transcript shows an unanswered question, but the daemon never got the PreToolUse overlay (a race /
+    // restart) — so there's nothing to collect into. The words must still reach the pane, never dropped.
     appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z"));
     await post(port, "/turn-progress", { transcriptPath: transcript });
     await sleep(150);
 
-    vi.mocked(cmuxAnswerQuestion).mockResolvedValueOnce("no-picker");
     await sendToDaemon?.({
       type: "submit_audio",
       requestId: "r",
@@ -633,26 +654,71 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     daemon.stop();
   }, 20000);
 
-  it("routes a multi-select question to the terminal instead of mis-answering it via the picker", async () => {
+  it("collects answers for a MULTI-question wizard one at a time, then submits them all on confirm (in order)", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
-    writeFileSync(transcript, "");
-    const { daemon, port } = await driveUpToClose(transcript);
+    writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
+    const { daemon, port } = await startDaemon();
+    await post(port, "/turn-open", { transcriptPath: transcript, prompt: CANNED, permissionMode: "default" });
+    await sleep(80);
 
-    // A multi-SELECT question: one free-text custom answer can't express multiple picks → answer in terminal.
-    appendFileSync(transcript, questionRec("MQ", "2026-06-22T13:54:00.000Z", { multiSelect: true }));
-    await post(port, "/turn-progress", { transcriptPath: transcript });
-    await sleep(200);
+    // Two sub-questions arrive in ONE AskUserQuestion via the PreToolUse overlay.
+    const questions = [
+      { question: "First?", options: [{ label: "A" }, { label: "B" }] },
+      { question: "Second?", options: [{ label: "C" }, { label: "D" }] }
+    ];
+    await post(port, "/turn-progress", { transcriptPath: transcript, question: { toolUseId: "mq", questions } });
+    await waitForSpeak();
 
-    vi.mocked(cmuxAnswerQuestion).mockClear();
+    vi.mocked(cmuxAnswerQuestions).mockClear();
+    // Answer the first, then the second — each is COLLECTED; the picker is not driven until confirm.
+    vi.mocked(transcribeAudio).mockResolvedValueOnce("answer one").mockResolvedValueOnce("answer two");
     await sendToDaemon?.({
       type: "submit_audio",
-      requestId: "r",
+      requestId: "a1",
       audioBase64: "QUFB",
       mimeType: "audio/webm",
       mode: "steer"
     });
-    await sleep(400);
-    expect(vi.mocked(cmuxAnswerQuestion)).not.toHaveBeenCalled(); // never routed to the picker
+    await sleep(200);
+    await sendToDaemon?.({
+      type: "submit_audio",
+      requestId: "a2",
+      audioBase64: "QUFB",
+      mimeType: "audio/webm",
+      mode: "steer"
+    });
+    await sleep(200);
+    expect(vi.mocked(cmuxAnswerQuestions)).not.toHaveBeenCalled(); // both collected, nothing submitted yet
+
+    // CONFIRM → the picker is driven with BOTH answers, in order.
+    await sendToDaemon?.({ type: "confirm_question", toolUseId: "mq" });
+    for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestions).mock.calls.length === 0; i++) await sleep(50);
+    expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(["answer one", "answer two"], "SURF");
+
+    daemon.stop();
+  }, 20000);
+
+  it("settles the lamp to IDLE after a question is Esc'd in the terminal (was stuck on 'working')", async () => {
+    const transcript = join(dataDir, "transcript.jsonl");
+    writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
+    const { daemon, port } = await startDaemon();
+    // A turn opens (the inject-gate's isBusy goes true) and a question appears (the pending overlay).
+    await post(port, "/turn-open", { transcriptPath: transcript, prompt: CANNED, permissionMode: "default" });
+    // Match questionRec's content (header H, A/B) so the overlay yields to the transcript record on flush.
+    const questions = [
+      { question: "Which?", header: "H", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }
+    ];
+    await post(port, "/turn-progress", { transcriptPath: transcript, question: { toolUseId: "q1", questions } });
+    await sleep(120);
+    expect(await latestState()).toBe("awaiting"); // blocked on the human
+
+    // The user presses Esc in the TERMINAL: Claude flushes the question record + a tool_result with NO answers
+    // map (a rejection). No Stop reaches the daemon, so only reconcileAbort can clear the stuck isBusy.
+    appendFileSync(transcript, questionRec("Q", "2026-06-22T13:54:00.000Z")); // tool_use id q1
+    appendFileSync(transcript, questionAnswerRec("AR", "2026-06-22T13:54:05.000Z", "q1")); // tool_result, no answers
+    await post(port, "/turn-progress", { transcriptPath: transcript });
+    await sleep(200);
+    expect(await latestState()).toBe("idle"); // aborted question concludes the turn AND clears the busy gate
 
     daemon.stop();
   }, 20000);

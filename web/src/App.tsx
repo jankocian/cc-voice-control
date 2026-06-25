@@ -503,7 +503,15 @@ export function App({ session }: { session: Session }) {
     pendingPlayId: playback.pendingPlayId,
     onPlay: playback.playEntry,
     onReplay: playback.replayEntry,
-    onSeek: playback.seekEntry
+    onSeek: playback.seekEntry,
+    // Question wizard: submit every collected answer, or step back one sub-question. Both target the active
+    // thread (only its card is interactive — see MessageThread `live`).
+    onQuestionConfirm: (toolUseId: string) => {
+      if (activeThreadId) sendDaemon(activeThreadId, { type: "confirm_question", toolUseId });
+    },
+    onQuestionRedo: (toolUseId: string) => {
+      if (activeThreadId) sendDaemon(activeThreadId, { type: "redo_answer", toolUseId });
+    }
   };
 
   // An off-screen slide shows ITS OWN thread's calm status (connection/runtime only), derived from that
