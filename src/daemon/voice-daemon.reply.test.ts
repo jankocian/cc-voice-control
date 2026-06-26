@@ -543,7 +543,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     daemon.stop();
   }, 20000);
 
-  it("reads the question aloud, COLLECTS a spoken answer (no picker drive), then drives the picker on CONFIRM", async () => {
+  it("reads the question aloud, then AUTO-SUBMITS the one spoken answer (no confirm tap)", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
     writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
     const { daemon, port } = await startDaemon();
@@ -558,8 +558,8 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     const spoken = await waitForSpeak();
     expect(spoken.some((t) => t.includes("Which?"))).toBe(true);
 
-    // The user speaks while the question is pending → the answer is COLLECTED for the wizard, NOT typed into
-    // the picker yet and NOT steered as a prompt. The picker is driven only on CONFIRM.
+    // The user speaks the (only) answer while the question is pending → it's collected AND, being the last
+    // sub-question, auto-submitted to the picker ("unused" = the transcribeAudio mock). No confirm event.
     vi.mocked(cmuxAnswerQuestions).mockClear();
     vi.mocked(cmuxSubmit).mockClear();
     await sendToDaemon?.({
@@ -569,14 +569,9 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       mimeType: "audio/webm",
       mode: "steer"
     });
-    await sleep(250);
-    expect(vi.mocked(cmuxAnswerQuestions)).not.toHaveBeenCalled(); // collected, not submitted
-    expect(vi.mocked(cmuxSubmit)).not.toHaveBeenCalled(); // not steered as a prompt either
-
-    // CONFIRM → the picker is driven with every collected answer ("unused" = the transcribeAudio mock).
-    await sendToDaemon?.({ type: "confirm_question", toolUseId: "q1" });
     for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestions).mock.calls.length === 0; i++) await sleep(50);
     expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(["unused"], "SURF");
+    expect(vi.mocked(cmuxSubmit)).not.toHaveBeenCalled(); // not steered as a prompt — it went to the picker
 
     daemon.stop();
   }, 20000);
@@ -654,7 +649,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     daemon.stop();
   }, 20000);
 
-  it("collects answers for a MULTI-question wizard one at a time, then submits them all on confirm (in order)", async () => {
+  it("collects a MULTI-question wizard one at a time, then AUTO-SUBMITS all answers once the last is spoken (in order)", async () => {
     const transcript = join(dataDir, "transcript.jsonl");
     writeFileSync(transcript, userRec("U", "2026-06-22T13:50:35.594Z", CANNED));
     const { daemon, port } = await startDaemon();
@@ -670,8 +665,8 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     await waitForSpeak();
 
     vi.mocked(cmuxAnswerQuestions).mockClear();
-    // Answer the first, then the second — each is COLLECTED; the picker is not driven until confirm.
     vi.mocked(transcribeAudio).mockResolvedValueOnce("answer one").mockResolvedValueOnce("answer two");
+    // First answer is COLLECTED only — not the last sub-question yet, so nothing is driven into the picker.
     await sendToDaemon?.({
       type: "submit_audio",
       requestId: "a1",
@@ -680,6 +675,9 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       mode: "steer"
     });
     await sleep(200);
+    expect(vi.mocked(cmuxAnswerQuestions)).not.toHaveBeenCalled(); // only one of two collected
+
+    // Second (last) answer → auto-submit drives the picker with BOTH answers, in order. No confirm event.
     await sendToDaemon?.({
       type: "submit_audio",
       requestId: "a2",
@@ -687,11 +685,6 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       mimeType: "audio/webm",
       mode: "steer"
     });
-    await sleep(200);
-    expect(vi.mocked(cmuxAnswerQuestions)).not.toHaveBeenCalled(); // both collected, nothing submitted yet
-
-    // CONFIRM → the picker is driven with BOTH answers, in order.
-    await sendToDaemon?.({ type: "confirm_question", toolUseId: "mq" });
     for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestions).mock.calls.length === 0; i++) await sleep(50);
     expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(["answer one", "answer two"], "SURF");
 

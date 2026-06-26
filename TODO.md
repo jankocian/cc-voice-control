@@ -1,8 +1,10 @@
 # voice-control — TODO
 
-Roadmap for the voice remote. The **phone is the primary surface** — every UI decision
-is mobile-first, minimal, and beautiful. Implementation constraint: never edit system
-config; the plugin must work unmodified.
+Roadmap for the voice remote. The **goal is hands-free Claude Code** — every decision
+optimizes for the fewest taps possible; we never add a question, confirmation, or step the
+remote could handle on its own. The **phone is the primary surface** — every UI decision is
+mobile-first, minimal, and beautiful. Implementation constraint: never edit system config;
+the plugin must work unmodified.
 
 ---
 
