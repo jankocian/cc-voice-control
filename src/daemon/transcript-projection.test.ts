@@ -488,10 +488,10 @@ describe("projectTurns — interactive AskUserQuestion", () => {
     );
   });
 
-  it("questionSpeech letters the options, reads their descriptions, and omits Claude Code's appended rows", () => {
+  it("questionSpeech numbers the options, reads their descriptions, and omits Claude Code's appended rows", () => {
     const spoken = questionSpeech(Q);
-    expect(spoken).toContain("A: Mixing, over music"); // label AND description read aloud (user can't see the screen)
-    expect(spoken).toContain("B: Pause"); // no description → label only, no trailing comma
+    expect(spoken).toContain("1: Mixing, over music"); // 1-based number + label AND description (user can't see the screen)
+    expect(spoken).toContain("2: Pause"); // no description → label only, no trailing comma
     expect(spoken).not.toContain("Type something");
   });
 });

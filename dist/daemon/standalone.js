@@ -19246,6 +19246,10 @@ async function submitReview(surface) {
   }
   return false;
 }
+async function commitAndAdvance(multiSelect, surface) {
+  const key = multiSelect ? "ctrl+enter" : "enter";
+  return (await runCmux(["send-key", ...cmuxTarget(surface), key])).ok;
+}
 async function cmuxAnswerQuestions(answers, surface) {
   if (answers.length === 0)
     return "error";
@@ -19257,12 +19261,13 @@ async function cmuxAnswerQuestions(answers, surface) {
       return i === 0 ? "no-picker" : "error";
     if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok)
       return "error";
-    if (!(await runCmux(["send", ...cmuxTarget(surface), "--", answers[i]])).ok)
+    if (!(await runCmux(["send", ...cmuxTarget(surface), "--", answers[i].text])).ok)
       return "error";
-    if (!(await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok)
+    if (!await commitAndAdvance(answers[i].multiSelect, surface))
       return "error";
   }
-  if (answers.length === 1)
+  const hasReview = answers.length > 1 || answers[0].multiSelect;
+  if (!hasReview)
     return "sent";
   return await submitReview(surface) ? "sent" : "error";
 }
@@ -19618,12 +19623,12 @@ function toolResultKinds(records) {
 }
 function questionSpeechOne(q) {
   const lead = q.header ? `${q.header}. ${q.question}` : q.question;
-  const opts = q.options.map((o) => o.description ? `${o.label}, ${o.description}` : o.label).join(". ");
+  const opts = q.options.map((o, i) => `${i + 1}. ${o.description ? `${o.label}, ${o.description}` : o.label}`).join(". ");
   return opts ? `${lead}. ${opts}.` : lead;
 }
 function questionSpeech(questions) {
   const one = (q) => {
-    const opts = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}${o.description ? `, ${o.description}` : ""}`).join(". ");
+    const opts = q.options.map((o, i) => `${i + 1}: ${o.label}${o.description ? `, ${o.description}` : ""}`).join(". ");
     return opts ? `${q.question} Options — ${opts}.` : q.question;
   };
   if (questions.length === 1)
@@ -20357,9 +20362,10 @@ class VoiceDaemon {
     if (answers.length < q.questions.length || this.answeringQuestion)
       return;
     this.answeringQuestion = true;
+    const picks = answers.map((text, i) => ({ text, multiSelect: !!q.questions[i]?.multiSelect }));
     let result;
     try {
-      result = await cmuxAnswerQuestions(answers, this.init.surface);
+      result = await cmuxAnswerQuestions(picks, this.init.surface);
     } finally {
       this.answeringQuestion = false;
     }

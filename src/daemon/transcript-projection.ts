@@ -212,26 +212,27 @@ function toolResultKinds(records: TranscriptRecord[]): { resulted: Set<string>; 
 }
 
 // A spoken/displayed rendering of an interactive question, for TTS and the non-card text fallback. Options
-// are lettered (A, B, …) — we read them out; the user answers freely (their transcript becomes the custom
-// answer). Claude Code appends its own "Type something"/"Chat about this" rows at render time; those aren't
-// in the transcript, so we never read them.
+// are NUMBERED (1, 2, …) — we read the number then the option, so a listener can answer by number, matching the
+// 1-based list the phone card and the terminal picker both show. The user answers freely (their transcript
+// becomes the custom answer). Claude Code appends its own "Type something"/"Chat about this" rows at render
+// time; those aren't in the transcript, so we never read them.
 // A spoken rendering of ONE sub-question for the sequential wizard — the question (with its header for
-// context) then each option, read plainly. Deliberately CHROME-FREE: no "Claude is asking", no "Question N",
-// no "Options" — only the content Claude wrote, so it reads in whatever language the conversation is in (the
-// wizard adds nothing of its own to translate). The card shows the lettered options; the user answers freely.
+// context) then each numbered option, read plainly. Deliberately CHROME-FREE: no "Claude is asking", no
+// "Question N", no "Options" word — only the content Claude wrote plus bare numerals (language-neutral), so it
+// reads in whatever language the conversation is in (the wizard adds nothing of its own to translate).
 export function questionSpeechOne(q: Question): string {
   const lead = q.header ? `${q.header}. ${q.question}` : q.question;
-  const opts = q.options.map((o) => (o.description ? `${o.label}, ${o.description}` : o.label)).join(". ");
+  const opts = q.options
+    .map((o, i) => `${i + 1}. ${o.description ? `${o.label}, ${o.description}` : o.label}`)
+    .join(". ");
   return opts ? `${lead}. ${opts}.` : lead;
 }
 
 export function questionSpeech(questions: Question[]): string {
   const one = (q: Question) => {
-    // Read each option's label AND its description (when present) — the user usually can't see the screen, so
-    // the description is the context they need to choose.
-    const opts = q.options
-      .map((o, i) => `${String.fromCharCode(65 + i)}: ${o.label}${o.description ? `, ${o.description}` : ""}`)
-      .join(". ");
+    // Read each option's NUMBER, label, AND description (when present) — the user usually can't see the screen,
+    // so the number lets them answer "option two" and the description is the context they need to choose.
+    const opts = q.options.map((o, i) => `${i + 1}: ${o.label}${o.description ? `, ${o.description}` : ""}`).join(". ");
     return opts ? `${q.question} Options — ${opts}.` : q.question;
   };
   if (questions.length === 1) return `Claude is asking: ${one(questions[0])}`;

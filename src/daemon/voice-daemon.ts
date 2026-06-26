@@ -806,9 +806,12 @@ export class VoiceDaemon {
     const answers = q.answers ?? [];
     if (answers.length < q.questions.length || this.answeringQuestion) return; // not all answered, or in flight
     this.answeringQuestion = true;
+    // Pair each spoken answer with its sub-question's multiSelect flag — the picker commits/advances the two
+    // differently (a multiSelect tab needs an extra Ctrl+Enter to leave; see cmuxAnswerQuestions).
+    const picks = answers.map((text, i) => ({ text, multiSelect: !!q.questions[i]?.multiSelect }));
     let result: "sent" | "no-picker" | "error";
     try {
-      result = await cmuxAnswerQuestions(answers, this.init.surface);
+      result = await cmuxAnswerQuestions(picks, this.init.surface);
     } finally {
       this.answeringQuestion = false;
     }

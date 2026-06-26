@@ -159,16 +159,33 @@ async function submitReview(surface?: string): Promise<boolean> {
   return false; // the review never appeared
 }
 
+// One spoken answer plus whether its sub-question is multiSelect — the picker commits/advances differently for
+// the two (see commitAndAdvance), so the caller must tell us which each answer is.
+export type PickerAnswer = { text: string; multiSelect: boolean };
+
+// Leave this sub-question's tab once the custom answer is typed on the "Type something" row.
+// MultiSelect: typing the answer ALREADY toggled that row's checkbox on and committed the text, so Ctrl+Enter
+// submits the question directly (advancing to the next tab, or to the review on the last one). A plain Enter
+// here would toggle the checkbox back OFF — dropping the answer — which is exactly what used to hang the picker
+// on a multiSelect question. Single-select has no checkbox: one Enter on the row commits the typed answer AND
+// advances. (Both sequences verified live against the Claude Code 2.1.x picker.)
+async function commitAndAdvance(multiSelect: boolean, surface?: string): Promise<boolean> {
+  const key = multiSelect ? "ctrl+enter" : "enter";
+  return (await runCmux(["send-key", ...cmuxTarget(surface), key])).ok;
+}
+
 /**
  * Answer the interactive AskUserQuestion picker with the user's spoken answers — ONE per sub-question, in
  * order. The picker is a TAB BAR (one tab per sub-question + a Submit tab — verified live). For each question:
- * pressing UP from the default selection focuses the "type something" free-text row (the option list wraps, so
- * UP lands on it), where we type the custom answer; Enter ADVANCES to the next question's tab. After the last
- * question, Enter lands on the "Submit answers" review, which submitReview() confirms with one final Enter (a
- * SINGLE-question picker has no review — its one Enter submits). Deliberately LAYOUT-BLIND for the per-question
- * steps — no glyph parsing or row counting — so it's robust to option counts and highlight position; between
- * steps we re-confirm the "type something" row is back on screen (it re-renders per question), and we confirm
- * the picker is up before the first keystroke so a stale call can never type into a normal prompt.
+ * pressing UP from the default selection focuses the "Type something" free-text row (the option list wraps, so
+ * UP lands on it), where we type the custom answer; commitAndAdvance() then leaves the tab (Enter for
+ * single-select; Ctrl+Enter for multiSelect — see that helper). After the last question a review screen
+ * ("Submit answers") appears for ANY multi-question picker AND for a lone multiSelect question; submitReview()
+ * confirms it with one final Enter. Only a lone SINGLE-select question has no review (its selection submits the
+ * whole tool). Deliberately LAYOUT-BLIND for the per-question steps — no glyph parsing or row counting — so it's
+ * robust to option counts and highlight position; between steps we re-confirm the "Type something" row is back
+ * on screen (it re-renders per question), and we confirm the picker is up before the first keystroke so a stale
+ * call can never type into a normal prompt.
  *
  * Returns: "sent" once EVERY answer is delivered and submitted; "no-picker" when the picker isn't up at all
  * (the question is already dismissed → the caller treats the words as a normal prompt, never losing them);
@@ -176,7 +193,7 @@ async function submitReview(surface?: string): Promise<boolean> {
  * surfaced loudly, never silently half-answered).
  */
 export async function cmuxAnswerQuestions(
-  answers: string[],
+  answers: PickerAnswer[],
   surface?: string
 ): Promise<"sent" | "no-picker" | "error"> {
   if (answers.length === 0) return "error";
@@ -187,13 +204,14 @@ export async function cmuxAnswerQuestions(
     // a partial answer we can't complete: fail loud so the user finishes in the terminal, never half-submit.
     if (up === "no-picker") return i === 0 ? "no-picker" : "error";
     if (!(await runCmux(["send-key", ...cmuxTarget(surface), "up"])).ok) return "error"; // UP → custom-answer field
-    if (!(await runCmux(["send", ...cmuxTarget(surface), "--", answers[i]])).ok) return "error";
-    if (!(await runCmux(["send-key", ...cmuxTarget(surface), "enter"])).ok) return "error"; // answers; advances tab
+    if (!(await runCmux(["send", ...cmuxTarget(surface), "--", answers[i].text])).ok) return "error";
+    if (!(await commitAndAdvance(answers[i].multiSelect, surface))) return "error";
   }
-  // A single-question picker submits on its own Enter (no review). A multi-question picker lands on the
-  // "Submit answers" review — drive that final Enter, and fail loud if we can't confirm it (so the caller
-  // never reports a false "sent" that would then be swallowed by the confirm idempotency latch).
-  if (answers.length === 1) return "sent";
+  // The review screen appears for any multi-question picker AND for a lone multiSelect question — drive its
+  // final Enter, failing loud if we can't confirm it (so the caller never reports a false "sent" that would
+  // then be swallowed by the confirm idempotency latch). Only a lone single-select question has no review.
+  const hasReview = answers.length > 1 || answers[0].multiSelect;
+  if (!hasReview) return "sent";
   return (await submitReview(surface)) ? "sent" : "error";
 }
 

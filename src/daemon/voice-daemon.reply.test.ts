@@ -570,7 +570,7 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       mode: "steer"
     });
     for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestions).mock.calls.length === 0; i++) await sleep(50);
-    expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(["unused"], "SURF");
+    expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith([{ text: "unused", multiSelect: false }], "SURF");
     expect(vi.mocked(cmuxSubmit)).not.toHaveBeenCalled(); // not steered as a prompt — it went to the picker
 
     daemon.stop();
@@ -656,10 +656,11 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
     await post(port, "/turn-open", { transcriptPath: transcript, prompt: CANNED, permissionMode: "default" });
     await sleep(80);
 
-    // Two sub-questions arrive in ONE AskUserQuestion via the PreToolUse overlay.
+    // Two sub-questions arrive in ONE AskUserQuestion via the PreToolUse overlay. The second is multiSelect, so
+    // its per-answer flag must flow through to the picker driver (which needs the extra Ctrl+Enter to advance).
     const questions = [
       { question: "First?", options: [{ label: "A" }, { label: "B" }] },
-      { question: "Second?", options: [{ label: "C" }, { label: "D" }] }
+      { question: "Second?", multiSelect: true, options: [{ label: "C" }, { label: "D" }] }
     ];
     await post(port, "/turn-progress", { transcriptPath: transcript, question: { toolUseId: "mq", questions } });
     await waitForSpeak();
@@ -686,7 +687,13 @@ describe("voice reply is spoken when the answer flushes late (extended-thinking 
       mode: "steer"
     });
     for (let i = 0; i < 60 && vi.mocked(cmuxAnswerQuestions).mock.calls.length === 0; i++) await sleep(50);
-    expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(["answer one", "answer two"], "SURF");
+    expect(vi.mocked(cmuxAnswerQuestions)).toHaveBeenCalledWith(
+      [
+        { text: "answer one", multiSelect: false },
+        { text: "answer two", multiSelect: true }
+      ],
+      "SURF"
+    );
 
     daemon.stop();
   }, 20000);

@@ -85,9 +85,10 @@ function Shell({ children, dim }: { children: React.ReactNode; dim?: boolean }) 
   );
 }
 
-// One question's header + prompt + lettered options (the options are shown so you know your choices; you
-// answer by voice — the spoken transcript becomes that sub-question's custom answer). `trailing` rides on the
-// header (FOCUS) row, aligned right — the active sub-question uses it for the progress dots.
+// One question's header + prompt + numbered options (1-based, matching the terminal picker and the spoken
+// read-out; the options are shown so you know your choices — you answer by voice, and the spoken transcript
+// becomes that sub-question's custom answer). `trailing` rides on the header (FOCUS) row, aligned right — the
+// active sub-question uses it for the progress dots.
 function QuestionText({ q, trailing }: { q: Question; trailing?: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -102,7 +103,7 @@ function QuestionText({ q, trailing }: { q: Question; trailing?: React.ReactNode
         <ol className="mt-0.5 flex flex-col gap-1">
           {q.options.map((o, oi) => (
             <li key={o.label} className="flex gap-2 text-[14px] leading-snug text-ink">
-              <span className="font-semibold text-violet-ink">{String.fromCharCode(65 + oi)}</span>
+              <span className="font-semibold text-violet-ink">{oi + 1}</span>
               <span>
                 {o.label}
                 {o.description && <span className="text-ink-faint"> — {o.description}</span>}
