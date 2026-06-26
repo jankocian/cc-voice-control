@@ -263,9 +263,74 @@ describe("isPaneWorking — working lamp derived from the transcript, never coun
     expect(isPaneWorking([turn("AB", "user"), turn("R", "claude")])).toBe(false);
   });
 
+  it("idle when the newest user turn was interrupted (concluded), even mid-tool-call with no reply", () => {
+    // Phone stop / terminal Esc concludes the turn — no final reply ever comes. Pre-fix the transcript-derived
+    // lamp stuck on "working" forever, since it only settled on a terminal assistant reply (which never lands).
+    expect(isPaneWorking([{ ...turn("u", "user"), concluded: true }, turn("s1", "claude", true)])).toBe(false);
+  });
+
   it("idle with no user turn at all", () => {
     expect(isPaneWorking([turn("a", "claude")])).toBe(false);
     expect(isPaneWorking([])).toBe(false);
+  });
+});
+
+describe("projectTurns — an interrupted turn concludes the working lamp (Esc / phone stop)", () => {
+  // A stop marker as Claude Code writes it: a user-role record with `interruptedMessageId` (the killed
+  // assistant message) and the bracket text, NO promptSource. Verified against a live transcript.
+  const interrupt = (uuid: string, ts: string, msgId = "msg_killed", extra = {}) =>
+    user(uuid, ts, [{ type: "text", text: "[Request interrupted by user for tool use]" }], {
+      interruptedMessageId: msgId,
+      ...extra
+    });
+
+  it("settles to idle when the running turn is interrupted mid-tool-call with no reply after it", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-26T12:00:00.000Z", "go do a big thing", { promptSource: "typed" }),
+      asst("s1", "2026-06-26T12:00:05.000Z", text("On it — searching…"), "tool_use"), // interim step, no reply
+      interrupt("int", "2026-06-26T12:00:09.000Z")
+    ]);
+    // The stop marker is NOT its own row (it's chrome, not conversation)…
+    expect(turns.map((t) => t.uuid)).toEqual(["u1", "s1"]);
+    // …but it concluded the user turn, so the lamp is idle even though no terminal assistant reply ever lands.
+    expect(turns.find((t) => t.uuid === "u1")?.concluded).toBe(true);
+    expect(isPaneWorking(turns)).toBe(false);
+  });
+
+  it("goes back to working when a NEW prompt follows the interrupt (only the stopped turn is concluded)", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-26T12:00:00.000Z", "first thing", { promptSource: "typed" }),
+      asst("s1", "2026-06-26T12:00:05.000Z", text("working…"), "tool_use"),
+      interrupt("int", "2026-06-26T12:00:09.000Z"),
+      user("u2", "2026-06-26T12:00:20.000Z", "actually do this instead", { promptSource: "typed" })
+    ]);
+    expect(turns.find((t) => t.uuid === "u1")?.concluded).toBe(true); // the stopped turn
+    expect(turns.find((t) => t.uuid === "u2")?.concluded).toBeUndefined(); // the fresh turn is live
+    expect(isPaneWorking(turns)).toBe(true); // newest user turn is awaiting its reply → working
+  });
+
+  it("recognises the interrupt by its bracket text too, when the structural field is absent", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-26T12:00:00.000Z", "go", { promptSource: "typed" }),
+      asst("s1", "2026-06-26T12:00:05.000Z", text("working…"), "tool_use"),
+      // No interruptedMessageId, no promptSource — fall back to the marker text (a real prompt is `typed`).
+      user("int", "2026-06-26T12:00:09.000Z", [{ type: "text", text: "[Request interrupted by user]" }])
+    ]);
+    expect(turns.find((t) => t.uuid === "u1")?.concluded).toBe(true);
+    expect(isPaneWorking(turns)).toBe(false);
+  });
+
+  it("does not mistake a real typed message for a stop marker", () => {
+    const turns = projectTurns([
+      user("u1", "2026-06-26T12:00:00.000Z", "go", { promptSource: "typed" }),
+      asst("s1", "2026-06-26T12:00:05.000Z", text("working…"), "tool_use"),
+      user("u2", "2026-06-26T12:00:09.000Z", "[Request interrupted by user] — just kidding, keep going", {
+        promptSource: "typed"
+      })
+    ]);
+    expect(turns.find((t) => t.uuid === "u1")?.concluded).toBeUndefined(); // not concluded by a real prompt
+    expect(turns.map((t) => t.uuid)).toContain("u2"); // it's a real turn, shown
+    expect(isPaneWorking(turns)).toBe(true); // a fresh real prompt → working
   });
 });
 

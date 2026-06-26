@@ -219,6 +219,9 @@ export class VoiceDaemon {
   // the user Escs a question in the TERMINAL (not via the phone's stop_task), the daemon never ran the Esc,
   // so the inject-gate's `isBusy` can stay set; this lets us clear it exactly once when the abort flushes.
   private lastReconciledAbort?: string;
+  // The uuid of the last INTERRUPTED user turn we reconciled the coordinator for (see reconcileInterrupt) —
+  // the terminal-Esc counterpart of lastReconciledAbort for an ordinary (non-question) turn.
+  private lastReconciledInterrupt?: string;
   // The toolUseId of a question whose answers we just submitted to the picker, but whose answer hasn't
   // flushed to the transcript yet — so a racing repeat submit in that window is ignored (see submitQuestion).
   private submittedToolUseId?: string;
@@ -770,6 +773,24 @@ export class VoiceDaemon {
     this.turns.turnClosed();
   }
 
+  // The terminal-Esc counterpart of reconcileAbort for an ORDINARY turn. A turn interrupted in the terminal
+  // flushes a `concluded` user turn (see projectTurns) but delivers no Stop to the daemon, so the inject-gate's
+  // `isBusy` stays set from turnOpened and pins the lamp "working" even though isPaneWorking has settled
+  // (computeState ORs isBusy). Close the gate once per interrupted turn so computeState reaches idle. The PHONE
+  // stop path already cleared it via turns.interrupt(); this only fires for the terminal path. Idempotent with
+  // a real Stop (turnClosed just re-floors to idle).
+  private reconcileInterrupt(turns: ProjectedTurn[]): void {
+    let concluded: string | undefined;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].role !== "user") continue;
+      if (turns[i].concluded) concluded = turns[i].uuid;
+      break; // only the newest user turn matters — an older interrupted one is already-resolved history
+    }
+    if (!concluded || concluded === this.lastReconciledInterrupt) return;
+    this.lastReconciledInterrupt = concluded;
+    this.turns.turnClosed();
+  }
+
   // Collect one spoken answer for the SEQUENTIAL question wizard. The daemon holds the growing answers on the
   // pending overlay, then AUTO-SUBMITS the moment the last sub-question is answered — no confirm tap, so the
   // wizard is fully hands-free. Pushes the next answer; the `else` only fires if a spoken answer races in after
@@ -949,6 +970,7 @@ export class VoiceDaemon {
     // A question Esc'd in the TERMINAL flushes as an aborted question; release the inject-gate (the daemon
     // didn't run that Esc, so isBusy can be stuck) BEFORE computing state, so the lamp settles to idle.
     this.reconcileAbort(turns);
+    this.reconcileInterrupt(turns);
     // The start-skill's QR/URL announcement is a real terminal reply: it must settle the working lamp (so
     // computeState below gets the FULL `turns`), but its QR/URL must never be shown or spoken — so it's
     // dropped from the displayed + synthesized set ONLY. Dropping it from the lamp's input is what used to
