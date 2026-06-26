@@ -3,6 +3,11 @@
 Voice-control your **real interactive Claude Code session** from your phone — no
 turn-hijack, no API billing, on your normal subscription.
 
+**The point is hands-free.** Every interaction is designed to need the fewest taps
+possible: replies are spoken back, the mic re-opens after each one (auto-respond), and
+interactive questions are read aloud, answered by voice, and submitted on their own — no
+confirmations, no extra steps. If the remote can do it for you, it does.
+
 You speak on a push-to-talk web page; a local daemon transcribes it (OpenAI
 speech-to-text) and **types it into your live Claude Code pane via the cmux CLI**,
 so it lands as a genuine user message and composes with skills, subagents, and
@@ -71,6 +76,15 @@ daemon  ── ③ OpenAI TTS ──►  bridge ──►  phone speaks the repl
   `/voice-control:stop` (or stopping the task) tears it down.
 - **Billing**: the daemon never spawns a model — Claude runs in your interactive
   session, so usage counts against your Claude plan, not the API.
+
+### Interactive questions (hands-free)
+
+When Claude calls `AskUserQuestion`, the phone shows a **sequential voice wizard** — one
+sub-question at a time, read aloud. With auto-respond on, the **mic opens by itself** when
+each question finishes reading, so you just answer; your spoken reply becomes that
+question's answer and the wizard advances. The **last answer auto-submits** — there is no
+confirm tap. The filled-out wrap-up stays in history as the record of what you chose. The
+whole exchange is voice-only by design: no tap-to-select, no confirmation step.
 
 ## Security (what to check before you trust this)
 

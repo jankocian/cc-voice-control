@@ -4,26 +4,14 @@ import { QuestionCard } from "@/components/QuestionCard";
 import { StepRow } from "@/components/StepRow";
 import type { Message } from "@/lib/messages";
 
-// The audio surface (shared by messages + the question wizard) plus the wizard's own actions: CONFIRM submits
-// every collected answer, REDO steps back one sub-question. Both act on the active thread (App wires them).
-export type ThreadPlayback = AudioControls & {
-  onQuestionConfirm: (toolUseId: string) => void;
-  onQuestionRedo: (toolUseId: string) => void;
-};
+// The audio surface, shared by messages + the question wizard. The wizard has no actions of its own — it's
+// one-way and hands-free: each sub-question is answered by voice and the last answer auto-submits.
+export type ThreadPlayback = AudioControls;
 
 // The chat thread. `messages` are newest-first and render in that order, so the
 // latest turn sits at the top, directly under the hero. Agent rows with attached
-// audio embed the inline player inside the lavender bubble. `live` = this is the
-// active thread, so the question wizard's controls are actionable (the mic is shared).
-export function MessageThread({
-  messages,
-  playback,
-  live
-}: {
-  messages: Message[];
-  playback: ThreadPlayback;
-  live: boolean;
-}) {
+// audio embed the inline player inside the lavender bubble.
+export function MessageThread({ messages, playback }: { messages: Message[]; playback: ThreadPlayback }) {
   if (messages.length === 0) {
     return (
       <div className="flex flex-col items-center gap-1 px-6 py-10 text-center">
@@ -50,19 +38,11 @@ export function MessageThread({
           );
         }
 
-        // An interactive question: the sequential voice wizard (one sub-question at a time, then confirm).
+        // An interactive question: the sequential voice wizard (one sub-question at a time, auto-submits).
         const question = message.question;
         if (question) {
           return (
-            <QuestionCard
-              key={message.id}
-              question={question}
-              requestId={message.requestId}
-              live={live}
-              controls={playback}
-              onConfirm={() => playback.onQuestionConfirm(question.toolUseId)}
-              onRedo={() => playback.onQuestionRedo(question.toolUseId)}
-            />
+            <QuestionCard key={message.id} question={question} requestId={message.requestId} controls={playback} />
           );
         }
 

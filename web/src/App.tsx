@@ -109,14 +109,25 @@ export function App({ session }: { session: Session }) {
   // of autoplay/auto-follow). Skip if already recording/sending, only fire for a real final reply (never an
   // interim step), and only when it's the latest turn — replaying an older reply has nothing live to answer.
   // Reads `pagerThreadsRef` assigned below — resolved at call time.
-  const onAutoReplyFinished = useCallback((requestId: string) => {
+  const onAutoReplyFinished = useCallback((finishedId: string) => {
     if (!autoRespondRef.current || recordingRef.current || transcribingRef.current) return;
     const msgs = pagerThreadsRef.current.find((p) => p.threadId === activeThreadIdRef.current)?.messages ?? [];
-    const msg = msgs.find((m) => m.requestId === requestId);
+    // A question's current sub-question reads aloud under a composite id (`${uuid}#${index}`). When it
+    // finishes, open the mic so the user answers the wizard hands-free — but only for the sub-question
+    // currently awaiting an answer (index === answers collected so far), never a replay of an earlier one.
+    const hash = finishedId.lastIndexOf("#");
+    if (hash > 0) {
+      const q = msgs.find((m) => m.requestId === finishedId.slice(0, hash))?.question;
+      if (q && !q.answered && !q.aborted && (q.answers?.length ?? 0) === Number(finishedId.slice(hash + 1))) {
+        startRecordingRef.current();
+      }
+      return;
+    }
+    const msg = msgs.find((m) => m.requestId === finishedId);
     if (msg?.kind !== "claude" || msg.interim) return;
     // Only continue the conversation when this reply is the newest turn in the thread (msgs is newest-first).
     // Replaying an older reply shouldn't open the mic — there's nothing live to answer.
-    if (msgs[0]?.requestId !== requestId) return;
+    if (msgs[0]?.requestId !== finishedId) return;
     startRecordingRef.current();
   }, []);
 
@@ -503,15 +514,7 @@ export function App({ session }: { session: Session }) {
     pendingPlayId: playback.pendingPlayId,
     onPlay: playback.playEntry,
     onReplay: playback.replayEntry,
-    onSeek: playback.seekEntry,
-    // Question wizard: submit every collected answer, or step back one sub-question. Both target the active
-    // thread (only its card is interactive — see MessageThread `live`).
-    onQuestionConfirm: (toolUseId: string) => {
-      if (activeThreadId) sendDaemon(activeThreadId, { type: "confirm_question", toolUseId });
-    },
-    onQuestionRedo: (toolUseId: string) => {
-      if (activeThreadId) sendDaemon(activeThreadId, { type: "redo_answer", toolUseId });
-    }
+    onSeek: playback.seekEntry
   };
 
   // An off-screen slide shows ITS OWN thread's calm status (connection/runtime only), derived from that

@@ -206,9 +206,9 @@ export class VoiceDaemon {
   private syncDebounce?: ReturnType<typeof setTimeout>;
   private rearmTimer?: ReturnType<typeof setTimeout>;
   private lastHistorySig = "";
-  // True while the wizard's collected answers are being driven into the AskUserQuestion picker (CONFIRM), so
-  // a second confirm tap can't re-drive the picker before the answer flushes to the transcript. Per-answer
-  // collection does NOT take this latch — only confirmQuestion does.
+  // True while the wizard's collected answers are being driven into the AskUserQuestion picker, so a racing
+  // re-speak can't re-drive the picker before the answer flushes to the transcript. Per-answer collection does
+  // NOT take this latch — only submitQuestion does.
   private answeringQuestion = false;
   // The PENDING interactive question, surfaced from the PreToolUse hook because Claude does NOT write the
   // AskUserQuestion record to the transcript until it's answered — so the projection alone can't show it while
@@ -220,7 +220,7 @@ export class VoiceDaemon {
   // so the inject-gate's `isBusy` can stay set; this lets us clear it exactly once when the abort flushes.
   private lastReconciledAbort?: string;
   // The toolUseId of a question whose answers we just submitted to the picker, but whose answer hasn't
-  // flushed to the transcript yet — so a repeat confirm in that window is ignored (see confirmQuestion).
+  // flushed to the transcript yet — so a racing repeat submit in that window is ignored (see submitQuestion).
   private submittedToolUseId?: string;
   // The phone's autoplay preference for VOICE turns: "off" speaks nothing, "final" speaks just the final
   // reply (default — the prior behaviour), "all" also speaks each interim step. Tap-to-play works in every
@@ -639,14 +639,6 @@ export class VoiceDaemon {
         }
         return;
       }
-      case "confirm_question":
-        // The phone tapped CONFIRM at the end of the wizard → drive the picker with every collected answer.
-        await this.confirmQuestion(event.toolUseId);
-        return;
-      case "redo_answer":
-        // The phone tapped BACK → drop the last collected answer so the user can re-speak that sub-question.
-        this.redoAnswer(event.toolUseId);
-        return;
       default:
         return;
     }
@@ -714,8 +706,8 @@ export class VoiceDaemon {
       return;
     }
     // If Claude is paused on an interactive question, the spoken transcript is an ANSWER to the wizard's
-    // CURRENT sub-question — collect it (the picker is driven only on the final CONFIRM, see confirmQuestion),
-    // not a new prompt. The overlay holds the growing answers; the phone advances to the next sub-question.
+    // CURRENT sub-question — collect it (collectQuestionAnswer auto-submits once the last one is spoken), not a
+    // new prompt. The overlay holds the growing answers; the phone advances to the next sub-question.
     const pending = this.pendingQuestion(this.projectedNow());
     if (pending?.question) {
       this.collectQuestionAnswer(transcript);
@@ -779,10 +771,11 @@ export class VoiceDaemon {
   }
 
   // Collect one spoken answer for the SEQUENTIAL question wizard. The daemon holds the growing answers on the
-  // pending overlay; the picker is driven only on CONFIRM (atomically, from a known fresh state). Pushes the
-  // next answer, or — once every sub-question already has one — REPLACES the last (a spoken re-do of the
-  // final/only answer before confirming). Re-projects so the phone advances and clears its mic spinner from
-  // the fresh snapshot. If the overlay vanished in a race, don't drop the words — treat them as a prompt.
+  // pending overlay, then AUTO-SUBMITS the moment the last sub-question is answered — no confirm tap, so the
+  // wizard is fully hands-free. Pushes the next answer; the `else` only fires if a spoken answer races in after
+  // the last was already collected (the submit hasn't flushed) — it replaces the last, harmless under the
+  // submit latch. Re-projects so the phone advances and clears its mic spinner from the fresh snapshot. If the
+  // overlay vanished in a race, don't drop the words — treat them as a prompt.
   private collectQuestionAnswer(transcript: string): void {
     const q = this.pendingQuestionOverlay?.question;
     if (!q) {
@@ -793,17 +786,20 @@ export class VoiceDaemon {
     const answers = q.answers;
     if (answers.length < q.questions.length) answers.push(transcript);
     else answers[answers.length - 1] = transcript;
-    this.syncFromTranscript();
+    this.syncFromTranscript(); // the phone shows the wrap-up; the card flips to answered as the submit flushes
+    // Every sub-question now has an answer → drive the picker straight away (atomically, from a known fresh
+    // state). The submit latch in submitQuestion makes a racing re-speak a no-op.
+    if (answers.length >= q.questions.length) void this.submitQuestion(q.toolUseId);
   }
 
-  // The phone tapped CONFIRM: drive the picker with every collected answer, in order. Guarded by toolUseId (a
-  // stale confirm is ignored) and the answeringQuestion latch (a double-tap can't double-type). On success the
-  // answer flushes to the transcript and the overlay yields; on a picker miss/failure we surface it so the
+  // The last answer was spoken: drive the picker with every collected answer, in order. Guarded by toolUseId (a
+  // stale submit is ignored) and the answeringQuestion latch (a racing re-speak can't double-type). On success
+  // the answer flushes to the transcript and the overlay yields; on a picker miss/failure we surface it so the
   // user can finish in the terminal, leaving the question up.
-  private async confirmQuestion(toolUseId: string): Promise<void> {
+  private async submitQuestion(toolUseId: string): Promise<void> {
     const q = this.pendingQuestionOverlay?.question;
     if (!q || q.toolUseId !== toolUseId) return; // stale / no pending question
-    // A second confirm in the gap between a successful submit and the answer flushing to the transcript (the
+    // A second submit in the gap between a successful drive and the answer flushing to the transcript (the
     // overlay is still up) must NOT re-drive the now-closed picker (which would surface a spurious "no longer
     // open" error). Latch on the submitted toolUseId until a different question supersedes it.
     if (toolUseId === this.submittedToolUseId) return;
@@ -817,7 +813,7 @@ export class VoiceDaemon {
       this.answeringQuestion = false;
     }
     if (result === "sent") {
-      this.submittedToolUseId = toolUseId; // ignore any repeat confirm until the overlay yields to the answer
+      this.submittedToolUseId = toolUseId; // ignore any repeat submit until the overlay yields to the answer
       this.syncFromTranscript(); // the answer flushes → the card flips to answered, the overlay yields
       return;
     }
@@ -828,18 +824,6 @@ export class VoiceDaemon {
           ? "That question is no longer open — it may have been answered already."
           : "Couldn't submit your answers — finish the question in the terminal."
     });
-  }
-
-  // Step the wizard BACK one sub-question (drop the last collected answer) so the user can re-speak it.
-  private redoAnswer(toolUseId: string): void {
-    const overlay = this.pendingQuestionOverlay;
-    const q = overlay?.question;
-    if (!overlay || !q || q.toolUseId !== toolUseId || !q.answers?.length) return;
-    q.answers.pop();
-    // Forget the now-current sub-question's audio so synthesizeReplies re-reads it aloud on the back-step
-    // (its composite key was marked seen when we first advanced past it).
-    this.seen.delete(`${overlay.uuid}#${q.answers.length}`);
-    this.syncFromTranscript();
   }
 
   // Queue an AUTO prompt (the status/summary requests) behind the running turn — these shouldn't barge into
@@ -1073,7 +1057,7 @@ export class VoiceDaemon {
       if (t.question?.answered) continue;
       if (t.question) {
         // A pending wizard question: read ONLY the current sub-question (chrome-free), not the flat blob.
-        // Past the last sub-question the phone shows the confirm review — nothing left to read.
+        // Past the last sub-question the phone shows the wrap-up + auto-submits — nothing left to read.
         const idx = currentIndex(t);
         if (idx >= t.question.questions.length) continue;
         fresh.push({ key, text: questionSpeechOne(t.question.questions[idx]) });
