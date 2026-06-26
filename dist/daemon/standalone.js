@@ -20231,12 +20231,6 @@ class VoiceDaemon {
         }
         return;
       }
-      case "confirm_question":
-        await this.confirmQuestion(event.toolUseId);
-        return;
-      case "redo_answer":
-        this.redoAnswer(event.toolUseId);
-        return;
       default:
         return;
     }
@@ -20350,8 +20344,10 @@ class VoiceDaemon {
     else
       answers[answers.length - 1] = transcript;
     this.syncFromTranscript();
+    if (answers.length >= q.questions.length)
+      this.submitQuestion(q.toolUseId);
   }
-  async confirmQuestion(toolUseId) {
+  async submitQuestion(toolUseId) {
     const q = this.pendingQuestionOverlay?.question;
     if (!q || q.toolUseId !== toolUseId)
       return;
@@ -20376,15 +20372,6 @@ class VoiceDaemon {
       type: "error",
       message: result === "no-picker" ? "That question is no longer open — it may have been answered already." : "Couldn't submit your answers — finish the question in the terminal."
     });
-  }
-  redoAnswer(toolUseId) {
-    const overlay = this.pendingQuestionOverlay;
-    const q = overlay?.question;
-    if (!overlay || !q || q.toolUseId !== toolUseId || !q.answers?.length)
-      return;
-    q.answers.pop();
-    this.seen.delete(`${overlay.uuid}#${q.answers.length}`);
-    this.syncFromTranscript();
   }
   queueVoice(text) {
     this.turns.enqueueVoice(text);
