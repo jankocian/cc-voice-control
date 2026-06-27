@@ -34,6 +34,11 @@ export type ProjectedTurn = {
   // aloud like a reply, but it is NOT a final reply — isPaneWorking skips it, so the pane stays "working"
   // until Claude's real conclusion lands (which is what resolves the turn).
   question?: QuestionPayload;
+  // Set on a USER turn that was INTERRUPTED (Claude Code wrote a stop marker after it; see isInterruptRecord).
+  // The turn ended with no reply coming, so isPaneWorking treats it as terminal → idle. This is what settles
+  // the lamp when you press the phone's stop button (or Esc in the terminal) mid-turn: an interrupt never
+  // produces a final assistant reply, so without this the transcript-derived lamp would stick on "working".
+  concluded?: boolean;
 };
 
 // Only the transcript fields we read; records carry many more.
@@ -50,6 +55,10 @@ export type TranscriptRecord = {
   // typed response. This is how the answer reaches the transcript (the user record is a tool_result, not a
   // real prompt) — we project it as a "you" turn so the answer is real-log-sourced, not a separate row.
   toolUseResult?: { answers?: unknown };
+  // Present iff this user record is a STOP marker Claude Code writes when the running turn is interrupted
+  // (Esc in the terminal OR the phone's stop button → daemon Esc) — it points at the killed assistant
+  // message. The turn is OVER with no reply coming, so it concludes the working lamp (see isInterruptRecord).
+  interruptedMessageId?: string;
 };
 
 // Real user input is `typed` (terminal OR our voice injection) or `queued` (a prompt Claude queued while
@@ -86,6 +95,22 @@ function isRealUserTurn(r: TranscriptRecord): boolean {
   if (!REAL_PROMPT_SOURCES.has(r.promptSource ?? "")) return false;
   const text = extractText(r.message?.content);
   return text.length > 0 && !text.startsWith("/");
+}
+
+// The STOP marker Claude Code writes when the running turn is interrupted (Esc in the terminal, or the phone
+// stop button → daemon Esc): a `user`-role record carrying `interruptedMessageId` (the killed assistant
+// message) with text "[Request interrupted by user…]". It has NO promptSource, so isRealUserTurn already
+// drops it from the thread — but the interrupt also means the turn ENDED with no reply coming, which the
+// working lamp must see. We key on the structural `interruptedMessageId` (reliable, language-neutral) and
+// fall back to the text marker only on a non-prompt record, so a real typed message can never be mistaken
+// for a stop. Verified against live transcripts (record carries `interruptedMessageId` + the bracket text).
+function isInterruptRecord(r: TranscriptRecord): boolean {
+  if (roleOf(r) !== "user" || r.isSidechain) return false;
+  if (typeof r.interruptedMessageId === "string" && r.interruptedMessageId.length > 0) return true;
+  return (
+    !REAL_PROMPT_SOURCES.has(r.promptSource ?? "") &&
+    extractText(r.message?.content).startsWith("[Request interrupted by user")
+  );
 }
 
 // Assistant text shown to the user: a FINAL reply (terminal stop_reason) or an interim STEP — the
@@ -318,25 +343,36 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
   const turns: ProjectedTurn[] = [];
   const branch = selectActiveBranch(records);
   const { resulted, withAnswers } = toolResultKinds(branch);
+  // The newest user turn pushed so far. An interrupt marker (below) concludes it — the turn it belonged to
+  // ended with no reply coming, so the working lamp must settle. Records are in chronological order, so the
+  // interrupt always trails the user turn it stopped, and a NEW prompt after the interrupt replaces this.
+  let lastUserTurn: ProjectedTurn | undefined;
   for (const r of branch) {
     if (!r.uuid) continue;
     const ts = toEpoch(r.timestamp);
     const parentUuid = r.parentUuid ?? undefined;
+    // A stop marker (Esc / phone stop): not its own row, but it ends the current user turn → idle.
+    if (isInterruptRecord(r)) {
+      if (lastUserTurn) lastUserTurn.concluded = true;
+      continue;
+    }
     const answer = extractQuestionAnswer(r);
     if (answer !== undefined) {
       // The user's reply to an AskUserQuestion, drawn from the real transcript — a normal "you" turn.
-      turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "user", text: answer, interim: false });
+      lastUserTurn = { uuid: r.uuid, parentUuid, timestamp: ts, role: "user", text: answer, interim: false };
+      turns.push(lastUserTurn);
       continue;
     }
     if (isRealUserTurn(r)) {
-      turns.push({
+      lastUserTurn = {
         uuid: r.uuid,
         parentUuid,
         timestamp: ts,
         role: "user",
         text: extractText(r.message?.content),
         interim: false
-      });
+      };
+      turns.push(lastUserTurn);
     } else {
       const q = extractQuestion(r);
       if (q) {
@@ -372,7 +408,10 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
 
 /**
  * Is the pane working, derived from the active branch? True when the newest user turn has no FINAL
- * (non-interim) reply after it yet — Claude is still answering. DERIVED, never counted: however many
+ * (non-interim) reply after it yet — Claude is still answering. An INTERRUPTED turn (its `concluded` flag set
+ * because a stop marker followed it; see projectTurns) is terminal too: no reply is coming, so it reads idle —
+ * that's what settles the lamp the instant the phone's stop button (or terminal Esc) lands. DERIVED, never
+ * counted: however many
  * UserPromptSubmit/Stop hooks fired (a merged prompt fires two opens but one close), the answer's
  * presence in the transcript is ground truth, so the working lamp can never stick. Interim steps don't
  * count as the answer (a turn mid-tool-call is still working). Pass the active-branch-resolved projection
@@ -383,6 +422,7 @@ export function projectTurns(records: TranscriptRecord[], maxTurns = 40): Projec
 export function isPaneWorking(turns: ProjectedTurn[]): boolean {
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role !== "user") continue;
+    if (turns[i].concluded) return false; // the turn was interrupted (Esc / phone stop) → no reply coming → idle
     for (let j = i + 1; j < turns.length; j++) {
       // A non-interim claude turn after the user turn ends the working state — UNLESS it's an unanswered/
       // answered (not aborted) question: that's not the final reply (Claude is awaiting the answer, then the

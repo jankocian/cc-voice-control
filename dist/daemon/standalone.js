@@ -19539,6 +19539,13 @@ function isRealUserTurn(r) {
   const text = extractText(r.message?.content);
   return text.length > 0 && !text.startsWith("/");
 }
+function isInterruptRecord(r) {
+  if (roleOf(r) !== "user" || r.isSidechain)
+    return false;
+  if (typeof r.interruptedMessageId === "string" && r.interruptedMessageId.length > 0)
+    return true;
+  return !REAL_PROMPT_SOURCES.has(r.promptSource ?? "") && extractText(r.message?.content).startsWith("[Request interrupted by user");
+}
 function claudeText(r) {
   if (roleOf(r) !== "assistant" || r.isSidechain)
     return;
@@ -19681,25 +19688,33 @@ function projectTurns(records, maxTurns = 40) {
   const turns = [];
   const branch = selectActiveBranch(records);
   const { resulted, withAnswers } = toolResultKinds(branch);
+  let lastUserTurn;
   for (const r of branch) {
     if (!r.uuid)
       continue;
     const ts = toEpoch(r.timestamp);
     const parentUuid = r.parentUuid ?? undefined;
+    if (isInterruptRecord(r)) {
+      if (lastUserTurn)
+        lastUserTurn.concluded = true;
+      continue;
+    }
     const answer = extractQuestionAnswer(r);
     if (answer !== undefined) {
-      turns.push({ uuid: r.uuid, parentUuid, timestamp: ts, role: "user", text: answer, interim: false });
+      lastUserTurn = { uuid: r.uuid, parentUuid, timestamp: ts, role: "user", text: answer, interim: false };
+      turns.push(lastUserTurn);
       continue;
     }
     if (isRealUserTurn(r)) {
-      turns.push({
+      lastUserTurn = {
         uuid: r.uuid,
         parentUuid,
         timestamp: ts,
         role: "user",
         text: extractText(r.message?.content),
         interim: false
-      });
+      };
+      turns.push(lastUserTurn);
     } else {
       const q = extractQuestion(r);
       if (q) {
@@ -19732,6 +19747,8 @@ function isPaneWorking(turns) {
   for (let i = turns.length - 1;i >= 0; i--) {
     if (turns[i].role !== "user")
       continue;
+    if (turns[i].concluded)
+      return false;
     for (let j = i + 1;j < turns.length; j++) {
       if (turns[j].role === "claude" && !turns[j].interim && (!turns[j].question || turns[j].question?.aborted))
         return false;
@@ -19973,6 +19990,7 @@ class VoiceDaemon {
   answeringQuestion = false;
   pendingQuestionOverlay;
   lastReconciledAbort;
+  lastReconciledInterrupt;
   submittedToolUseId;
   speakMode = "final";
   inheritedPermissionMode;
@@ -20335,6 +20353,20 @@ class VoiceDaemon {
     this.lastReconciledAbort = aborted2;
     this.turns.turnClosed();
   }
+  reconcileInterrupt(turns) {
+    let concluded;
+    for (let i = turns.length - 1;i >= 0; i--) {
+      if (turns[i].role !== "user")
+        continue;
+      if (turns[i].concluded)
+        concluded = turns[i].uuid;
+      break;
+    }
+    if (!concluded || concluded === this.lastReconciledInterrupt)
+      return;
+    this.lastReconciledInterrupt = concluded;
+    this.turns.turnClosed();
+  }
   collectQuestionAnswer(transcript) {
     const q = this.pendingQuestionOverlay?.question;
     if (!q) {
@@ -20463,6 +20495,7 @@ class VoiceDaemon {
   }
   reflect(turns, force) {
     this.reconcileAbort(turns);
+    this.reconcileInterrupt(turns);
     const shown = dropSessionAnnouncement(turns, this.init.browserUrl);
     const sig = shown.map((t) => `${t.uuid}:${t.interim ? "i" : ""}:${t.text.length}:${this.audio.has(t.uuid) ? "a" : ""}:${t.question ? t.question.answered ? "qa" : "q" : ""}`).join("|");
     if (force || sig !== this.lastHistorySig) {
